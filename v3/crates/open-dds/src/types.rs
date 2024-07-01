@@ -8,7 +8,9 @@ use serde::{
     Deserialize, Serialize,
 };
 
+use crate::commands::ArgumentMapping;
 use crate::{
+    arguments::ArgumentName,
     data_connector::{
         DataConnectorColumnName, DataConnectorName, DataConnectorObjectType,
         DataConnectorScalarType,
@@ -61,13 +63,12 @@ impl CustomTypeName {
         let identifier = Identifier::new(s)?;
         // Should not be an inbuilt type
         if InbuiltType::deserialize(StrDeserializer::<serde::de::value::Error>::new(
-            identifier.0.as_str(),
+            identifier.as_str(),
         ))
         .is_ok()
         {
             Err(format!(
-                "custom types cannot have the same name as an inbuilt type: {}",
-                identifier.0
+                "custom types cannot have the same name as an inbuilt type: {identifier}"
             ))
         } else {
             Ok(CustomTypeName(identifier))
@@ -299,6 +300,18 @@ impl ObjectType {
                             "name": "last_name",
                             "type": "String",
                             "description": "The last name of the author"
+                        },
+                        {
+                            "name": "biography",
+                            "type": "String",
+                            "description": "AI generated biography for the author",
+                            "arguments": [
+                                {
+                                    "name": "ai_model",
+                                    "argumentType": "String!",
+                                    "description": "The AI model to use for generating the biography"
+                                }
+                            ]
                         }
                     ],
                     "description": "An author of a book",
@@ -308,17 +321,33 @@ impl ObjectType {
                     "graphql": {
                         "typeName": "Author"
                     },
-                    "dataConnectorTypeMapping": [{
-                        "dataConnectorName": "my_db",
-                        "dataConnectorObjectType": "author",
-                        "fieldMapping": {
-                            "author_id": {
-                                "column": {
-                                    "name": "id"
+                    "dataConnectorTypeMapping": [
+                        {
+                            "dataConnectorName": "my_db",
+                            "dataConnectorObjectType": "author",
+                            "fieldMapping": {
+                                "author_id": {
+                                    "column": {
+                                        "name": "id"
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "dataConnectorName": "my_vector_db",
+                            "dataConnectorObjectType": "author",
+                            "fieldMapping": {
+                                "biography": {
+                                    "column": {
+                                        "name": "biography",
+                                        "argumentMapping": {
+                                            "ai_model": "model"
+                                        }
+                                    }
                                 }
                             }
                         }
-                    }]
+                    ]
                 }
             }
         )
@@ -395,7 +424,7 @@ pub enum FieldMapping {
     Column(ColumnFieldMapping),
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, opendds_derive::OpenDd)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "ColumnFieldMapping")]
@@ -403,7 +432,27 @@ pub enum FieldMapping {
 pub struct ColumnFieldMapping {
     /// The name of the target column
     pub name: DataConnectorColumnName, // TODO: Map field arguments
+
+    /// Arguments to the column field
+    pub argument_mapping: Option<ArgumentMapping>,
 }
+
+#[repr(transparent)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
+    JsonSchema,
+    opendds_derive::OpenDd,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+)]
+#[schemars(title = "DataConnectorArgumentName")]
+pub struct DataConnectorArgumentName(pub String);
 
 /// The name of a field in a user-defined object type.
 #[derive(
@@ -451,6 +500,10 @@ pub struct FieldDefinition {
     /// Whether this field is deprecated.
     /// If set, the deprecation status is added to the field's graphql schema.
     pub deprecated: Option<Deprecated>,
+
+    /// The arguments for the field
+    #[opendd(default, json_schema(default_exp = "serde_json::json!([])"))]
+    pub arguments: Vec<FieldArgumentDefinition>,
 }
 
 /// GraphQL configuration of an Open DD scalar type
@@ -719,4 +772,13 @@ pub struct ObjectApolloFederationConfig {
 #[opendd(json_schema(title = "ApolloFederationObjectKey"))]
 pub struct ApolloFederationObjectKey {
     pub fields: Vec<FieldName>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[opendd(json_schema(title = "FieldArgumentDefinition"))]
+pub struct FieldArgumentDefinition {
+    pub name: ArgumentName,
+    pub argument_type: TypeReference,
+    pub description: Option<String>,
 }

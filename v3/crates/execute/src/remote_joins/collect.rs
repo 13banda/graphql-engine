@@ -106,9 +106,18 @@ fn collect_argument_from_rows(
                     ProcessResponseAs::Array { .. } | ProcessResponseAs::Object { .. } => {
                         collect_argument_from_row(row, join_fields, path, &mut arguments)?;
                     }
+                    ProcessResponseAs::Aggregates { .. } => {
+                        return Err(error::FieldInternalError::InternalGeneric {
+                            description:
+                                "Unexpected aggregate response on the LHS of a remote join"
+                                    .to_owned(),
+                        }
+                        .into())
+                    }
                     ProcessResponseAs::CommandResponse {
                         command_name: _,
                         type_container,
+                        response_config: _,
                     } => {
                         let mut command_rows = resolve_command_response_row(row, type_container)?;
                         for command_row in &mut command_rows {
@@ -261,7 +270,7 @@ fn resolve_command_response_row(
 ) -> Result<Vec<IndexMap<String, ndc_models::RowFieldValue>>, error::FieldError> {
     let field_value_result = row.get(FUNCTION_IR_VALUE_COLUMN_NAME).ok_or_else(|| {
         error::NDCUnexpectedError::BadNDCResponse {
-            summary: format!("missing field: {}", FUNCTION_IR_VALUE_COLUMN_NAME),
+            summary: format!("missing field: {FUNCTION_IR_VALUE_COLUMN_NAME}"),
         }
     })?;
 
@@ -305,7 +314,7 @@ fn resolve_command_response_row(
             // the array and use that as the value for the relationship otherwise
             // we return the array of objects.
             let array_values: Vec<IndexMap<String, ndc_models::RowFieldValue>> =
-                    json::from_value(json::Value::Array(values.to_vec()))?;
+                    json::from_value(json::Value::Array(values.clone()))?;
 
             if type_container.is_list(){
                 Ok(array_values)

@@ -1,14 +1,16 @@
 mod error;
 mod explain;
 mod global_id;
-mod ir;
-mod model_tracking;
-mod ndc;
+pub mod ir;
+pub mod model_tracking;
+pub mod ndc;
 mod plan;
 mod process_response;
+mod query_usage;
 mod remote_joins;
 
-use indexmap::IndexMap;
+pub use plan::process_model_relationship_definition;
+use plan::ExecuteQueryResult;
 use thiserror::Error;
 
 use gql::normalized_ast::Operation;
@@ -28,9 +30,11 @@ use tracing_util::{
 // we explicitly export things used by other crates
 pub use explain::execute_explain;
 pub use explain::types::{redact_ndc_explain, ExplainResponse};
+pub use ndc::fetch_from_data_connector;
 pub use plan::{execute_mutation_plan, execute_query_plan, generate_request_plan, RequestPlan};
 
 /// Context for making HTTP requests
+#[derive(Debug, Clone)]
 pub struct HttpContext {
     /// The HTTP client to use for making requests
     pub client: reqwest::Client,
@@ -62,7 +66,38 @@ impl<'a> TraceableError for GraphQLErrors<'a> {
 }
 
 /// A simple wrapper around a GraphQL HTTP response
-pub struct GraphQLResponse(pub gql::http::Response);
+pub struct GraphQLResponse(gql::http::Response);
+
+impl GraphQLResponse {
+    pub fn from_result(
+        result: ExecuteQueryResult,
+        expose_internal_errors: ExposeInternalErrors,
+    ) -> Self {
+        Self(result.to_graphql_response(expose_internal_errors))
+    }
+
+    pub fn from_error(
+        err: &error::RequestError,
+        expose_internal_errors: ExposeInternalErrors,
+    ) -> Self {
+        Self(Response::error(
+            err.to_graphql_error(expose_internal_errors),
+            axum::http::HeaderMap::default(),
+        ))
+    }
+
+    pub fn from_response(response: gql::http::Response) -> Self {
+        Self(response)
+    }
+
+    pub fn does_contain_error(&self) -> bool {
+        self.0.does_contains_error()
+    }
+
+    pub fn inner(self) -> gql::http::Response {
+        self.0
+    }
+}
 
 /// Implement traceable for GraphQL Response
 impl Traceable for GraphQLResponse {
@@ -77,15 +112,25 @@ impl Traceable for GraphQLResponse {
 pub struct ProjectId(pub String);
 
 pub async fn execute_query(
+    expose_internal_errors: ExposeInternalErrors,
     http_context: &HttpContext,
     schema: &Schema<GDS>,
     session: &Session,
+    request_headers: &reqwest::header::HeaderMap,
     request: RawRequest,
     project_id: Option<&ProjectId>,
 ) -> GraphQLResponse {
-    execute_query_internal(http_context, schema, session, request, project_id)
-        .await
-        .unwrap_or_else(|e| GraphQLResponse(Response::error(e.to_graphql_error())))
+    execute_query_internal(
+        expose_internal_errors,
+        http_context,
+        schema,
+        session,
+        request_headers,
+        request,
+        project_id,
+    )
+    .await
+    .unwrap_or_else(|e| GraphQLResponse::from_error(&e, expose_internal_errors))
 }
 
 #[derive(Error, Debug)]
@@ -107,11 +152,19 @@ impl TraceableError for GraphQlValidationError {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ExposeInternalErrors {
+    Expose,
+    Censor,
+}
+
 /// Executes a GraphQL query
 pub async fn execute_query_internal(
+    expose_internal_errors: ExposeInternalErrors,
     http_context: &HttpContext,
     schema: &gql::schema::Schema<GDS>,
     session: &Session,
+    request_headers: &reqwest::header::HeaderMap,
     raw_request: gql::http::RawRequest,
     project_id: Option<&ProjectId>,
 ) -> Result<GraphQLResponse, error::RequestError> {
@@ -141,13 +194,13 @@ pub async fn execute_query_internal(
                         normalize_request(schema, session, query, raw_request)?;
 
                     // generate IR
-                    let ir = build_ir(schema, session, &normalized_request)?;
+                    let ir = build_ir(schema, session, request_headers, &normalized_request)?;
 
                     // construct a plan to execute the request
                     let request_plan = build_request_plan(&ir)?;
 
                     let display_name = match normalized_request.name {
-                        Some(ref name) => std::borrow::Cow::Owned(format!("Execute {}", name)),
+                        Some(ref name) => std::borrow::Cow::Owned(format!("Execute {name}")),
                         None => std::borrow::Cow::Borrowed("Execute request plan"),
                     };
 
@@ -157,13 +210,14 @@ pub async fn execute_query_internal(
                             let all_usage_counts =
                                 model_tracking::get_all_usage_counts_in_query(&ir);
                             let serialized_data = serde_json::to_string(&all_usage_counts).unwrap();
+
                             set_attribute_on_active_span(
                                 AttributeVisibility::Default,
                                 "usage_counts",
                                 serialized_data,
                             );
 
-                            Box::pin(async {
+                            let execute_response = Box::pin(async {
                                 let execute_query_result = match request_plan {
                                     plan::RequestPlan::MutationPlan(mutation_plan) => {
                                         plan::execute_mutation_plan(
@@ -182,8 +236,35 @@ pub async fn execute_query_internal(
                                         .await
                                     }
                                 };
-                                GraphQLResponse(execute_query_result.to_graphql_response())
-                            })
+
+                                GraphQLResponse::from_result(
+                                    execute_query_result,
+                                    expose_internal_errors,
+                                )
+                            });
+
+                            // Analyze the query usage
+                            // It is attached to this span as an attribute
+                            match analyze_query_usage(&normalized_request) {
+                                Err(analyze_error) => {
+                                    // Set query usage analytics error as a span attribute
+                                    set_attribute_on_active_span(
+                                        AttributeVisibility::Internal,
+                                        "query_usage_analytics_error",
+                                        analyze_error.to_string(),
+                                    );
+                                }
+                                Ok(query_usage_analytics) => {
+                                    // Set query usage analytics as a span attribute
+                                    set_attribute_on_active_span(
+                                        AttributeVisibility::Internal,
+                                        "query_usage_analytics",
+                                        query_usage_analytics,
+                                    );
+                                }
+                            }
+
+                            execute_response
                         })
                         .await;
                     Ok(response)
@@ -195,9 +276,11 @@ pub async fn execute_query_internal(
 
 /// Explains (query plan) a GraphQL query
 pub async fn explain_query_internal(
+    expose_internal_errors: ExposeInternalErrors,
     http_context: &HttpContext,
     schema: &gql::schema::Schema<GDS>,
     session: &Session,
+    request_headers: &reqwest::header::HeaderMap,
     raw_request: gql::http::RawRequest,
 ) -> Result<explain::types::ExplainResponse, error::RequestError> {
     let tracer = tracing_util::global_tracer();
@@ -226,7 +309,7 @@ pub async fn explain_query_internal(
                         normalize_request(schema, session, query, raw_request)?;
 
                     // generate IR
-                    let ir = build_ir(schema, session, &normalized_request)?;
+                    let ir = build_ir(schema, session, request_headers, &normalized_request)?;
 
                     // construct a plan to execute the request
                     let request_plan = build_request_plan(&ir)?;
@@ -242,6 +325,7 @@ pub async fn explain_query_internal(
                                     let request_result = match request_plan {
                                         plan::RequestPlan::MutationPlan(mutation_plan) => {
                                             crate::explain::explain_mutation_plan(
+                                                expose_internal_errors,
                                                 http_context,
                                                 mutation_plan,
                                             )
@@ -249,6 +333,7 @@ pub async fn explain_query_internal(
                                         }
                                         plan::RequestPlan::QueryPlan(query_plan) => {
                                             crate::explain::explain_query_plan(
+                                                expose_internal_errors,
                                                 http_context,
                                                 query_plan,
                                             )
@@ -259,7 +344,7 @@ pub async fn explain_query_internal(
                                     match request_result {
                                         Ok(step) => step.make_explain_response(),
                                         Err(e) => explain::types::ExplainResponse::error(
-                                            e.to_graphql_error(),
+                                            e.to_graphql_error(expose_internal_errors),
                                         ),
                                     }
                                 })
@@ -325,8 +410,9 @@ pub(crate) fn normalize_request<'s>(
                     variables: raw_request.variables.unwrap_or_default(),
                 };
                 gql::validation::normalize_request(
-                    &GDSRoleNamespaceGetter,
-                    &session.role,
+                    &GDSRoleNamespaceGetter {
+                        scope: session.role.clone(),
+                    },
                     schema,
                     &request,
                 )
@@ -341,21 +427,22 @@ pub(crate) fn normalize_request<'s>(
 pub(crate) fn build_ir<'n, 's>(
     schema: &'s gql::schema::Schema<GDS>,
     session: &Session,
+    request_headers: &reqwest::header::HeaderMap,
     normalized_request: &'s Operation<'s, GDS>,
-) -> Result<IndexMap<ast::Alias, ir::root_field::RootField<'n, 's>>, ir::error::Error> {
+) -> Result<ir::IR<'n, 's>, ir::error::Error> {
     let tracer = tracing_util::global_tracer();
     let ir = tracer.in_span(
         "generate_ir",
         "Generate IR for the request",
         SpanVisibility::Internal,
-        || generate_ir(schema, session, normalized_request),
+        || generate_ir(schema, session, request_headers, normalized_request),
     )?;
     Ok(ir)
 }
 
 /// Build a plan to execute the request
 pub(crate) fn build_request_plan<'n, 's, 'ir>(
-    ir: &'ir IndexMap<ast::Alias, ir::root_field::RootField<'n, 's>>,
+    ir: &'ir ir::IR<'n, 's>,
 ) -> Result<plan::RequestPlan<'n, 's, 'ir>, plan::error::Error> {
     let tracer = tracing_util::global_tracer();
     let plan = tracer.in_span(
@@ -370,20 +457,46 @@ pub(crate) fn build_request_plan<'n, 's, 'ir>(
 pub fn generate_ir<'n, 's>(
     schema: &'s gql::schema::Schema<GDS>,
     session: &Session,
+    request_headers: &reqwest::header::HeaderMap,
     normalized_request: &'s Operation<'s, GDS>,
-) -> Result<IndexMap<ast::Alias, ir::root_field::RootField<'n, 's>>, ir::error::Error> {
-    let ir = match &normalized_request.ty {
+) -> Result<ir::IR<'n, 's>, ir::error::Error> {
+    match &normalized_request.ty {
         ast::OperationType::Query => {
-            ir::query_root::generate_ir(schema, session, &normalized_request.selection_set)?
+            let query_ir = ir::query_root::generate_ir(
+                schema,
+                session,
+                request_headers,
+                &normalized_request.selection_set,
+            )?;
+            Ok(ir::IR::Query(query_ir))
         }
         ast::OperationType::Mutation => {
-            ir::mutation_root::generate_ir(&normalized_request.selection_set, &session.variables)?
+            let mutation_ir = ir::mutation_root::generate_ir(
+                &normalized_request.selection_set,
+                &session.variables,
+                request_headers,
+            )?;
+            Ok(ir::IR::Mutation(mutation_ir))
         }
         ast::OperationType::Subscription => {
             Err(ir::error::InternalEngineError::SubscriptionsNotSupported)?
         }
-    };
-    Ok(ir)
+    }
+}
+
+fn analyze_query_usage<'s>(
+    normalized_request: &'s Operation<'s, GDS>,
+) -> Result<String, error::QueryUsageAnalyzeError> {
+    let tracer = tracing_util::global_tracer();
+    tracer.in_span(
+        "analyze_query_usage",
+        "Analyze query usage",
+        SpanVisibility::Internal,
+        || {
+            let query_usage_analytics = query_usage::analyze_query_usage(normalized_request);
+            Ok(serde_json::to_string(&query_usage_analytics)?)
+        },
+    )
 }
 
 #[cfg(test)]
@@ -402,6 +515,7 @@ mod tests {
     };
 
     use super::generate_ir;
+    use super::query_usage::analyze_query_usage;
     use schema::GDS;
 
     #[test]
@@ -418,6 +532,7 @@ mod tests {
             let path = input_file?.path();
             assert!(path.is_dir());
 
+            let request_headers = reqwest::header::HeaderMap::new();
             let test_name = path
                 .file_name()
                 .ok_or_else(|| format!("{path:?} is not a normal file or directory"))?;
@@ -438,13 +553,14 @@ mod tests {
             };
 
             let normalized_request = normalize_request(
-                &schema::GDSRoleNamespaceGetter,
-                &session.role,
+                &schema::GDSRoleNamespaceGetter {
+                    scope: session.role.clone(),
+                },
                 &schema,
                 &request,
             )?;
 
-            let ir = generate_ir(&schema, &session, &normalized_request)?;
+            let ir = generate_ir(&schema, &session, &request_headers, &normalized_request)?;
             let mut expected = mint.new_goldenfile_with_differ(
                 expected_path,
                 Box::new(|file1, file2| {
@@ -453,13 +569,75 @@ mod tests {
                     let json2: serde_json::Value =
                         serde_json::from_reader(File::open(file2).unwrap()).unwrap();
                     if json1 != json2 {
-                        text_diff(file1, file2)
+                        text_diff(file1, file2);
                     }
                 }),
             )?;
             write!(expected, "{}", serde_json::to_string_pretty(&ir)?)?;
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_query_usage_analytics() -> Result<(), Box<dyn std::error::Error>> {
+        let test_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("query_usage_analytics");
+        let mut mint = Mint::new(&test_dir);
+
+        let schema = fs::read_to_string(test_dir.join("schema.json"))?;
+
+        let gds = GDS::new_with_default_flags(open_dds::Metadata::from_json_str(&schema)?)?;
+        let schema = GDS::build_schema(&gds)?;
+
+        for test_dir in fs::read_dir(test_dir)? {
+            let path = test_dir?.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let test_name = path
+                .file_name()
+                .ok_or_else(|| format!("{path:?} is not a normal file or directory"))?;
+
+            let raw_request = fs::read_to_string(path.join("request.gql"))?;
+            let expected_path = PathBuf::from(test_name).join("expected.json");
+
+            let session_vars_path = path.join("session_variables.json");
+            let session = resolve_session(session_vars_path);
+            let query = Parser::new(&raw_request).parse_executable_document()?;
+
+            let request = Request {
+                operation_name: None,
+                query,
+                variables: HashMap::new(),
+            };
+
+            let normalized_request = normalize_request(
+                &schema::GDSRoleNamespaceGetter {
+                    scope: session.role.clone(),
+                },
+                &schema,
+                &request,
+            )?;
+
+            let query_usage = analyze_query_usage(&normalized_request);
+            let mut expected = mint.new_goldenfile_with_differ(
+                expected_path,
+                Box::new(|file1, file2| {
+                    let json1: serde_json::Value =
+                        serde_json::from_reader(File::open(file1).unwrap()).unwrap();
+                    let json2: serde_json::Value =
+                        serde_json::from_reader(File::open(file2).unwrap()).unwrap();
+                    if json1 != json2 {
+                        text_diff(file1, file2);
+                    }
+                }),
+            )?;
+            write!(expected, "{}", serde_json::to_string_pretty(&query_usage)?)?;
+        }
         Ok(())
     }
 

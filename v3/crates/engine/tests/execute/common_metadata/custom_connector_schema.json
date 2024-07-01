@@ -15,6 +15,22 @@
               }
             },
             "headers": {},
+            "argumentPresets": [
+              {
+                "argument": "_headers",
+                "value": {
+                  "httpHeaders": {
+                    "forward": ["cookie", "authorization", "x-hasura-role"],
+                    "additional": {}
+                  }
+                }
+              }
+            ],
+            "responseHeaders": {
+              "headersField": "headers",
+              "resultField": "response",
+              "forwardHeaders": ["set-cookie"]
+            },
             "schema": {
               "version": "v0.1",
               "schema": {
@@ -64,6 +80,28 @@
                         "type": "custom"
                       }
                     }
+                  },
+                  "Bool": {
+                    "representation": {
+                      "type": "boolean"
+                    },
+                    "aggregate_functions": {},
+                    "comparison_operators": {
+                      "eq": {
+                        "type": "custom",
+                        "argument_type": {
+                          "type": "named",
+                          "name": "Bool"
+                        }
+                      }
+                    }
+                  },
+                  "HeaderMap": {
+                    "representation": {
+                      "type": "json"
+                    },
+                    "aggregate_functions": {},
+                    "comparison_operators": {}
                   }
                 },
                 "object_types": {
@@ -93,9 +131,48 @@
                       }
                     }
                   },
+                  "genre": {
+                    "description": "A movie genre",
+                    "fields": {
+                      "id": {
+                        "description": "The genre's primary key",
+                        "type": {
+                          "type": "named",
+                          "name": "Int"
+                        }
+                      },
+                      "movies": {
+                        "description": "Notable movies of this genre",
+                        "type": {
+                          "type": "array",
+                          "element_type": {
+                            "type": "named",
+                            "name": "movie"
+                          }
+                        }
+                      },
+                      "name": {
+                        "description": "The genre's name",
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      }
+                    }
+                  },
                   "movie": {
                     "description": "A movie",
                     "fields": {
+                      "genres": {
+                        "description": "The movie's genres",
+                        "type": {
+                          "type": "array",
+                          "element_type": {
+                            "type": "named",
+                            "name": "genre"
+                          }
+                        }
+                      },
                       "id": {
                         "description": "The movie's primary key",
                         "type": {
@@ -176,6 +253,36 @@
                         "type": {
                           "type": "named",
                           "name": "String"
+                        },
+                        "arguments": {
+                          "change_case": {
+                            "description": "Change the case of a string",
+                            "type": {
+                              "type": "named",
+                              "name": "String"
+                            }
+                          },
+                          "hash": {
+                            "description": "Hash a string",
+                            "type": {
+                              "type": "named",
+                              "name": "String"
+                            }
+                          },
+                          "limit": {
+                            "description": "Limit the length of a string",
+                            "type": {
+                              "type": "named",
+                              "name": "Int"
+                            }
+                          },
+                          "offset": {
+                            "description": "Offset the length of a string",
+                            "type": {
+                              "type": "named",
+                              "name": "Int"
+                            }
+                          }
                         }
                       },
                       "staff": {
@@ -254,6 +361,63 @@
                         }
                       }
                     }
+                  },
+                  "login_response": {
+                    "description": "Response to a login action",
+                    "fields": {
+                      "headers": {
+                        "description": "Response headers to be forwarded",
+                        "type": {
+                          "type": "named",
+                          "name": "HeaderMap"
+                        }
+                      },
+                      "response": {
+                        "description": "Authentication successful or not",
+                        "type": {
+                          "type": "named",
+                          "name": "Bool"
+                        }
+                      }
+                    }
+                  },
+                  "session_info": {
+                    "description": "Session details",
+                    "fields": {
+                      "expiry": {
+                        "description": "Token expiry",
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      },
+                      "token": {
+                        "description": "Session token",
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      }
+                    }
+                  },
+                  "session_response": {
+                    "description": "Response of session details",
+                    "fields": {
+                      "headers": {
+                        "description": "Response headers to be forwarded",
+                        "type": {
+                          "type": "named",
+                          "name": "HeaderMap"
+                        }
+                      },
+                      "response": {
+                        "description": "Session details",
+                        "type": {
+                          "type": "named",
+                          "name": "session_info"
+                        }
+                      }
+                    }
                   }
                 },
                 "collections": [
@@ -291,6 +455,21 @@
                         "unique_columns": ["id"]
                       }
                     },
+                    "foreign_keys": {}
+                  },
+                  {
+                    "name": "actors_by_movie",
+                    "description": "Actors parameterized by movie",
+                    "arguments": {
+                      "movie_id": {
+                        "type": {
+                          "type": "named",
+                          "name": "Int"
+                        }
+                      }
+                    },
+                    "type": "actor",
+                    "uniqueness_constraints": {},
                     "foreign_keys": {}
                   },
                   {
@@ -555,6 +734,30 @@
                         "name": "institution"
                       }
                     }
+                  },
+                  {
+                    "name": "get_session_details",
+                    "description": "Get session details of a user",
+                    "arguments": {
+                      "_headers": {
+                        "description": "headers required for session details",
+                        "type": {
+                          "type": "named",
+                          "name": "HeaderMap"
+                        }
+                      },
+                      "user_id": {
+                        "description": "user id of the user",
+                        "type": {
+                          "type": "named",
+                          "name": "Int"
+                        }
+                      }
+                    },
+                    "result_type": {
+                      "type": "named",
+                      "name": "session_response"
+                    }
                   }
                 ],
                 "procedures": [
@@ -618,6 +821,23 @@
                     }
                   },
                   {
+                    "name": "add_movie_with_genres",
+                    "description": "Add a movie with genres",
+                    "arguments": {
+                      "movie": {
+                        "description": "The movie to add",
+                        "type": {
+                          "type": "named",
+                          "name": "movie"
+                        }
+                      }
+                    },
+                    "result_type": {
+                      "type": "named",
+                      "name": "movie"
+                    }
+                  },
+                  {
                     "name": "uppercase_actor_name_by_id",
                     "description": "Uppercase an actor name given the ID",
                     "arguments": {
@@ -666,6 +886,37 @@
                         }
                       }
                     }
+                  },
+                  {
+                    "name": "login",
+                    "description": "Perform a user login",
+                    "arguments": {
+                      "_headers": {
+                        "description": "headers required for authentication",
+                        "type": {
+                          "type": "named",
+                          "name": "HeaderMap"
+                        }
+                      },
+                      "password": {
+                        "description": "password of the user",
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      },
+                      "username": {
+                        "description": "username of the user",
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      }
+                    },
+                    "result_type": {
+                      "type": "named",
+                      "name": "login_response"
+                    }
                   }
                 ]
               },
@@ -674,7 +925,11 @@
                   "query": {
                     "explain": {},
                     "aggregates": {},
-                    "variables": {}
+                    "variables": {},
+                    "nested_fields": {
+                      "filter_by": {},
+                      "order_by": {}
+                    }
                   },
                   "mutation": {},
                   "relationships": {
@@ -682,7 +937,7 @@
                     "order_by_aggregate": {}
                   }
                 },
-                "version": "0.1.0"
+                "version": "0.1.3"
               }
             }
           }

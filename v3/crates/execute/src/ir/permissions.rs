@@ -4,7 +4,10 @@ use hasura_authn_core::{SessionVariableValue, SessionVariables};
 use lang_graphql::normalized_ast;
 use ndc_models;
 
-use open_dds::{data_connector::DataConnectorColumnName, types::InbuiltType};
+use open_dds::{
+    data_connector::{DataConnectorColumnName, DataConnectorOperatorName},
+    types::InbuiltType,
+};
 
 use crate::ir::error;
 use crate::model_tracking::{count_model, UsagesCounts};
@@ -31,7 +34,8 @@ pub(crate) fn get_select_filter_predicate<'s>(
             schema::NamespaceAnnotation::Model { filter, .. } => Some(filter),
             schema::NamespaceAnnotation::NodeFieldTypeMappings(_)
             | schema::NamespaceAnnotation::EntityTypeMappings(_)
-            | schema::NamespaceAnnotation::Command(_) => None,
+            | schema::NamespaceAnnotation::Command(_)
+            | schema::NamespaceAnnotation::InputFieldPresets { .. } => None,
         })
         // If we're hitting this case, it means that the caller of this
         // function expects a filter predicate, but it was not annotated
@@ -72,7 +76,7 @@ pub(crate) fn get_argument_presets(
     }
 }
 
-pub(crate) fn process_model_predicate<'s>(
+pub fn process_model_predicate<'s>(
     model_predicate: &'s metadata_resolve::ModelPredicate,
     session_variables: &SessionVariables,
     relationships: &mut BTreeMap<NDCRelationshipName, LocalModelRelationshipInfo<'s>>,
@@ -81,14 +85,16 @@ pub(crate) fn process_model_predicate<'s>(
     match model_predicate {
         metadata_resolve::ModelPredicate::UnaryFieldComparison {
             field: _,
+            field_parent_type: _,
             ndc_column,
             operator,
         } => Ok(make_permission_unary_boolean_expression(
             ndc_column.clone(),
             *operator,
-        )?),
+        )),
         metadata_resolve::ModelPredicate::BinaryFieldComparison {
             field: _,
+            field_parent_type: _,
             ndc_column,
             argument_type,
             operator,
@@ -167,7 +173,7 @@ pub(crate) fn process_model_predicate<'s>(
 fn make_permission_binary_boolean_expression(
     ndc_column: DataConnectorColumnName,
     argument_type: &QualifiedTypeReference,
-    operator: &str,
+    operator: &DataConnectorOperatorName,
     value_expression: &metadata_resolve::ValueExpression,
     session_variables: &SessionVariables,
     usage_counts: &mut UsagesCounts,
@@ -182,8 +188,9 @@ fn make_permission_binary_boolean_expression(
         column: ndc_models::ComparisonTarget::Column {
             name: ndc_column.0,
             path: Vec::new(),
+            field_path: None,
         },
-        operator: operator.to_owned(),
+        operator: operator.0.clone(),
         value: ndc_models::ComparisonValue::Scalar {
             value: ndc_expression_value,
         },
@@ -193,14 +200,15 @@ fn make_permission_binary_boolean_expression(
 fn make_permission_unary_boolean_expression(
     ndc_column: DataConnectorColumnName,
     operator: ndc_models::UnaryComparisonOperator,
-) -> Result<ndc_models::Expression, error::Error> {
-    Ok(ndc_models::Expression::UnaryComparisonOperator {
+) -> ndc_models::Expression {
+    ndc_models::Expression::UnaryComparisonOperator {
         column: ndc_models::ComparisonTarget::Column {
             name: ndc_column.0,
             path: Vec::new(),
+            field_path: None,
         },
         operator,
-    })
+    }
 }
 
 pub(crate) fn make_value_from_value_expression(

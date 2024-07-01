@@ -1,27 +1,28 @@
-use crate::stages::{data_connectors, models, object_types, relationships};
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use open_dds::{
+    arguments::ArgumentName,
+    data_connector::{DataConnectorColumnName, DataConnectorOperatorName},
+    models::ModelName,
+    permissions::Role,
+    relationships::{RelationshipName, RelationshipType},
+    types::{CustomTypeName, FieldName},
+};
+
+use crate::stages::{data_connectors, models, models_graphql, object_types, relationships};
 use crate::types::error::{Error, RelationshipError};
 use crate::types::permission::ValueExpression;
 use crate::types::subgraph::{deserialize_qualified_btreemap, serialize_qualified_btreemap};
-use open_dds::{
-    data_connector::DataConnectorColumnName,
-    models::ModelName,
-    relationships::{RelationshipName, RelationshipType},
-    types::CustomTypeName,
-};
-
-use std::collections::BTreeMap;
-
 use crate::types::subgraph::{Qualified, QualifiedTypeReference};
-
-use ndc_models;
-
-use open_dds::{arguments::ArgumentName, permissions::Role, types::FieldName};
-use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ModelWithPermissions {
     pub model: models::Model,
     pub select_permissions: BTreeMap<Role, SelectPermission>,
+    pub filter_expression_type: Option<models_graphql::ModelExpressionType>,
+    pub graphql_api: models_graphql::ModelGraphQlApi,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -41,13 +42,15 @@ pub struct SelectPermission {
 pub enum ModelPredicate {
     UnaryFieldComparison {
         field: FieldName,
+        field_parent_type: Qualified<CustomTypeName>,
         ndc_column: DataConnectorColumnName,
         operator: ndc_models::UnaryComparisonOperator,
     },
     BinaryFieldComparison {
         field: FieldName,
+        field_parent_type: Qualified<CustomTypeName>,
         ndc_column: DataConnectorColumnName,
-        operator: String,
+        operator: DataConnectorOperatorName,
         argument_type: QualifiedTypeReference,
         value: ValueExpression,
     },
@@ -86,7 +89,7 @@ pub struct ModelTargetSource {
 impl ModelTargetSource {
     pub fn new(
         model: &ModelWithPermissions,
-        relationship: &relationships::Relationship,
+        relationship: &relationships::RelationshipField,
     ) -> Result<Option<Self>, Error> {
         model
             .model
@@ -98,7 +101,7 @@ impl ModelTargetSource {
 
     pub fn from_model_source(
         model_source: &models::ModelSource,
-        relationship: &relationships::Relationship,
+        relationship: &relationships::RelationshipField,
     ) -> Result<Self, Error> {
         Ok(Self {
             model: model_source.clone(),
@@ -108,7 +111,7 @@ impl ModelTargetSource {
                 .ok_or_else(|| Error::RelationshipError {
                     relationship_error: RelationshipError::NoRelationshipCapabilitiesDefined {
                         type_name: relationship.source.clone(),
-                        relationship_name: relationship.name.clone(),
+                        relationship_name: relationship.relationship_name.clone(),
                         data_connector_name: model_source.data_connector.name.clone(),
                     },
                 })?

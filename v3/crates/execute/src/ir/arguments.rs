@@ -202,7 +202,7 @@ pub fn build_ndc_model_arguments<'a, TInputFieldIter: Iterator<Item = &'a InputF
     Ok(ndc_arguments)
 }
 
-fn map_argument_value_to_ndc_type(
+pub(crate) fn map_argument_value_to_ndc_type(
     value_type: &QualifiedTypeReference,
     value: &Value<GDS>,
     type_mappings: &BTreeMap<Qualified<CustomTypeName>, TypeMapping>,
@@ -252,6 +252,7 @@ fn map_argument_value_to_ndc_type(
                                     Annotation::Input(InputAnnotation::InputObjectField {
                                         field_name,
                                         field_type,
+                                        parent_type: _,
                                     }) => Ok((field_name, field_type)),
                                     annotation => {
                                         Err(error::InternalEngineError::UnexpectedAnnotation {

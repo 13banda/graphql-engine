@@ -67,7 +67,7 @@ test *ARGS:
   just docker_with_test_env "${COMMAND[@]}"
 
 update-golden-files: docker-refresh
-  docker compose -f ci.docker-compose.yaml run --rm -e REGENERATE_GOLDENFILES=1 test_setup \
+  docker compose -f ci.docker-compose.yaml run --rm -e UPDATE_GOLDENFILES=1 test_setup \
     cargo nextest run --archive-file=./bin/nextest.tar.zst --no-fail-fast
   just fix-format
 
@@ -136,14 +136,14 @@ test-local *ARGS: start-docker-test-deps
 # run a watch process that runs the tests locally
 watch-local: start-docker-test-deps start-docker-run-deps
   RUST_LOG=DEBUG \
-  cargo watch \
+  cargo watch -i "**/*.snap.new" \
    -x test \
    -x 'clippy --no-deps' \
    -x 'run --bin engine -- \
-    --unstable-feature enable-boolean-expression-types \
     --otlp-endpoint http://localhost:4317 \
     --authn-config-path auth_config.json \
-    --metadata-path crates/engine/tests/schema.json'
+    --metadata-path crates/engine/tests/schema.json \
+    --expose-internal-errors'
 
 # check the code is fine
 lint-local:
@@ -156,7 +156,7 @@ machete:
 
 # update golden tests
 update-golden-files-local: start-docker-test-deps
-  REGENERATE_GOLDENFILES=1 cargo test
+  UPDATE_GOLDENFILES=1 cargo test
   just fix-format
 
 # run the engine using schema from tests
@@ -164,7 +164,8 @@ run-local: start-docker-test-deps start-docker-run-deps
   RUST_LOG=DEBUG cargo run --bin engine -- \
   --otlp-endpoint http://localhost:4317 \
   --authn-config-path auth_config.json \
-  --metadata-path crates/engine/tests/schema.json
+  --metadata-path crates/engine/tests/schema.json \
+  --expose-internal-errors
 
 # check the docker build works
 build-docker-with-nix binary="engine":

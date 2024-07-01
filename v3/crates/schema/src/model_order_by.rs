@@ -34,37 +34,31 @@ pub fn build_order_by_enum_type_schema(
     let asc_ast_name = &order_by_input_config.asc_direction_field_value;
     order_by_values.insert(
         asc_ast_name.clone(),
-        builder.allow_all_namespaced(
-            gql_schema::EnumValue {
-                value: asc_ast_name.clone(),
-                description: Some("Sorts the data in ascending order".to_string()),
-                deprecation_status: gql_schema::DeprecationStatus::NotDeprecated,
-                info: types::Annotation::Input(types::InputAnnotation::Model(
-                    types::ModelInputAnnotation::ModelOrderByDirection {
-                        direction: types::ModelOrderByDirection::Asc,
-                    },
-                )),
-            },
-            None,
-        ),
+        builder.allow_all_namespaced(gql_schema::EnumValue {
+            value: asc_ast_name.clone(),
+            description: Some("Sorts the data in ascending order".to_string()),
+            deprecation_status: gql_schema::DeprecationStatus::NotDeprecated,
+            info: types::Annotation::Input(types::InputAnnotation::Model(
+                types::ModelInputAnnotation::ModelOrderByDirection {
+                    direction: types::ModelOrderByDirection::Asc,
+                },
+            )),
+        }),
     );
 
     let desc_ast_name = &order_by_input_config.desc_direction_field_value;
     order_by_values.insert(
         desc_ast_name.clone(),
-        builder.allow_all_namespaced(
-            gql_schema::EnumValue {
-                value: desc_ast_name.clone(),
-                description: Some("Sorts the data in descending order".to_string()),
-                deprecation_status: gql_schema::DeprecationStatus::NotDeprecated,
-                info: types::Annotation::Input(types::InputAnnotation::Model(
-                    types::ModelInputAnnotation::ModelOrderByDirection {
-                        direction: types::ModelOrderByDirection::Desc,
-                    },
-                )),
-            },
-            None,
-        ),
+        builder.allow_all_namespaced(gql_schema::EnumValue {
+            value: desc_ast_name.clone(),
+            description: Some("Sorts the data in descending order".to_string()),
+            deprecation_status: gql_schema::DeprecationStatus::NotDeprecated,
+            info: types::Annotation::Input(types::InputAnnotation::Model(
+                types::ModelInputAnnotation::ModelOrderByDirection {
+                    direction: types::ModelOrderByDirection::Desc,
+                },
+            )),
+        }),
     );
 
     Ok(gql_schema::TypeInfo::Enum(gql_schema::Enum {
@@ -124,7 +118,7 @@ pub fn build_model_order_by_input_schema(
             model_name: model_name.clone(),
         })?;
 
-    if let Some(model_order_by_expression) = model.model.graphql_api.order_by_expression.as_ref() {
+    if let Some(model_order_by_expression) = model.graphql_api.order_by_expression.as_ref() {
         for (field_name, order_by_expression) in &model_order_by_expression.order_by_fields {
             let graphql_field_name = mk_name(field_name.clone().0.as_str())?;
             let input_type =
@@ -141,6 +135,8 @@ pub fn build_model_order_by_input_schema(
                     None,
                     Annotation::Input(types::InputAnnotation::Model(
                         types::ModelInputAnnotation::ModelOrderByArgument {
+                            field_name: field_name.clone(),
+                            parent_type: model.model.data_type.clone(),
                             ndc_column: order_by_expression.ndc_column.clone(),
                         },
                     )),
@@ -155,13 +151,15 @@ pub fn build_model_order_by_input_schema(
 
         // relationship fields
         // TODO(naveen): Add support for command relationships.
-        for (rel_name, relationship) in &object_type_representation.relationships {
-            if let metadata_resolve::RelationshipTarget::Model {
-                model_name,
-                relationship_type,
-                target_typename,
-                mappings,
-            } = &relationship.target
+        for (rel_name, relationship) in &object_type_representation.relationship_fields {
+            if let metadata_resolve::RelationshipTarget::Model(
+                metadata_resolve::ModelRelationshipTarget {
+                    model_name,
+                    relationship_type,
+                    target_typename,
+                    mappings,
+                },
+            ) = &relationship.target
             {
                 let target_model = gds.metadata.models.get(model_name).ok_or_else(|| {
                     crate::Error::InternalModelNotFound {
@@ -195,14 +193,14 @@ pub fn build_model_order_by_input_schema(
                             // If the relationship target model does not have orderByExpressionType do not include
                             // it in the source model order_by input type.
                             if let Some(target_model_order_by_expression) =
-                                target_model.model.graphql_api.order_by_expression.as_ref()
+                                target_model.graphql_api.order_by_expression.as_ref()
                             {
                                 let target_model_order_by_expression_type_name =
                                     &target_model_order_by_expression.order_by_type_name;
 
                                 let annotation = OrderByRelationshipAnnotation {
                                     source_type: relationship.source.clone(),
-                                    relationship_name: relationship.name.clone(),
+                                    relationship_name: relationship.relationship_name.clone(),
                                     target_model_name: model_name.clone(),
                                     target_source: target_model_source.clone(),
                                     target_type: target_typename.clone(),

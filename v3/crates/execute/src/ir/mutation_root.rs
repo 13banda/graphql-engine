@@ -17,7 +17,8 @@ use schema::{OutputAnnotation, RootFieldAnnotation};
 pub fn generate_ir<'n, 's>(
     selection_set: &'s gql::normalized_ast::SelectionSet<'s, GDS>,
     session_variables: &SessionVariables,
-) -> Result<IndexMap<ast::Alias, root_field::RootField<'n, 's>>, error::Error> {
+    request_headers: &reqwest::header::HeaderMap,
+) -> Result<IndexMap<ast::Alias, root_field::MutationRootField<'n, 's>>, error::Error> {
     let tracer = tracing_util::global_tracer();
     tracer.in_span(
         "generate_ir",
@@ -70,6 +71,7 @@ pub fn generate_ir<'n, 's>(
                                     *result_base_type_kind,
                                     source,
                                     session_variables,
+                                    request_headers,
                                 )?,
                             })
                         }
@@ -78,10 +80,7 @@ pub fn generate_ir<'n, 's>(
                         }),
                     },
                 }?;
-                root_fields.insert(
-                    alias.clone(),
-                    root_field::RootField::MutationRootField(field_response),
-                );
+                root_fields.insert(alias.clone(), field_response);
             }
             Ok(root_fields)
         },

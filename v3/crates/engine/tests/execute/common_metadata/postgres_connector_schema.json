@@ -379,6 +379,145 @@
                       }
                     }
                   },
+                  "country": {
+                    "description": "A country",
+                    "fields": {
+                      "name": {
+                        "description": "The country's name",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      },
+                      "continent": {
+                        "description": "The country's continent",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      }
+                    }
+                  },
+                  "location": {
+                    "description": "A location",
+                    "fields": {
+                      "city": {
+                        "description": "The location's city",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      },
+                      "country": {
+                        "description": "The location's country",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "country"
+                        }
+                      },
+                      "campuses": {
+                        "description": "The campuses at this location",
+                        "arguments": {},
+                        "type": {
+                          "type": "array",
+                          "element_type": {
+                            "type": "named",
+                            "name": "String"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "staff": {
+                    "description": "A staff member",
+                    "fields": {
+                      "first_name": {
+                        "description": "The staff member's first name",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      },
+                      "last_name": {
+                        "description": "The staff member's last name",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      },
+                      "specialities": {
+                        "description": "The staff member's specialties",
+                        "arguments": {},
+                        "type": {
+                          "type": "array",
+                          "element_type": {
+                            "type": "named",
+                            "name": "String"
+                          }
+                        }
+                      },
+                      "favourite_artist_id": {
+                        "description": "The staff member's favourite artist",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "Int"
+                        }
+                      }
+                    }
+                  },
+                  "institution": {
+                    "description": "An instituion",
+                    "fields": {
+                      "name": {
+                        "description": "The institutions's name",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "String"
+                        }
+                      },
+                      "location": {
+                        "description": "The institution's location",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "location"
+                        }
+                      },
+                      "staff": {
+                        "description": "The institution's staff",
+                        "arguments": {},
+                        "type": {
+                          "type": "array",
+                          "element_type": { "type": "named", "name": "staff" }
+                        }
+                      },
+                      "departments": {
+                        "description": "The institution's departments",
+                        "arguments": {},
+                        "type": {
+                          "type": "array",
+                          "element_type": { "type": "named", "name": "json" }
+                        }
+                      },
+                      "id": {
+                        "description": "The institutions's primary key",
+                        "arguments": {},
+                        "type": {
+                          "type": "named",
+                          "name": "int4"
+                        }
+                      }
+                    }
+                  },
+
                   "test_nullable_and_array": {
                     "description": "Testing nullable and array types",
                     "fields": {
@@ -725,6 +864,19 @@
                       }
                     },
                     "foreign_keys": {}
+                  },
+                  {
+                    "name": "institution",
+                    "description": "A collection of institutions",
+                    "arguments": {},
+                    "type": "institution",
+                    "deletable": false,
+                    "uniqueness_constraints": {
+                      "InstitutionByID": {
+                        "unique_columns": ["id"]
+                      }
+                    },
+                    "foreign_keys": {}
                   }
                 ],
                 "functions": [
@@ -828,7 +980,11 @@
                   "query": {
                     "explain": {},
                     "aggregates": {},
-                    "variables": {}
+                    "variables": {},
+                    "nested_fields": {
+                      "filter_by": {},
+                      "order_by": {}
+                    }
                   },
                   "mutation": {},
                   "relationships": {
@@ -836,7 +992,7 @@
                     "order_by_aggregate": {}
                   }
                 },
-                "version": "0.1.0"
+                "version": "0.1.3"
               }
             }
           },

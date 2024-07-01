@@ -1,29 +1,12 @@
-use lang_graphql::schema::{self as gql_schema, SchemaContext};
-use lang_graphql::{ast::common as ast, mk_name};
-use open_dds::types::FieldName;
-use open_dds::{
-    commands::CommandName,
-    models::ModelName,
-    permissions::Role,
-    relationships::RelationshipName,
-    types::{CustomTypeName, Deprecated},
-};
-use serde::{Deserialize, Serialize};
-use std::str::FromStr;
-use thiserror::Error;
-
-use metadata_resolve::{
-    resolve, Error as ResolveMetadataError, Metadata, MetadataResolveFlagsInternal, Qualified,
-};
-
-use self::types::PossibleApolloFederationTypes;
-
 // we deliberately do not export these entire modules and instead explicitly export types below
+mod aggregates;
 mod apollo_federation;
 mod boolean_expression;
 mod commands;
+mod field_arguments;
 mod model_arguments;
 mod model_filter;
+mod model_filter_input;
 mod model_order_by;
 mod mutation_root;
 mod permissions;
@@ -31,9 +14,27 @@ mod query_root;
 mod relay;
 mod types;
 
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+
+use lang_graphql::schema::{self as gql_schema, SchemaContext};
+use lang_graphql::{ast::common as ast, mk_name};
+use metadata_resolve::Qualified;
+use open_dds::{
+    aggregates::AggregateExpressionName,
+    commands::CommandName,
+    models::ModelName,
+    permissions::Role,
+    relationships::RelationshipName,
+    types::{CustomTypeName, Deprecated, FieldName},
+};
+
+pub use aggregates::{AggregateOutputAnnotation, AggregationFunctionAnnotation};
 pub use types::output_type::relationship::{
     CommandRelationshipAnnotation, CommandTargetSource, FilterRelationshipAnnotation,
-    ModelRelationshipAnnotation, OrderByRelationshipAnnotation,
+    ModelAggregateRelationshipAnnotation, ModelRelationshipAnnotation,
+    OrderByRelationshipAnnotation,
 };
 pub use types::{
     Annotation, ApolloFederationRootFields, ArgumentNameAndPath, ArgumentPresets,
@@ -46,20 +47,19 @@ pub use types::{
 /// This 'NamespacedGetter' looks up 'NamespacedNodeInfo's according to actual roles.
 /// It is that instance of 'NamespacedGetter' that is used during normal request-processing
 /// operations.
-pub struct GDSRoleNamespaceGetter;
+pub struct GDSRoleNamespaceGetter {
+    pub scope: Role,
+}
 
 impl lang_graphql::schema::NamespacedGetter<GDS> for GDSRoleNamespaceGetter {
     fn get<'s, C>(
         &self,
         namespaced: &'s gql_schema::Namespaced<GDS, C>,
-        namespace: &Role,
     ) -> Option<(&'s C, &'s <GDS as SchemaContext>::NamespacedNodeInfo)> {
         match &namespaced.namespaced {
-            lang_graphql::schema::NamespacedData::AllowAll(namespaced_node_info) => {
-                Some((&namespaced.data, namespaced_node_info))
-            }
+            lang_graphql::schema::NamespacedData::AllowAll => Some((&namespaced.data, &None)),
             lang_graphql::schema::NamespacedData::Conditional(map) => map
-                .get(namespace)
+                .get(&self.scope)
                 .map(|namespaced_node_info| (&namespaced.data, namespaced_node_info)),
         }
     }
@@ -75,7 +75,6 @@ impl lang_graphql::schema::NamespacedGetter<GDS> for GDSNamespaceGetterAgnostic 
     fn get<'s, C>(
         &self,
         namespaced: &'s gql_schema::Namespaced<GDS, C>,
-        _namespace: &Role,
     ) -> Option<(&'s C, &'s <GDS as SchemaContext>::NamespacedNodeInfo)> {
         Some((&namespaced.data, &None))
     }
@@ -83,22 +82,26 @@ impl lang_graphql::schema::NamespacedGetter<GDS> for GDSNamespaceGetterAgnostic 
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct GDS {
-    pub metadata: Metadata,
+    pub metadata: metadata_resolve::Metadata,
 }
 
 impl GDS {
     pub fn new(
         user_metadata: open_dds::Metadata,
-        metadata_resolve_flags: &metadata_resolve::MetadataResolveFlagsInternal,
+        metadata_resolve_configuration: metadata_resolve::configuration::Configuration,
     ) -> Result<Self, Error> {
-        let resolved_metadata = resolve(user_metadata, metadata_resolve_flags)?;
+        let resolved_metadata =
+            metadata_resolve::resolve(user_metadata, metadata_resolve_configuration)?;
         Ok(GDS {
             metadata: resolved_metadata,
         })
     }
 
     pub fn new_with_default_flags(user_metadata: open_dds::Metadata) -> Result<Self, Error> {
-        let resolved_metadata = resolve(user_metadata, &MetadataResolveFlagsInternal::default())?;
+        let resolved_metadata = metadata_resolve::resolve(
+            user_metadata,
+            metadata_resolve::configuration::Configuration::default(),
+        )?;
         Ok(GDS {
             metadata: resolved_metadata,
         })
@@ -118,10 +121,6 @@ impl gql_schema::SchemaContext for GDS {
         types::Annotation::Output(types::OutputAnnotation::RootField(
             RootFieldAnnotation::Introspection,
         ))
-    }
-
-    fn introspection_namespace_node() -> Self::NamespacedNodeInfo {
-        None
     }
 
     type TypeId = types::TypeId;
@@ -186,15 +185,16 @@ impl gql_schema::SchemaContext for GDS {
                 self, builder, type_name, model_name,
             ),
             types::TypeId::ScalarTypeComparisonExpression {
-                scalar_type_name: _,
                 graphql_type_name,
                 operators,
+                operator_mapping,
                 is_null_operator_name,
             } => model_filter::build_scalar_comparison_input(
                 self,
                 builder,
                 graphql_type_name,
                 operators,
+                operator_mapping,
                 is_null_operator_name,
             ),
             types::TypeId::ModelOrderByExpression {
@@ -209,23 +209,41 @@ impl gql_schema::SchemaContext for GDS {
             types::TypeId::OrderByEnumType { graphql_type_name } => {
                 model_order_by::build_order_by_enum_type_schema(self, builder, graphql_type_name)
             }
-            types::TypeId::ApolloFederationType(PossibleApolloFederationTypes::Entity) => {
+            types::TypeId::ApolloFederationType(types::PossibleApolloFederationTypes::Entity) => {
                 Ok(gql_schema::TypeInfo::Union(
                     apollo_federation::apollo_federation_entities_schema(builder, self)?,
                 ))
             }
-            types::TypeId::ApolloFederationType(PossibleApolloFederationTypes::Any) => {
+            types::TypeId::ApolloFederationType(types::PossibleApolloFederationTypes::Any) => {
                 Ok(gql_schema::TypeInfo::Scalar(gql_schema::Scalar {
                     name: ast::TypeName(mk_name!("_Any")),
                     description: None,
                     directives: Vec::new(),
                 }))
             }
-            types::TypeId::ApolloFederationType(PossibleApolloFederationTypes::Service) => {
+            types::TypeId::ApolloFederationType(types::PossibleApolloFederationTypes::Service) => {
                 Ok(gql_schema::TypeInfo::Object(
                     apollo_federation::apollo_federation_service_schema(builder)?,
                 ))
             }
+            types::TypeId::AggregateSelectOutputType {
+                aggregate_expression_name,
+                graphql_type_name,
+            } => aggregates::build_aggregate_select_output_type(
+                self,
+                builder,
+                aggregate_expression_name,
+                graphql_type_name,
+            ),
+            types::TypeId::ModelFilterInputType {
+                model_name,
+                graphql_type_name,
+            } => model_filter_input::build_model_filter_input_type(
+                self,
+                builder,
+                model_name,
+                graphql_type_name,
+            ),
         }
     }
 
@@ -242,23 +260,32 @@ impl gql_schema::SchemaContext for GDS {
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("metadata is not consistent: {error}")]
     ResolveError {
-        #[source]
-        error: ResolveMetadataError,
+        #[from]
+        error: metadata_resolve::Error,
     },
     #[error("internal error while building schema: {error}")]
     InternalBuildError {
-        #[source]
+        #[from]
         error: gql_schema::build::Error,
     },
     #[error("internal error: no support for: {summary}")]
     InternalUnsupported { summary: String },
+    #[error("internal error while building schema, relationship not found: {relationship_name}")]
+    InternalRelationshipNotFound { relationship_name: RelationshipName },
     #[error("internal error while building schema, type not found: {type_name}")]
     InternalTypeNotFound {
         type_name: Qualified<CustomTypeName>,
+    },
+    #[error(
+        "internal error while building schema, field {field_name} not found in type {type_name}"
+    )]
+    InternalObjectTypeFieldNotFound {
+        type_name: Qualified<CustomTypeName>,
+        field_name: FieldName,
     },
     #[error("duplicate field name {field_name} generated while building object type {type_name}")]
     DuplicateFieldNameGeneratedInObjectType {
@@ -270,6 +297,16 @@ pub enum Error {
         relationship_name: RelationshipName,
         field_name: ast::Name,
         type_name: Qualified<CustomTypeName>,
+    },
+    #[error("the aggregation function {field_name} conflicts with the aggregatable field {field_name} in the aggregate expression {aggregate_expression} is named {field_name}. Either rename the aggregation function or the field")]
+    AggregationFunctionFieldNameConflict {
+        aggregate_expression: Qualified<AggregateExpressionName>,
+        field_name: ast::Name,
+    },
+    #[error("internal error: duplicate aggregatable field {field_name} in the aggregate expression {aggregate_expression} is named {field_name}")]
+    InternalDuplicateAggregatableField {
+        aggregate_expression: Qualified<AggregateExpressionName>,
+        field_name: ast::Name,
     },
     #[error(
         "internal error: duplicate models with global id implementing the same type {type_name} are found"
@@ -301,6 +338,10 @@ pub enum Error {
     InternalCommandNotFound {
         command_name: Qualified<CommandName>,
     },
+    #[error("internal error while building schema, aggregate expression not found: {aggregate_expression}")]
+    InternalAggregateExpressionNotFound {
+        aggregate_expression: Qualified<AggregateExpressionName>,
+    },
     #[error("Cannot generate select_many API for model {model_name} since order_by_expression isn't defined")]
     NoOrderByExpression { model_name: Qualified<ModelName> },
     #[error("No graphql type name has been defined for scalar type: {type_name}")]
@@ -310,6 +351,10 @@ pub enum Error {
     #[error("No graphql output type name has been defined for object type: {type_name}")]
     NoGraphQlOutputTypeNameForObject {
         type_name: Qualified<CustomTypeName>,
+    },
+    #[error("No graphql select type name has been defined for aggregate expression: {aggregate_expression}")]
+    NoGraphQlSelectTypeNameForAggregateExpression {
+        aggregate_expression: Qualified<AggregateExpressionName>,
     },
     #[error("No graphql input type name has been defined for object type: {type_name}")]
     NoGraphQlInputTypeNameForObject {
@@ -321,6 +366,10 @@ pub enum Error {
         "Cannot generate arguments for model {model_name} since argumentsInputType and it's corresponding graphql config argumentsInput isn't defined"
     )]
     NoArgumentsInputConfigForSelectMany { model_name: Qualified<ModelName> },
+    #[error(
+        "Cannot generate the filter input type for model {model_name} since filterInputTypeName isn't defined in the graphql config"
+    )]
+    NoFilterInputTypeNameConfigNameForModel { model_name: Qualified<ModelName> },
     #[error("Internal error: Relationship capabilities are missing for {relationship} on type {type_name}")]
     InternalMissingRelationshipCapabilities {
         type_name: Qualified<CustomTypeName>,
@@ -362,18 +411,6 @@ impl From<ast::InvalidGraphQlName> for Error {
     }
 }
 
-impl From<ResolveMetadataError> for Error {
-    fn from(error: ResolveMetadataError) -> Self {
-        Error::ResolveError { error }
-    }
-}
-
-impl From<gql_schema::build::Error> for Error {
-    fn from(error: gql_schema::build::Error) -> Self {
-        Self::InternalBuildError { error }
-    }
-}
-
 pub fn mk_typename(name: &str) -> Result<ast::TypeName, Error> {
     match ast::Name::from_str(name) {
         Ok(name) => Ok(ast::TypeName(name)),
@@ -411,8 +448,9 @@ mod tests {
 
     use crate::{GDSNamespaceGetterAgnostic, GDSRoleNamespaceGetter};
 
+    #[allow(clippy::print_stdout)]
     fn make_sdl_from_metadata_file_for_role(path: &Path, role: &Role) -> String {
-        println!("{:#?}", path);
+        println!("{path:#?}");
         let metadata_string = fs::read_to_string(path).unwrap();
         let metadata =
             open_dds::traits::OpenDd::deserialize(serde_json::from_str(&metadata_string).unwrap())
@@ -420,11 +458,14 @@ mod tests {
         let gds = crate::GDS::new_with_default_flags(metadata).unwrap();
         let sch = gds.build_schema().unwrap();
 
-        sch.generate_sdl(&GDSRoleNamespaceGetter, role)
+        sch.generate_sdl(&GDSRoleNamespaceGetter {
+            scope: role.clone(),
+        })
     }
 
+    #[allow(clippy::print_stdout)]
     fn make_role_agnostic_sdl_from_metadata_file(path: &Path) -> String {
-        println!("{:#?}", path);
+        println!("{path:#?}");
         let metadata_string = fs::read_to_string(path).unwrap();
         let metadata =
             open_dds::traits::OpenDd::deserialize(serde_json::from_str(&metadata_string).unwrap())
@@ -432,10 +473,7 @@ mod tests {
         let gds = crate::GDS::new_with_default_flags(metadata).unwrap();
         let sch = gds.build_schema().unwrap();
 
-        sch.generate_sdl(
-            &GDSNamespaceGetterAgnostic,
-            &Role("this value is irrelevant".to_string()),
-        )
+        sch.generate_sdl(&GDSNamespaceGetterAgnostic)
     }
 
     #[test]
@@ -445,7 +483,7 @@ mod tests {
                 PathBuf::from("tests/metadata_with_presets.json").as_ref(),
                 &Role("role_with_presets".to_string())
             ));
-        })
+        });
     }
 
     #[test]
@@ -454,7 +492,7 @@ mod tests {
             insta::assert_snapshot!(make_role_agnostic_sdl_from_metadata_file(
                 PathBuf::from("tests/metadata_with_presets.json").as_ref()
             ));
-        })
+        });
     }
 
     #[test]
@@ -464,7 +502,7 @@ mod tests {
                 PathBuf::from("tests/metadata_with_select_permissions.json").as_ref(),
                 &Role("role_with_some_permissions".to_string())
             ));
-        })
+        });
     }
 
     #[test]
@@ -473,6 +511,6 @@ mod tests {
             insta::assert_snapshot!(make_role_agnostic_sdl_from_metadata_file(
                 PathBuf::from("tests/metadata_with_select_permissions.json").as_ref()
             ));
-        })
+        });
     }
 }

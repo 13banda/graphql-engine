@@ -131,7 +131,7 @@ fn test_filter_error_filter_expression_type_present_filter_input_not_present() -
 
     assert_eq!(
         gds.unwrap_err().to_string(),
-        "metadata is not consistent: the filterInput need to be defined in GraphqlConfig, when models have filterExpressionType"
+        "metadata is not consistent: the filterInput needs to be defined in GraphqlConfig, when models have filterExpressionType"
     );
     Ok(())
 }
@@ -149,7 +149,7 @@ fn test_order_by_error_order_by_expression_type_present_order_by_input_not_prese
 
     assert_eq!(
         gds.unwrap_err().to_string(),
-        "metadata is not consistent: the orderByInput need to be defined in GraphqlConfig, when models have orderByExpressionType"
+        "metadata is not consistent: the orderByInput needs to be defined in GraphqlConfig, when models have orderByExpressionType"
     );
     Ok(())
 }
@@ -183,7 +183,7 @@ fn test_arguments_error_arguments_input_type_present_arguments_input_not_present
 
     assert_eq!(
         gds.unwrap_err().to_string(),
-        "metadata is not consistent: the fieldName for argumentsInput need to be defined in GraphqlConfig, when models have argumentsInputType"
+        "metadata is not consistent: the fieldName for argumentsInput needs to be defined in GraphqlConfig, when models have argumentsInputType"
     );
     Ok(())
 }

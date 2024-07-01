@@ -47,6 +47,7 @@ pub(crate) fn select_one_generate_ir<'n, 's>(
     data_type: &Qualified<open_dds::types::CustomTypeName>,
     model_source: &'s metadata_resolve::ModelSource,
     session_variables: &SessionVariables,
+    request_headers: &reqwest::header::HeaderMap,
     model_name: &'s Qualified<open_dds::models::ModelName>,
 ) -> Result<ModelSelectOne<'n, 's>, error::Error> {
     let mut filter_clause_expressions = vec![];
@@ -66,6 +67,7 @@ pub(crate) fn select_one_generate_ir<'n, 's>(
                         column: ndc_models::ComparisonTarget::Column {
                             name: ndc_column.column.0.clone(),
                             path: vec![],
+                            field_path: None,
                         },
                         operator: ndc_column.equal_operator.clone(),
                         value: ndc_models::ComparisonValue::Scalar {
@@ -121,6 +123,7 @@ pub(crate) fn select_one_generate_ir<'n, 's>(
         None, // offset
         None, // order_by
         session_variables,
+        request_headers,
         // Get all the models/commands that were used as relationships
         &mut usage_counts,
     )?;

@@ -10,6 +10,7 @@ use std::{
 use expect_test::expect_file;
 
 #[cfg(test)]
+#[allow(clippy::print_stdout)]
 fn test_parser_for_schema(schema_path: &Path) -> Result<(), io::Error> {
     let schema = fs::read_to_string(schema_path)?;
     let expected_ast_path = schema_path.with_extension("ast.txt");
@@ -25,16 +26,16 @@ fn test_parser_for_schema(schema_path: &Path) -> Result<(), io::Error> {
             let mut parser = parser::Parser::new(&schema);
             match parser.parse_schema_document() {
                 Err(err) => {
-                    panic!("Parsing error:\n{:#?}", err);
+                    panic!("Parsing error:\n{err:#?}");
                 }
                 Ok(document) => {
-                    let actual_ast = format!("{:#?}", document);
+                    let actual_ast = format!("{document:#?}");
                     let patch = diffy::create_patch(expected_ast.as_str(), actual_ast.as_str());
                     // No diff
                     if patch.hunks().is_empty() {
                         return Ok(());
                     }
-                    println!("AST diff:\n{}", patch);
+                    println!("AST diff:\n{patch}");
 
                     // Also write the actual AST to a temp file, to make it easy to update the golden file if the new output is expected
                     let mut tmp_output = env::temp_dir();
@@ -106,7 +107,7 @@ where
         let path = path.with_extension(outfile_extension);
         // TODO: we really want formatted output here, but:
         // https://github.com/rust-analyzer/expect-test/issues/45
-        expect_file![path].assert_eq(&actual)
+        expect_file![path].assert_eq(&actual);
     }
 }
 
@@ -189,9 +190,10 @@ fn project_root() -> PathBuf {
 }
 
 // Additional sanity checks to distinguish our error and success expectations:
+#[allow(clippy::print_stdout)]
 fn assert_is_err<T: std::fmt::Debug>(actual: &parser::Result<T>, path: &Path) {
     if actual.is_ok() {
-        println!("erroneously successful parse: {:?}", actual);
+        println!("erroneously successful parse: {actual:?}");
         panic!(
             "There should be errors in the file since this is an error case, but saw none in {:?}",
             path.display()
@@ -199,9 +201,10 @@ fn assert_is_err<T: std::fmt::Debug>(actual: &parser::Result<T>, path: &Path) {
     }
 }
 
+#[allow(clippy::print_stdout)]
 fn assert_is_ok<T: std::fmt::Debug>(actual: &parser::Result<T>, path: &Path) {
     if actual.is_err() {
-        println!("error: {:?}", actual);
+        println!("error: {actual:?}");
         panic!("There should be no errors in the file {:?}", path.display(),);
     }
 }

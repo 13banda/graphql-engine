@@ -3,6 +3,8 @@ This module provides functions to generate introspection result as GraphQL schem
 for each namespace from the schema.
  */
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -21,48 +23,17 @@ pub enum Error {
     SerializeJson(#[from] serde_json::Error),
 }
 
-/// Generate GraphQL schema for each namespace from given schema.
-pub fn build_namespace_schemas<
-    's,
-    S: crate::schema::SchemaContext,
-    NSGet: crate::schema::NamespacedGetter<S>,
->(
-    schema: &'s crate::schema::Schema<S>,
-    namespaced_getter: &NSGet,
-) -> Result<HashMap<&'s S::Namespace, serde_json::Value>, Error> {
-    let mut response = HashMap::new();
-    let request = crate::http::Request {
-        operation_name: None,
-        query: {
-            let query_str = include_str!("introspection_query.graphql");
-            crate::parser::Parser::new(query_str)
-                .parse_executable_document()
-                .map_err(|e| Error::ParseIntrospectionQuery(e.to_string()))?
-        },
-        variables: HashMap::new(),
-    };
-    for ns in &schema.namespaces {
-        response.insert(
-            ns,
-            build_namespace_schema(namespaced_getter, ns, schema, &request)?,
-        );
-    }
-    Ok(response)
-}
-
 /// Generate GraphQL schema for a given namespace
-fn build_namespace_schema<
-    's,
+pub fn build_namespace_schema<
     S: crate::schema::SchemaContext,
     NSGet: crate::schema::NamespacedGetter<S>,
 >(
     namespaced_getter: &NSGet,
-    ns: &'s S::Namespace,
-    schema: &'s crate::schema::Schema<S>,
-    request: &crate::http::Request,
+    schema: &crate::schema::Schema<S>,
 ) -> Result<serde_json::Value, Error> {
-    let nr = crate::validation::normalize_request(namespaced_getter, ns, schema, request)
-        .map_err(|e| Error::NormalizeIntrospectionQuery(e.to_string()))?;
+    let nr =
+        crate::validation::normalize_request(namespaced_getter, schema, introspection_request())
+            .map_err(|e| Error::NormalizeIntrospectionQuery(e.to_string()))?;
     let mut result = HashMap::new();
     for (_alias, field) in &nr.selection_set.fields {
         let field_call = field.field_call().map_err(|_| Error::FieldCallNotFound)?;
@@ -73,7 +44,6 @@ fn build_namespace_schema<
                     serde_json::to_value(crate::introspection::schema_type(
                         schema,
                         namespaced_getter,
-                        ns,
                         &field.selection_set,
                     )?)?,
                 );
@@ -84,4 +54,18 @@ fn build_namespace_schema<
         }
     }
     Ok(serde_json::to_value(result)?)
+}
+
+fn introspection_request() -> &'static crate::http::Request {
+    static CELL: OnceLock<crate::http::Request> = OnceLock::new();
+    CELL.get_or_init(|| crate::http::Request {
+        operation_name: None,
+        query: {
+            let query_str = include_str!("introspection_query.graphql");
+            crate::parser::Parser::new(query_str)
+                .parse_executable_document()
+                .unwrap()
+        },
+        variables: HashMap::new(),
+    })
 }

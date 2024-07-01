@@ -1,6 +1,6 @@
 {
-  "getLatestArticle": {
-    "QueryRootField": {
+  "Query": {
+    "getLatestArticle": {
       "FunctionBasedCommand": {
         "selection_set": {
           "fields": {
@@ -39,10 +39,13 @@
                                   },
                                   "capabilities": {
                                     "supports_explaining_queries": true,
-                                    "supports_explaining_mutations": false
+                                    "supports_explaining_mutations": false,
+                                    "supports_nested_object_filtering": true,
+                                    "supports_nested_object_aggregations": false
                                   }
                                 },
                                 "collection": "article",
+                                "collection_type": "article",
                                 "type_mappings": {
                                   "{\"subgraph\":\"default\",\"name\":\"article\"}": {
                                     "Object": {
@@ -53,21 +56,27 @@
                                           "column_type": {
                                             "type": "named",
                                             "name": "int4"
-                                          }
+                                          },
+                                          "column_type_representation": null,
+                                          "argument_mappings": {}
                                         },
                                         "author_id": {
                                           "column": "author_id",
                                           "column_type": {
                                             "type": "named",
                                             "name": "int4"
-                                          }
+                                          },
+                                          "column_type_representation": null,
+                                          "argument_mappings": {}
                                         },
                                         "title": {
                                           "column": "title",
                                           "column_type": {
                                             "type": "named",
                                             "name": "varchar"
-                                          }
+                                          },
+                                          "column_type_representation": null,
+                                          "argument_mappings": {}
                                         }
                                       }
                                     }
@@ -112,8 +121,7 @@
                         }
                       }
                     },
-                    "arguments": {},
-                    "directives": {}
+                    "arguments": {}
                   }
                 ]
               ],
@@ -154,10 +162,13 @@
                                         },
                                         "capabilities": {
                                           "supports_explaining_queries": true,
-                                          "supports_explaining_mutations": false
+                                          "supports_explaining_mutations": false,
+                                          "supports_nested_object_filtering": true,
+                                          "supports_nested_object_aggregations": false
                                         }
                                       },
                                       "collection": "author",
+                                      "collection_type": "author",
                                       "type_mappings": {
                                         "{\"subgraph\":\"default\",\"name\":\"author\"}": {
                                           "Object": {
@@ -168,21 +179,27 @@
                                                 "column_type": {
                                                   "type": "named",
                                                   "name": "int8"
-                                                }
+                                                },
+                                                "column_type_representation": null,
+                                                "argument_mappings": {}
                                               },
                                               "first_name": {
                                                 "column": "first_name",
                                                 "column_type": {
                                                   "type": "named",
                                                   "name": "varchar"
-                                                }
+                                                },
+                                                "column_type_representation": null,
+                                                "argument_mappings": {}
                                               },
                                               "last_name": {
                                                 "column": "last_name",
                                                 "column_type": {
                                                   "type": "named",
                                                   "name": "varchar"
-                                                }
+                                                },
+                                                "column_type_representation": null,
+                                                "argument_mappings": {}
                                               }
                                             }
                                           }
@@ -227,8 +244,7 @@
                               }
                             }
                           },
-                          "arguments": {},
-                          "directives": {}
+                          "arguments": {}
                         }
                       ]
                     ],
@@ -269,10 +285,13 @@
                                               },
                                               "capabilities": {
                                                 "supports_explaining_queries": true,
-                                                "supports_explaining_mutations": false
+                                                "supports_explaining_mutations": false,
+                                                "supports_nested_object_filtering": true,
+                                                "supports_nested_object_aggregations": false
                                               }
                                             },
                                             "collection": "article",
+                                            "collection_type": "article",
                                             "type_mappings": {
                                               "{\"subgraph\":\"default\",\"name\":\"article\"}": {
                                                 "Object": {
@@ -283,21 +302,27 @@
                                                       "column_type": {
                                                         "type": "named",
                                                         "name": "int4"
-                                                      }
+                                                      },
+                                                      "column_type_representation": null,
+                                                      "argument_mappings": {}
                                                     },
                                                     "author_id": {
                                                       "column": "author_id",
                                                       "column_type": {
                                                         "type": "named",
                                                         "name": "int4"
-                                                      }
+                                                      },
+                                                      "column_type_representation": null,
+                                                      "argument_mappings": {}
                                                     },
                                                     "title": {
                                                       "column": "title",
                                                       "column_type": {
                                                         "type": "named",
                                                         "name": "varchar"
-                                                      }
+                                                      },
+                                                      "column_type_representation": null,
+                                                      "argument_mappings": {}
                                                     }
                                                   }
                                                 }
@@ -342,8 +367,7 @@
                                     }
                                   }
                                 },
-                                "arguments": {},
-                                "directives": {}
+                                "arguments": {}
                               }
                             ]
                           ],
@@ -366,8 +390,7 @@
                                         },
                                         "namespaced": null
                                       },
-                                      "arguments": {},
-                                      "directives": {}
+                                      "arguments": {}
                                     }
                                   ]
                                 ],
@@ -402,14 +425,18 @@
                                                 },
                                                 "nullable": false
                                               },
-                                              "field_base_type_kind": "Scalar"
+                                              "field_base_type_kind": "Scalar",
+                                              "parent_type": {
+                                                "subgraph": "default",
+                                                "name": "article"
+                                              },
+                                              "argument_types": {}
                                             }
                                           }
                                         },
                                         "namespaced": null
                                       },
-                                      "arguments": {},
-                                      "directives": {}
+                                      "arguments": {}
                                     }
                                   ]
                                 ],
@@ -482,7 +509,9 @@
               },
               "capabilities": {
                 "supports_explaining_queries": true,
-                "supports_explaining_mutations": false
+                "supports_explaining_mutations": false,
+                "supports_nested_object_filtering": true,
+                "supports_nested_object_aggregations": false
               }
             },
             "arguments": {},
@@ -505,7 +534,9 @@
                           },
                           "capabilities": {
                             "supports_explaining_queries": true,
-                            "supports_explaining_mutations": false
+                            "supports_explaining_mutations": false,
+                            "supports_nested_object_filtering": true,
+                            "supports_nested_object_aggregations": false
                           }
                         },
                         "collection": "article",
@@ -535,7 +566,9 @@
                                     },
                                     "capabilities": {
                                       "supports_explaining_queries": true,
-                                      "supports_explaining_mutations": false
+                                      "supports_explaining_mutations": false,
+                                      "supports_nested_object_filtering": true,
+                                      "supports_nested_object_aggregations": false
                                     }
                                   },
                                   "collection": "author",
@@ -565,7 +598,9 @@
                                               },
                                               "capabilities": {
                                                 "supports_explaining_queries": true,
-                                                "supports_explaining_mutations": false
+                                                "supports_explaining_mutations": false,
+                                                "supports_nested_object_filtering": true,
+                                                "supports_nested_object_aggregations": false
                                               }
                                             },
                                             "collection": "article",
@@ -582,17 +617,20 @@
                                                 "hasura_global_id_col_id_article_id": {
                                                   "Column": {
                                                     "column": "id",
-                                                    "nested_selection": null
+                                                    "nested_selection": null,
+                                                    "arguments": {}
                                                   }
                                                 },
                                                 "title": {
                                                   "Column": {
                                                     "column": "title",
-                                                    "nested_selection": null
+                                                    "nested_selection": null,
+                                                    "arguments": {}
                                                   }
                                                 }
                                               }
-                                            }
+                                            },
+                                            "aggregate_selection": null
                                           },
                                           "name": "[{\"subgraph\":\"default\",\"name\":\"author\"},\"Articles\"]",
                                           "relationship_info": {
@@ -615,7 +653,9 @@
                                               },
                                               "capabilities": {
                                                 "supports_explaining_queries": true,
-                                                "supports_explaining_mutations": false
+                                                "supports_explaining_mutations": false,
+                                                "supports_nested_object_filtering": true,
+                                                "supports_nested_object_aggregations": false
                                               }
                                             },
                                             "source_type_mappings": {
@@ -628,21 +668,27 @@
                                                       "column_type": {
                                                         "type": "named",
                                                         "name": "int8"
-                                                      }
+                                                      },
+                                                      "column_type_representation": null,
+                                                      "argument_mappings": {}
                                                     },
                                                     "first_name": {
                                                       "column": "first_name",
                                                       "column_type": {
                                                         "type": "named",
                                                         "name": "varchar"
-                                                      }
+                                                      },
+                                                      "column_type_representation": null,
+                                                      "argument_mappings": {}
                                                     },
                                                     "last_name": {
                                                       "column": "last_name",
                                                       "column_type": {
                                                         "type": "named",
                                                         "name": "varchar"
-                                                      }
+                                                      },
+                                                      "column_type_representation": null,
+                                                      "argument_mappings": {}
                                                     }
                                                   }
                                                 }
@@ -663,10 +709,13 @@
                                                   },
                                                   "capabilities": {
                                                     "supports_explaining_queries": true,
-                                                    "supports_explaining_mutations": false
+                                                    "supports_explaining_mutations": false,
+                                                    "supports_nested_object_filtering": true,
+                                                    "supports_nested_object_aggregations": false
                                                   }
                                                 },
                                                 "collection": "article",
+                                                "collection_type": "article",
                                                 "type_mappings": {
                                                   "{\"subgraph\":\"default\",\"name\":\"article\"}": {
                                                     "Object": {
@@ -677,21 +726,27 @@
                                                           "column_type": {
                                                             "type": "named",
                                                             "name": "int4"
-                                                          }
+                                                          },
+                                                          "column_type_representation": null,
+                                                          "argument_mappings": {}
                                                         },
                                                         "author_id": {
                                                           "column": "author_id",
                                                           "column_type": {
                                                             "type": "named",
                                                             "name": "int4"
-                                                          }
+                                                          },
+                                                          "column_type_representation": null,
+                                                          "argument_mappings": {}
                                                         },
                                                         "title": {
                                                           "column": "title",
                                                           "column_type": {
                                                             "type": "named",
                                                             "name": "varchar"
-                                                          }
+                                                          },
+                                                          "column_type_representation": null,
+                                                          "argument_mappings": {}
                                                         }
                                                       }
                                                     }
@@ -727,7 +782,8 @@
                                         }
                                       }
                                     }
-                                  }
+                                  },
+                                  "aggregate_selection": null
                                 },
                                 "name": "[{\"subgraph\":\"default\",\"name\":\"article\"},\"Author\"]",
                                 "relationship_info": {
@@ -750,7 +806,9 @@
                                     },
                                     "capabilities": {
                                       "supports_explaining_queries": true,
-                                      "supports_explaining_mutations": false
+                                      "supports_explaining_mutations": false,
+                                      "supports_nested_object_filtering": true,
+                                      "supports_nested_object_aggregations": false
                                     }
                                   },
                                   "source_type_mappings": {
@@ -763,21 +821,27 @@
                                             "column_type": {
                                               "type": "named",
                                               "name": "int4"
-                                            }
+                                            },
+                                            "column_type_representation": null,
+                                            "argument_mappings": {}
                                           },
                                           "author_id": {
                                             "column": "author_id",
                                             "column_type": {
                                               "type": "named",
                                               "name": "int4"
-                                            }
+                                            },
+                                            "column_type_representation": null,
+                                            "argument_mappings": {}
                                           },
                                           "title": {
                                             "column": "title",
                                             "column_type": {
                                               "type": "named",
                                               "name": "varchar"
-                                            }
+                                            },
+                                            "column_type_representation": null,
+                                            "argument_mappings": {}
                                           }
                                         }
                                       }
@@ -798,10 +862,13 @@
                                         },
                                         "capabilities": {
                                           "supports_explaining_queries": true,
-                                          "supports_explaining_mutations": false
+                                          "supports_explaining_mutations": false,
+                                          "supports_nested_object_filtering": true,
+                                          "supports_nested_object_aggregations": false
                                         }
                                       },
                                       "collection": "author",
+                                      "collection_type": "author",
                                       "type_mappings": {
                                         "{\"subgraph\":\"default\",\"name\":\"author\"}": {
                                           "Object": {
@@ -812,21 +879,27 @@
                                                 "column_type": {
                                                   "type": "named",
                                                   "name": "int8"
-                                                }
+                                                },
+                                                "column_type_representation": null,
+                                                "argument_mappings": {}
                                               },
                                               "first_name": {
                                                 "column": "first_name",
                                                 "column_type": {
                                                   "type": "named",
                                                   "name": "varchar"
-                                                }
+                                                },
+                                                "column_type_representation": null,
+                                                "argument_mappings": {}
                                               },
                                               "last_name": {
                                                 "column": "last_name",
                                                 "column_type": {
                                                   "type": "named",
                                                   "name": "varchar"
-                                                }
+                                                },
+                                                "column_type_representation": null,
+                                                "argument_mappings": {}
                                               }
                                             }
                                           }
@@ -862,7 +935,8 @@
                               }
                             }
                           }
-                        }
+                        },
+                        "aggregate_selection": null
                       },
                       "name": "[{\"subgraph\":\"default\",\"name\":\"commandArticle\"},\"article\"]",
                       "relationship_info": {
@@ -885,7 +959,9 @@
                           },
                           "capabilities": {
                             "supports_explaining_queries": true,
-                            "supports_explaining_mutations": false
+                            "supports_explaining_mutations": false,
+                            "supports_nested_object_filtering": true,
+                            "supports_nested_object_aggregations": false
                           }
                         },
                         "source_type_mappings": {
@@ -898,21 +974,27 @@
                                   "column_type": {
                                     "type": "named",
                                     "name": "int4"
-                                  }
+                                  },
+                                  "column_type_representation": null,
+                                  "argument_mappings": {}
                                 },
                                 "author_id": {
                                   "column": "author_id",
                                   "column_type": {
                                     "type": "named",
                                     "name": "int4"
-                                  }
+                                  },
+                                  "column_type_representation": null,
+                                  "argument_mappings": {}
                                 },
                                 "title": {
                                   "column": "title",
                                   "column_type": {
                                     "type": "named",
                                     "name": "varchar"
-                                  }
+                                  },
+                                  "column_type_representation": null,
+                                  "argument_mappings": {}
                                 }
                               }
                             }
@@ -933,10 +1015,13 @@
                               },
                               "capabilities": {
                                 "supports_explaining_queries": true,
-                                "supports_explaining_mutations": false
+                                "supports_explaining_mutations": false,
+                                "supports_nested_object_filtering": true,
+                                "supports_nested_object_aggregations": false
                               }
                             },
                             "collection": "article",
+                            "collection_type": "article",
                             "type_mappings": {
                               "{\"subgraph\":\"default\",\"name\":\"article\"}": {
                                 "Object": {
@@ -947,21 +1032,27 @@
                                       "column_type": {
                                         "type": "named",
                                         "name": "int4"
-                                      }
+                                      },
+                                      "column_type_representation": null,
+                                      "argument_mappings": {}
                                     },
                                     "author_id": {
                                       "column": "author_id",
                                       "column_type": {
                                         "type": "named",
                                         "name": "int4"
-                                      }
+                                      },
+                                      "column_type_representation": null,
+                                      "argument_mappings": {}
                                     },
                                     "title": {
                                       "column": "title",
                                       "column_type": {
                                         "type": "named",
                                         "name": "varchar"
-                                      }
+                                      },
+                                      "column_type_representation": null,
+                                      "argument_mappings": {}
                                     }
                                   }
                                 }

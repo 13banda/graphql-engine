@@ -8,40 +8,56 @@
 // No modules outside this should know about its internal structure.
 
 mod helpers;
+mod ndc_migration;
 mod stages;
 mod types;
 
+pub use helpers::http;
 pub use helpers::ndc_validation::NDCValidationError;
 pub use helpers::types::{
     get_type_representation, mk_name, object_type_exists, unwrap_custom_type_name,
     NdcColumnForComparison, TypeRepresentation,
 };
+pub use stages::aggregates::{
+    AggregatableFieldInfo, AggregateExpression, AggregateExpressionGraphqlConfig, AggregateOperand,
+    AggregationFunctionInfo, DataConnectorAggregationFunctionInfo,
+};
+pub use stages::boolean_expressions::{
+    BooleanExpressionComparableRelationship, BooleanExpressionGraphqlConfig,
+    ComparisonExpressionInfo, IncludeLogicalOperators, ObjectComparisonExpressionInfo,
+    ResolvedObjectBooleanExpressionType,
+};
 pub use stages::command_permissions::CommandWithPermissions;
 pub use stages::commands::Command;
+pub use stages::data_connectors;
 pub use stages::data_connectors::DataConnectorLink;
 pub use stages::model_permissions::{
-    FilterPermission, ModelPredicate, ModelTargetSource, ModelWithPermissions,
+    FilterPermission, ModelPredicate, ModelTargetSource, ModelWithPermissions, SelectPermission,
 };
-pub use stages::models::{
-    ConnectorArgumentName, Model, ModelOrderByExpression, ModelSource, SelectManyGraphQlDefinition,
-    SelectUniqueGraphQlDefinition,
+pub use stages::models::{ConnectorArgumentName, Model, ModelSource};
+pub use stages::scalar_boolean_expressions::ResolvedScalarBooleanExpressionType;
+
+pub use stages::models_graphql::{
+    ModelExpressionType, ModelOrderByExpression, SelectAggregateGraphQlDefinition,
+    SelectManyGraphQlDefinition, SelectUniqueGraphQlDefinition,
 };
 pub use stages::object_boolean_expressions::{
-    BooleanExpressionGraphqlConfig, ComparisonExpressionInfo, ObjectBooleanExpressionDataConnector,
-    ObjectBooleanExpressionType,
+    ObjectBooleanExpressionDataConnector, ObjectBooleanExpressionType,
 };
 pub use stages::object_types::{
     FieldMapping, ObjectTypeRepresentation, ResolvedObjectApolloFederationConfig, TypeMapping,
 };
 pub use stages::relationships::{
-    relationship_execution_category, ObjectTypeWithRelationships, Relationship,
-    RelationshipCapabilities, RelationshipCommandMapping, RelationshipExecutionCategory,
+    relationship_execution_category, CommandRelationshipTarget, ModelAggregateRelationshipTarget,
+    ModelRelationshipTarget, ObjectTypeWithRelationships, RelationshipCapabilities,
+    RelationshipCommandMapping, RelationshipExecutionCategory, RelationshipField,
     RelationshipModelMapping, RelationshipTarget,
 };
+pub use stages::scalar_types::ScalarTypeRepresentation;
 pub use stages::type_permissions::TypeInputPermission;
 pub use stages::{resolve, Metadata};
+pub use types::configuration;
 pub use types::error::{BooleanExpressionError, Error};
-pub use types::internal_flags::MetadataResolveFlagsInternal;
 pub use types::permission::ValueExpression;
 pub use types::subgraph::{
     deserialize_non_string_key_btreemap, deserialize_qualified_btreemap,

@@ -2,6 +2,7 @@
 //!
 //! A 'command' executes a function/procedure and returns back the result of the execution.
 use hasura_authn_core::SessionVariables;
+use indexmap::IndexMap;
 use lang_graphql::ast::common as ast;
 use lang_graphql::ast::common::TypeContainer;
 use lang_graphql::ast::common::TypeName;
@@ -16,11 +17,16 @@ use serde_json as json;
 use std::collections::BTreeMap;
 
 use super::arguments;
+use super::error::InternalDeveloperError;
 use super::selection_set;
+use super::selection_set::FieldSelection;
+use super::selection_set::NestedSelection;
+use super::selection_set::ResultSelectionSet;
 use crate::ir::error;
 use crate::ir::permissions;
 use crate::model_tracking::{count_command, UsagesCounts};
 use metadata_resolve;
+use metadata_resolve::http::SerializableHeaderMap;
 use metadata_resolve::{ConnectorArgumentName, Qualified, QualifiedTypeReference};
 use schema::ArgumentNameAndPath;
 use schema::ArgumentPresets;
@@ -87,6 +93,7 @@ pub(crate) fn generate_command_info<'n, 's>(
     result_base_type_kind: TypeKind,
     command_source: &'s CommandSourceDetail,
     session_variables: &SessionVariables,
+    request_headers: &reqwest::header::HeaderMap,
     usage_counts: &mut UsagesCounts,
 ) -> Result<CommandInfo<'s>, error::Error> {
     let mut command_arguments = BTreeMap::new();
@@ -100,7 +107,8 @@ pub(crate) fn generate_command_info<'n, 's>(
         command_arguments.insert(ndc_arg_name, ndc_val);
     }
 
-    // fetch argument presets from namespace annotation
+    // preset arguments from permissions presets (both command permission argument
+    // presets and input field presets)
     if let Some(ArgumentPresets { argument_presets }) =
         permissions::get_argument_presets(field_call.info.namespaced)?
     {
@@ -148,6 +156,48 @@ pub(crate) fn generate_command_info<'n, 's>(
         }
     }
 
+    // preset arguments from `DataConnectorLink` argument presets
+    for dc_argument_preset in &command_source.data_connector.argument_presets {
+        let mut headers_argument = reqwest::header::HeaderMap::new();
+
+        // add headers from the request to be forwarded
+        for header_name in &dc_argument_preset.value.http_headers.forward {
+            if let Some(header_value) = request_headers.get(&header_name.0) {
+                headers_argument.insert(header_name.0.clone(), header_value.clone());
+            }
+        }
+
+        // add additional headers from `ValueExpression`
+        for (header_name, value_expression) in &dc_argument_preset.value.http_headers.additional {
+            // TODO: have helper functions to create types
+            let string_type = QualifiedTypeReference {
+                nullable: false,
+                underlying_type: metadata_resolve::QualifiedBaseType::Named(
+                    metadata_resolve::QualifiedTypeName::Inbuilt(
+                        open_dds::types::InbuiltType::String,
+                    ),
+                ),
+            };
+            let value = permissions::make_value_from_value_expression(
+                value_expression,
+                &string_type,
+                session_variables,
+                usage_counts,
+            )?;
+            let header_value =
+                reqwest::header::HeaderValue::from_str(serde_json::to_string(&value)?.as_str())
+                    .map_err(|_e| {
+                        InternalDeveloperError::UnableToConvertValueExpressionToHeaderValue
+                    })?;
+            headers_argument.insert(header_name.0.clone(), header_value);
+        }
+
+        command_arguments.insert(
+            dc_argument_preset.name.to_string(),
+            serde_json::to_value(SerializableHeaderMap(headers_argument))?,
+        );
+    }
+
     // Add the name of the root command
     let mut usage_counts = UsagesCounts::new();
     count_command(command_name, &mut usage_counts);
@@ -159,8 +209,10 @@ pub(crate) fn generate_command_info<'n, 's>(
         &command_source.data_connector,
         &command_source.type_mappings,
         session_variables,
+        request_headers,
         &mut usage_counts,
     )?;
+    let selection = wrap_selection_in_response_config(command_source, selection);
 
     Ok(CommandInfo {
         command_name: command_name.clone(),
@@ -173,6 +225,47 @@ pub(crate) fn generate_command_info<'n, 's>(
     })
 }
 
+/// Wrap a selection set in a `{"headers": ..., "response": ...}` selection
+/// shape for command selections, where `CommandsResponseConfig` is configured.
+///
+/// When the output type of a NDC function/procedure is an object type,
+/// containing headers and response fields; and the response field is also an
+/// object type -
+/// 1. Engine needs to generate fields selection IR such that it contains
+/// `{"headers": ..., "response": ...}` shape, and the actual selection from the
+/// user-facing query goes inside the `response` field
+fn wrap_selection_in_response_config<'a>(
+    command_source: &CommandSourceDetail,
+    original_selection: Option<NestedSelection<'a>>,
+) -> Option<NestedSelection<'a>> {
+    match &command_source.data_connector.response_config {
+        None => original_selection,
+        Some(response_config) => {
+            if command_source.ndc_type_opendd_type_same {
+                original_selection
+            } else {
+                let headers_field_name = response_config.headers_field.clone();
+                let headers_field = FieldSelection::Column {
+                    column: headers_field_name.clone(),
+                    nested_selection: None,
+                    arguments: BTreeMap::new(),
+                };
+                let result_field_name = response_config.result_field.clone();
+                let result_field = FieldSelection::Column {
+                    column: result_field_name.clone(),
+                    nested_selection: original_selection,
+                    arguments: BTreeMap::new(),
+                };
+                let fields = IndexMap::from_iter([
+                    (headers_field_name, headers_field),
+                    (result_field_name, result_field),
+                ]);
+                Some(NestedSelection::Object(ResultSelectionSet { fields }))
+            }
+        }
+    }
+}
+
 /// Generates the IR for a 'function based command' operation
 pub(crate) fn generate_function_based_command<'n, 's>(
     command_name: &Qualified<commands::CommandName>,
@@ -183,6 +276,7 @@ pub(crate) fn generate_function_based_command<'n, 's>(
     result_base_type_kind: TypeKind,
     command_source: &'s CommandSourceDetail,
     session_variables: &SessionVariables,
+    request_headers: &reqwest::header::HeaderMap,
     usage_counts: &mut UsagesCounts,
 ) -> Result<FunctionBasedCommand<'s>, error::Error> {
     let command_info = generate_command_info(
@@ -193,6 +287,7 @@ pub(crate) fn generate_function_based_command<'n, 's>(
         result_base_type_kind,
         command_source,
         session_variables,
+        request_headers,
         usage_counts,
     )?;
 
@@ -213,6 +308,7 @@ pub(crate) fn generate_procedure_based_command<'n, 's>(
     result_base_type_kind: TypeKind,
     command_source: &'s CommandSourceDetail,
     session_variables: &SessionVariables,
+    request_headers: &reqwest::header::HeaderMap,
 ) -> Result<ProcedureBasedCommand<'s>, error::Error> {
     let mut usage_counts = UsagesCounts::new();
 
@@ -224,6 +320,7 @@ pub(crate) fn generate_procedure_based_command<'n, 's>(
         result_base_type_kind,
         command_source,
         session_variables,
+        request_headers,
         &mut usage_counts,
     )?;
 

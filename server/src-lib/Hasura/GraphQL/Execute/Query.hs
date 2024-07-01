@@ -39,7 +39,7 @@ import Hasura.RemoteSchema.Metadata.Base (RemoteSchemaName (..))
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.Server.Init.Config (ResponseInternalErrorsConfig (..))
 import Hasura.Server.Prometheus (PrometheusMetrics (..))
-import Hasura.Server.Types (HeaderPrecedence, MonadGetPolicies, RequestId (..))
+import Hasura.Server.Types (HeaderPrecedence, MonadGetPolicies, RequestId (..), TraceQueryStatus)
 import Hasura.Services.Network
 import Hasura.Session
 import Hasura.Tracing (MonadTrace)
@@ -94,6 +94,7 @@ convertQuerySelSet ::
   Maybe G.Name ->
   ResponseInternalErrorsConfig ->
   HeaderPrecedence ->
+  TraceQueryStatus ->
   m (ExecutionPlan, [QueryRootField UnpreparedValue], DirectiveMap, ParameterizedQueryHash, [ModelInfoPart])
 convertQuerySelSet
   env
@@ -112,17 +113,18 @@ convertQuerySelSet
   reqId
   maybeOperationName
   responseErrorsConfig
-  headerPrecedence = do
+  headerPrecedence
+  traceQueryStatus = do
     -- 1. Parse the GraphQL query into the 'RootFieldMap' and a 'SelectionSet'
     (unpreparedQueries, normalizedDirectives, normalizedSelectionSet) <-
-      Tracing.newSpan "Parse query IR" $ parseGraphQLQuery nullInNonNullableVariables gqlContext varDefs (GH._grVariables gqlUnparsed) directives fields
+      Tracing.newSpan "Parse query IR" Tracing.SKInternal $ parseGraphQLQuery nullInNonNullableVariables gqlContext varDefs (GH._grVariables gqlUnparsed) directives fields
 
     -- 2. Parse directives on the query
     dirMap <- toQErr $ runParse (parseDirectives customDirectives (G.DLExecutable G.EDLQUERY) normalizedDirectives)
 
     let parameterizedQueryHash = calculateParameterizedQueryHash normalizedSelectionSet
 
-        resolveExecutionSteps rootFieldName rootFieldUnpreparedValue = Tracing.newSpan ("Resolve execution step for " <>> rootFieldName) do
+        resolveExecutionSteps rootFieldName rootFieldUnpreparedValue = Tracing.newSpan ("Resolve execution step for " <>> rootFieldName) Tracing.SKInternal do
           case rootFieldUnpreparedValue of
             RFMulti lst -> do
               allSteps <- traverse (resolveExecutionSteps rootFieldName) lst
@@ -142,7 +144,7 @@ convertQuerySelSet
                       queryTagsAttributes = encodeQueryTags $ QTQuery $ QueryMetadata mReqId maybeOperationName rootFieldName parameterizedQueryHash
                       queryTagsComment = Tagged.untag $ createQueryTags @m queryTagsAttributes queryTagsConfig
                       (noRelsDBAST, remoteJoins) = RJ.getRemoteJoinsQueryDB db
-                  (dbStepInfo, dbModelInfoList) <- flip runReaderT queryTagsComment $ mkDBQueryPlan @b userInfo sourceName sourceConfig noRelsDBAST reqHeaders maybeOperationName
+                  (dbStepInfo, dbModelInfoList) <- flip runReaderT queryTagsComment $ mkDBQueryPlan @b userInfo sourceName sourceConfig noRelsDBAST reqHeaders maybeOperationName traceQueryStatus
                   pure $ (ExecStepDB [] (AB.mkAnyBackend dbStepInfo) remoteJoins, dbModelInfoList)
             RFRemote (RemoteSchemaName rName) rf -> do
               RemoteSchemaRootField remoteSchemaInfo resultCustomizer remoteField <- runVariableCache $ for rf $ resolveRemoteVariable userInfo

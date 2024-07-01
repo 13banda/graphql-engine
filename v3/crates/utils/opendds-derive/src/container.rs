@@ -1,14 +1,16 @@
 use convert_case::{Case, Casing};
-use darling::{FromAttributes, FromField, FromMeta};
-use syn::{self, DeriveInput};
+use std::sync::OnceLock;
 
 use crate::MacroResult;
+use darling::{FromAttributes, FromField, FromMeta};
+use syn::{self, DeriveInput};
 
 /// JSON schema attributes
 #[derive(Default, FromMeta)]
 #[darling(default)]
 struct JsonSchemaOpts {
     rename: Option<String>,
+    id: Option<String>,
     title: Option<String>,
     example: Option<syn::Path>,
 }
@@ -30,6 +32,7 @@ struct FieldOpts {
     alias: Option<String>,
     #[darling(default)]
     json_schema: JsonSchemaFieldOpts,
+    hidden: Option<bool>,
 }
 
 /// JSON schema field attributes
@@ -67,6 +70,7 @@ pub struct Container<'a> {
 
 pub struct JsonSchemaMetadata {
     pub schema_name: String,
+    pub id: String,
     pub title: String,
     pub description: Option<String>,
     pub example: Option<syn::Path>,
@@ -74,6 +78,10 @@ pub struct JsonSchemaMetadata {
 
 impl<'a> Container<'a> {
     pub fn from_derive_input(input: &'a DeriveInput) -> MacroResult<Self> {
+        static INVALID_NAME_CHARACTER: OnceLock<regex::Regex> = OnceLock::new();
+        let invalid_name_character =
+            INVALID_NAME_CHARACTER.get_or_init(|| regex::Regex::new("[^0-9A-Za-z_]").unwrap());
+
         let (doc_title, doc_description) =
             crate::helpers::get_title_and_desc_from_doc(&input.attrs);
         let (json_schema_opts, data) = match &input.data {
@@ -93,18 +101,33 @@ impl<'a> Container<'a> {
                 );
             }
         };
+
+        // Rules:
+        // * The schema ID is set by the `id` property, falling back to `rename`.
+        // * The schema ID is always prefixed by a URL base.
+        // * The schema name is set by the `rename` property, falling back to `id`.
+        // * The schema title is set by the `title` property, falling back to `rename`, then `id`.
+        // * If the name or title are automatically created from the ID, remove characters that
+        //   might choke a code generator, such as ' ' or '/'.
+
+        let id = json_schema_opts
+            .id
+            .or_else(|| json_schema_opts.rename.clone())
+            .unwrap_or_else(|| input.ident.to_string());
+        let schema_id = format!("https://hasura.io/jsonschemas/metadata/{id}");
         let schema_name = json_schema_opts
             .rename
-            .unwrap_or_else(|| input.ident.to_string());
+            .unwrap_or_else(|| invalid_name_character.replace_all(&id, "_").to_string());
         let schema_title = json_schema_opts
             .title
             .or(doc_title)
-            .unwrap_or(schema_name.to_string());
+            .unwrap_or_else(|| schema_name.clone());
         let schema_example = json_schema_opts.example;
 
         let json_schema_metadata = JsonSchemaMetadata {
             schema_name,
             title: schema_title,
+            id: schema_id,
             description: doc_description,
             example: schema_example,
         };
@@ -157,6 +180,7 @@ pub struct NamedField<'a> {
     pub is_optional: bool,
     pub default_exp: Option<syn::Expr>,
     pub description: Option<String>,
+    pub hidden: bool,
 }
 
 impl<'a> NamedField<'a> {
@@ -175,6 +199,13 @@ impl<'a> NamedField<'a> {
         let is_default = field_opts.default.unwrap_or(false);
         let is_optional = is_option_type(&field.ty);
         let default_exp = field_opts.json_schema.default_exp;
+        let hidden = field_opts.hidden.unwrap_or(false);
+        if hidden && !is_default && !is_optional {
+            Err(syn::Error::new_spanned(
+                field,
+                "field cannot be hidden unless it is optional or default",
+            ))?;
+        }
         Ok(Self {
             field_name,
             field_type,
@@ -184,6 +215,7 @@ impl<'a> NamedField<'a> {
             is_optional,
             default_exp,
             description,
+            hidden,
         })
     }
 }

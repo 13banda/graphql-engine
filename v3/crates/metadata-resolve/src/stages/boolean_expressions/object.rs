@@ -1,43 +1,49 @@
-pub use super::{
-    BooleanExpressionGraphqlConfig, BooleanExpressionGraphqlFieldConfig, ComparisonExpressionInfo,
-    ResolvedObjectBooleanExpressionType, ResolvedScalarBooleanExpressionType,
-};
-use crate::helpers::types::mk_name;
-use crate::stages::{graphql_config, object_types, scalar_types, type_permissions};
-use crate::types::error::{BooleanExpressionError, Error, GraphqlConfigError};
-use crate::types::subgraph::mk_qualified_type_reference;
+use super::graphql;
+use super::helpers;
+pub use super::{BooleanExpressionComparableRelationship, ResolvedObjectBooleanExpressionType};
+use crate::stages::{graphql_config, object_types, scalar_boolean_expressions, type_permissions};
+use crate::types::error::{BooleanExpressionError, Error};
+use crate::types::subgraph::mk_qualified_type_name;
 use crate::Qualified;
-use lang_graphql::ast::common::{self as ast};
 use open_dds::{
     boolean_expression::{
-        BooleanExpressionComparableField, BooleanExpressionObjectOperand,
+        BooleanExpressionComparableField, BooleanExpressionLogicalOperators,
+        BooleanExpressionObjectOperand, BooleanExpressionOperand, BooleanExpressionScalarOperand,
         BooleanExpressionTypeGraphQlConfiguration,
     },
-    data_connector::DataConnectorName,
     types::{CustomTypeName, FieldName, TypeName},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+
+pub(crate) type RawBooleanExpressionTypes<'a> = BTreeMap<
+    Qualified<CustomTypeName>,
+    (
+        &'a open_dds::identifier::SubgraphIdentifier,
+        &'a open_dds::boolean_expression::BooleanExpressionTypeV1,
+    ),
+>;
 
 /// Resolves a given object boolean expression type
 pub(crate) fn resolve_object_boolean_expression_type(
     boolean_expression_type_name: &Qualified<CustomTypeName>,
     object_boolean_expression_operand: &BooleanExpressionObjectOperand,
+    logical_operators: &BooleanExpressionLogicalOperators,
     subgraph: &str,
     graphql: &Option<BooleanExpressionTypeGraphQlConfiguration>,
     object_types: &BTreeMap<Qualified<CustomTypeName>, type_permissions::ObjectTypeWithPermissions>,
     scalar_boolean_expression_types: &BTreeMap<
         Qualified<CustomTypeName>,
-        ResolvedScalarBooleanExpressionType,
+        scalar_boolean_expressions::ResolvedScalarBooleanExpressionType,
     >,
-    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
-    all_boolean_expression_names: &BTreeSet<Qualified<CustomTypeName>>,
+    raw_boolean_expression_types: &RawBooleanExpressionTypes,
     graphql_config: &graphql_config::GraphqlConfig,
 ) -> Result<ResolvedObjectBooleanExpressionType, Error> {
     let qualified_object_type_name = Qualified::new(
         subgraph.to_string(),
-        object_boolean_expression_operand.r#type.to_owned(),
+        object_boolean_expression_operand.r#type.clone(),
     );
 
+    // get the underlying object type
     let object_type_representation =
         object_types
             .get(&qualified_object_type_name)
@@ -49,29 +55,34 @@ pub(crate) fn resolve_object_boolean_expression_type(
                 )
             })?;
 
+    // resolve any comparable fields
     let comparable_fields = resolve_comparable_fields(
         &object_boolean_expression_operand.comparable_fields,
         &object_type_representation.object_type,
         boolean_expression_type_name,
         subgraph,
-        all_boolean_expression_names,
+        raw_boolean_expression_types,
     )?;
 
-    let _allowed_data_connectors = resolve_data_connector_types(
+    // resolve any comparable relationships
+    let comparable_relationships = resolve_comparable_relationships(
         boolean_expression_type_name,
-        object_type_representation,
-        scalar_boolean_expression_types,
-        &comparable_fields,
+        &object_boolean_expression_operand.comparable_relationships,
+        subgraph,
+        raw_boolean_expression_types,
     )?;
 
+    // resolve graphql schema information
     let resolved_graphql = graphql
         .as_ref()
         .map(|object_boolean_graphql_config| {
-            resolve_object_boolean_graphql(
+            graphql::resolve_object_boolean_graphql(
+                boolean_expression_type_name,
                 object_boolean_graphql_config,
                 &comparable_fields,
+                &comparable_relationships,
                 scalar_boolean_expression_types,
-                scalar_types,
+                raw_boolean_expression_types,
                 subgraph,
                 graphql_config,
             )
@@ -80,167 +91,56 @@ pub(crate) fn resolve_object_boolean_expression_type(
 
     let resolved_boolean_expression = ResolvedObjectBooleanExpressionType {
         name: boolean_expression_type_name.clone(),
+        include_logical_operators: helpers::resolve_logical_operators(logical_operators),
         object_type: qualified_object_type_name.clone(),
         graphql: resolved_graphql,
     };
     Ok(resolved_boolean_expression)
 }
 
-// resolve data connector stuff
-// look at the object_type
-// for each data connector it mentions, check that every linked scalar type
-// has information for this data connector
-fn resolve_data_connector_types(
+// resolve comparable relationships. These should only be local relationships (ie, in the same data
+// connector), however we are unable to ascertain this early in the pipeline. More indepth checks
+// should occur when resolving models, when the model source is known.
+fn resolve_comparable_relationships(
     boolean_expression_type_name: &Qualified<CustomTypeName>,
-
-    object_type_representation: &type_permissions::ObjectTypeWithPermissions,
-    scalar_boolean_expression_types: &BTreeMap<
-        Qualified<CustomTypeName>,
-        ResolvedScalarBooleanExpressionType,
+    comparable_relationships: &Vec<
+        open_dds::boolean_expression::BooleanExpressionComparableRelationship,
     >,
-    comparable_fields: &BTreeMap<FieldName, Qualified<CustomTypeName>>,
-) -> Result<BTreeSet<Qualified<DataConnectorName>>, Error> {
-    let mut working_data_connectors = BTreeSet::new();
-
-    // for each data connector mentioned in `object_type`, check that every field is mapped
-    // in our comparison fields
-    // not sure what to do if this fails as we want schema to work without data connector info
-    for data_connector_name in object_type_representation
-        .type_mappings
-        .data_connector_names()
-    {
-        for (comparable_field_name, comparable_field_type) in comparable_fields {
-            let scalar_boolean_expression = scalar_boolean_expression_types
-                .get(comparable_field_type)
-                .ok_or_else(|| Error::BooleanExpressionError {
-                    boolean_expression_error:
-                        BooleanExpressionError::ScalarBooleanExpressionCouldNotBeFound {
-                            boolean_expression: boolean_expression_type_name.clone(),
-                            scalar_boolean_expression: comparable_field_type.clone(),
-                        },
-                })?;
-
-            // currently this throws an error if any data connector specified in the ObjectType
-            // does not have matching data connector entries for each scalar boolean expression
-            // type
-            // Not sure if this is correct behaviour, or if we only want to make this a problem
-            // when making these available in the GraphQL schema
-            if !scalar_boolean_expression
-                .data_connector_operator_mappings
-                .contains_key(data_connector_name)
-            {
-                return Err(Error::BooleanExpressionError {
-                    boolean_expression_error:
-                        BooleanExpressionError::DataConnectorMappingMissingForField {
-                            field: comparable_field_name.clone(),
-                            boolean_expression_name: boolean_expression_type_name.clone(),
-                            data_connector_name: data_connector_name.clone(),
-                        },
-                });
-            };
-        }
-
-        working_data_connectors.insert(data_connector_name.clone());
-    }
-
-    Ok(working_data_connectors)
-}
-
-// validate graphql config
-fn resolve_object_boolean_graphql(
-    boolean_expression_graphql_config: &BooleanExpressionTypeGraphQlConfiguration,
-    comparable_fields: &BTreeMap<FieldName, Qualified<CustomTypeName>>,
-    scalar_boolean_expression_types: &BTreeMap<
-        Qualified<CustomTypeName>,
-        ResolvedScalarBooleanExpressionType,
-    >,
-    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
     subgraph: &str,
-    graphql_config: &graphql_config::GraphqlConfig,
-) -> Result<BooleanExpressionGraphqlConfig, Error> {
-    let boolean_expression_graphql_name =
-        mk_name(boolean_expression_graphql_config.type_name.0.as_ref()).map(ast::TypeName)?;
+    raw_boolean_expression_types: &RawBooleanExpressionTypes,
+) -> Result<BTreeMap<FieldName, BooleanExpressionComparableRelationship>, Error> {
+    let mut resolved_comparable_relationships = BTreeMap::new();
 
-    let mut scalar_fields = BTreeMap::new();
-
-    let filter_graphql_config = graphql_config
-        .query
-        .filter_input_config
-        .as_ref()
-        .ok_or_else(|| Error::GraphqlConfigError {
-            graphql_config_error: GraphqlConfigError::MissingFilterInputFieldInGraphqlConfig,
-        })?;
-
-    for (comparable_field_name, comparable_field_type_name) in comparable_fields {
-        // Generate comparison expression for fields mapped to simple scalar type
-        if let Some(scalar_boolean_expression_type) =
-            scalar_boolean_expression_types.get(comparable_field_type_name)
+    for comparable_relationship in comparable_relationships {
+        // if the relationship has provided an optional boolean_expression_type...
+        if let Some(target_boolean_expression_type_name) =
+            &comparable_relationship.boolean_expression_type
         {
-            // get the underlying scalar_type, if applicable
-            match &scalar_boolean_expression_type.r#type {
-                TypeName::Inbuilt(_) => None,
-                TypeName::Custom(type_name) => {
-                    let qualified_type_name =
-                        Qualified::new(subgraph.to_string(), type_name.to_owned());
-                    scalar_types.get(&qualified_type_name)
-                }
-            };
-
-            if let Some((scalar_type, qualified_type_name)) =
-                match &scalar_boolean_expression_type.r#type {
-                    TypeName::Inbuilt(_) => None,
-                    TypeName::Custom(type_name) => {
-                        let qualified_type_name =
-                            Qualified::new(subgraph.to_string(), type_name.to_owned());
-                        scalar_types
-                            .get(&qualified_type_name)
-                            .map(|scalar_type| (scalar_type, qualified_type_name))
-                    }
-                }
-            {
-                if let Some(graphql_type_name) = &scalar_type.graphql_type_name {
-                    let mut operators = BTreeMap::new();
-                    for (op_name, op_definition) in
-                        &scalar_boolean_expression_type.comparison_operators
-                    {
-                        operators.insert(
-                            op_name.clone(),
-                            mk_qualified_type_reference(op_definition, subgraph),
-                        );
-                    }
-
-                    // Register scalar comparison field only if it contains non-zero operators.
-                    if !operators.is_empty() {
-                        scalar_fields.insert(
-                            comparable_field_name.clone(),
-                            ComparisonExpressionInfo {
-                                scalar_type_name: qualified_type_name.to_string(),
-                                type_name: graphql_type_name.clone(),
-                                operators,
-                                is_null_operator_name: filter_graphql_config
-                                    .operator_names
-                                    .is_null
-                                    .clone(),
-                            },
-                        );
-                    };
-                }
-            }
+            // ...check it exists
+            let _raw_boolean_expression_type = helpers::lookup_raw_boolean_expression(
+                boolean_expression_type_name,
+                &Qualified::new(
+                    subgraph.to_string(),
+                    target_boolean_expression_type_name.clone(),
+                ),
+                raw_boolean_expression_types,
+            )?;
         }
+        let resolved_comparable_relationship = BooleanExpressionComparableRelationship {
+            relationship_name: comparable_relationship.relationship_name.clone(),
+            boolean_expression_type: comparable_relationship
+                .boolean_expression_type
+                .as_ref()
+                .map(|bool_exp| Qualified::new(subgraph.to_string(), bool_exp.clone())),
+        };
+        resolved_comparable_relationships.insert(
+            FieldName(comparable_relationship.relationship_name.0.clone()),
+            resolved_comparable_relationship,
+        );
     }
 
-    Ok(BooleanExpressionGraphqlConfig {
-        type_name: boolean_expression_graphql_name,
-        scalar_fields,
-        graphql_config: (BooleanExpressionGraphqlFieldConfig {
-            where_field_name: filter_graphql_config.where_field_name.clone(),
-            and_operator_name: filter_graphql_config.operator_names.and.clone(),
-            or_operator_name: filter_graphql_config.operator_names.or.clone(),
-            not_operator_name: filter_graphql_config.operator_names.not.clone(),
-        }),
-    })
+    Ok(resolved_comparable_relationships)
 }
-
 // comparable_fields don't do much, all we can do is ensure that the other BooleanExpressionTypes
 // they refer to exist
 fn resolve_comparable_fields(
@@ -248,45 +148,76 @@ fn resolve_comparable_fields(
     object_type_representation: &object_types::ObjectTypeRepresentation,
     boolean_expression_type_name: &Qualified<CustomTypeName>,
     subgraph: &str,
-    all_boolean_expression_names: &BTreeSet<Qualified<CustomTypeName>>,
+    raw_boolean_expression_types: &RawBooleanExpressionTypes,
 ) -> Result<BTreeMap<FieldName, Qualified<CustomTypeName>>, Error> {
     let mut resolved_comparable_fields = BTreeMap::new();
 
     // validate comparable fields all exist in underlying object
     for comparable_field in comparable_fields {
-        if !object_type_representation
+        // fields with field arguments are not allowed in boolean expressions
+        if let Some(field_definition) = object_type_representation
             .fields
-            .contains_key(&comparable_field.field_name)
+            .get(&comparable_field.field_name)
         {
-            return Err(
-                BooleanExpressionError::UnknownFieldInObjectBooleanExpressionType {
-                    field_name: comparable_field.field_name.clone(),
-                    object_boolean_expression_type: boolean_expression_type_name.clone(),
-                }
-                .into(),
-            );
+            if !field_definition.field_arguments.is_empty() {
+                continue;
+            }
         }
 
-        let field_boolean_expression_type = Qualified::new(
+        let field = object_type_representation
+            .fields
+            .get(&comparable_field.field_name)
+            .ok_or_else(|| {
+                Error::from(
+                    BooleanExpressionError::UnknownFieldInObjectBooleanExpressionType {
+                        field_name: comparable_field.field_name.clone(),
+                        object_boolean_expression_type: boolean_expression_type_name.clone(),
+                    },
+                )
+            })?;
+
+        let field_boolean_expression_type_name = Qualified::new(
             subgraph.to_string(),
             comparable_field.boolean_expression_type.clone(),
         );
 
         // lookup the boolean expression type to check it exists
-        if all_boolean_expression_names.contains(&field_boolean_expression_type) {
-            resolved_comparable_fields.insert(
-                comparable_field.field_name.clone(),
-                field_boolean_expression_type,
-            );
-        } else {
-            return Err(
-                BooleanExpressionError::ScalarBooleanExpressionCouldNotBeFound {
-                    boolean_expression: boolean_expression_type_name.clone(),
-                    scalar_boolean_expression: field_boolean_expression_type.clone(),
-                }
-                .into(),
-            );
+        let (_, raw_boolean_expression_type) = helpers::lookup_raw_boolean_expression(
+            boolean_expression_type_name,
+            &field_boolean_expression_type_name,
+            raw_boolean_expression_types,
+        )?;
+
+        // get type of field
+        let field_type = field.field_type.get_underlying_type_name();
+
+        // get type underlying boolean expression
+        let boolean_expression_underlying_type = match &raw_boolean_expression_type.operand {
+            BooleanExpressionOperand::Object(BooleanExpressionObjectOperand { r#type, .. }) => {
+                TypeName::Custom(r#type.clone())
+            }
+            BooleanExpressionOperand::Scalar(BooleanExpressionScalarOperand { r#type, .. }) => {
+                r#type.clone()
+            }
+        };
+
+        let qualified_boolean_expression_type =
+            mk_qualified_type_name(&boolean_expression_underlying_type, subgraph);
+
+        // ensure the two types are the same
+        if qualified_boolean_expression_type != *field_type {
+            return Err(Error::from(BooleanExpressionError::FieldTypeMismatch {
+                field_boolean_expression_type_name: field_boolean_expression_type_name.clone(),
+                field_name: comparable_field.field_name.clone(),
+                field_type: field_type.clone(),
+                underlying_type: qualified_boolean_expression_type,
+            }));
         }
+
+        resolved_comparable_fields.insert(
+            comparable_field.field_name.clone(),
+            field_boolean_expression_type_name,
+        );
     }
 
     Ok(resolved_comparable_fields)

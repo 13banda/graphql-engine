@@ -2,68 +2,101 @@
 //! or fail in the expected way.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde_json::Value;
+use metadata_resolve::configuration;
 
-use metadata_resolve::MetadataResolveFlagsInternal;
+#[test]
+fn test_passing_metadata() {
+    insta::glob!("passing/**/metadata.json", |path| {
+        let directory = path.parent().unwrap();
+        insta::with_settings!({
+            snapshot_path => directory,
+            snapshot_suffix => "",
+            prepend_module_to_snapshot => false,
+        }, {
+            let configuration = read_test_configuration(directory)
+                .unwrap_or_else(|error| panic!("{}: Could not read configuration: {error}",directory.display()));
 
-#[test_each::path(glob = "crates/metadata-resolve/tests/passing/*/", name(segments = 2))]
-#[allow(clippy::needless_pass_by_value)] // must receive a `PathBuf`
-fn test_passing_metadata(comparison_folder_path: PathBuf) -> anyhow::Result<()> {
-    let passing_example = comparison_folder_path.join("example.json");
+            let metadata_json_text = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("{}: Could not read file {path:?}: {error}", directory.display()));
 
-    let metadata_resolve_flags_internal = MetadataResolveFlagsInternal {
-        enable_boolean_expression_types: true,
-    };
+            let metadata_json_value = serde_json::from_str(&metadata_json_text)
+                .unwrap_or_else(|error| panic!("{}: Could not parse JSON: {error}",directory.display()));
 
-    let metadata_json_value = read_json(&passing_example)?;
+            let metadata = open_dds::traits::OpenDd::deserialize(metadata_json_value)
+                .unwrap_or_else(|error| panic!("{}: Could not deserialize metadata: {error}", directory.display()));
 
-    let metadata = open_dds::traits::OpenDd::deserialize(metadata_json_value)?;
-    let resolved = metadata_resolve::resolve(metadata, &metadata_resolve_flags_internal);
+            let resolved = metadata_resolve::resolve(metadata, configuration)
+                .unwrap_or_else(|error| panic!("{}: Could not resolve metadata: {error}",directory.display()));
 
-    match resolved {
-        Ok(_) => Ok(()),
-        Err(msg) => panic!("{msg}"),
-    }
+            insta::assert_debug_snapshot!("resolved", resolved);
+        });
+    });
 }
 
-#[test_each::path(glob = "crates/metadata-resolve/tests/failing/*/", name(segments = 2))]
-#[allow(clippy::needless_pass_by_value)] // must receive a `PathBuf`
-fn test_failing_metadata(comparison_folder_path: PathBuf) -> anyhow::Result<()> {
-    let failing_example = comparison_folder_path.join("example.json");
-    let failing_reason = comparison_folder_path.join("expected_error.txt");
+#[test]
+fn test_failing_metadata() {
+    insta::glob!("failing/**/metadata.json", |path| {
+        let directory = path.parent().unwrap();
+        insta::with_settings!({
+            snapshot_path => directory,
+            snapshot_suffix => "",
+            prepend_module_to_snapshot => false,
+        }, {
+            let configuration = read_test_configuration(directory)
+                .unwrap_or_else(|error| panic!("{}: Could not read configuration: {error}", directory.display()));
 
-    let metadata_resolve_flags_internal = MetadataResolveFlagsInternal {
-        enable_boolean_expression_types: true,
-    };
+            let metadata_json_text = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("{}: Could not read file {path:?}: {error}", directory.display()));
 
-    let error_untrimmed = fs::read_to_string(failing_reason).unwrap();
-    let error = error_untrimmed.trim();
-
-    match read_json(&failing_example) {
-        Ok(metadata_json_value) => {
-            match open_dds::traits::OpenDd::deserialize(metadata_json_value) {
-                Ok(metadata) => {
-                    match metadata_resolve::resolve(metadata, &metadata_resolve_flags_internal) {
-                        Ok(_) => panic!("Expected to fail with {error}"),
-                        Err(msg) => similar_asserts::assert_eq!(error, msg.to_string()),
-                    }
+            match serde_json::from_str(&metadata_json_text) {
+                Ok(metadata_json_value) => {
+                    match open_dds::traits::OpenDd::deserialize(metadata_json_value) {
+                        Ok(metadata) => {
+                            match metadata_resolve::resolve(metadata, configuration) {
+                                Ok(_) => {
+                                    panic!("{}: Unexpected success when resolving {path:?}.", directory.display());
+                                }
+                                Err(msg) => {
+                                    insta::assert_snapshot!("resolve_error", msg);
+                                }
+                            }
+                        }
+                        Err(msg) => {
+                            insta::assert_snapshot!("deserialize_error", msg);
+                        }
+                    };
                 }
-                Err(msg) => similar_asserts::assert_eq!(msg.to_string(), error),
+
+                Err(msg) => {
+                    insta::assert_snapshot!("parse_error", msg);
+                }
             };
-        }
-
-        Err(msg) => {
-            similar_asserts::assert_eq!(msg.to_string(), error);
-        }
-    };
-
-    Ok(())
+        });
+    });
 }
 
-fn read_json(path: &Path) -> anyhow::Result<Value> {
-    let json_string = fs::read_to_string(path)?;
-    let value = serde_json::from_str(&json_string)?;
-    Ok(value)
+fn read_test_configuration(
+    directory: &Path,
+) -> Result<configuration::Configuration, Box<dyn std::error::Error>> {
+    let unstable_features = configuration::UnstableFeatures {
+        enable_order_by_expressions: false,
+        enable_ndc_v02_support: false,
+    };
+
+    let configuration_path = directory.join("configuration.json");
+    if configuration_path.exists() {
+        let reader = fs::File::open(configuration_path)?;
+        let configuration = serde_json::from_reader(reader)?;
+        Ok(configuration::Configuration {
+            unstable_features,
+            ..configuration
+        })
+    } else {
+        Ok(configuration::Configuration {
+            allow_unknown_subgraphs: false,
+            unstable_features,
+        })
+    }
 }

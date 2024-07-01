@@ -1,6 +1,6 @@
 {
-  "ArticleMany": {
-    "QueryRootField": {
+  "Query": {
+    "ArticleMany": {
       "ModelSelectMany": {
         "selection_set": {
           "fields": {
@@ -21,8 +21,7 @@
                       },
                       "namespaced": null
                     },
-                    "arguments": {},
-                    "directives": {}
+                    "arguments": {}
                   }
                 ]
               ],
@@ -57,14 +56,18 @@
                               },
                               "nullable": false
                             },
-                            "field_base_type_kind": "Scalar"
+                            "field_base_type_kind": "Scalar",
+                            "parent_type": {
+                              "subgraph": "default",
+                              "name": "article"
+                            },
+                            "argument_types": {}
                           }
                         }
                       },
                       "namespaced": null
                     },
-                    "arguments": {},
-                    "directives": {}
+                    "arguments": {}
                   }
                 ]
               ],
@@ -98,7 +101,9 @@
               },
               "capabilities": {
                 "supports_explaining_queries": true,
-                "supports_explaining_mutations": false
+                "supports_explaining_mutations": false,
+                "supports_nested_object_filtering": true,
+                "supports_nested_object_aggregations": false
               }
             },
             "collection": "article",
@@ -137,17 +142,20 @@
                 "hasura_global_id_col_id_article_id": {
                   "Column": {
                     "column": "id",
-                    "nested_selection": null
+                    "nested_selection": null,
+                    "arguments": {}
                   }
                 },
                 "title": {
                   "Column": {
                     "column": "title",
-                    "nested_selection": null
+                    "nested_selection": null,
+                    "arguments": {}
                   }
                 }
               }
-            }
+            },
+            "aggregate_selection": null
           },
           "type_container": {
             "base": {
@@ -174,10 +182,8 @@
           }
         }
       }
-    }
-  },
-  "AuthorMany": {
-    "QueryRootField": {
+    },
+    "AuthorMany": {
       "ModelSelectMany": {
         "selection_set": {
           "fields": {
@@ -204,14 +210,18 @@
                               },
                               "nullable": false
                             },
-                            "field_base_type_kind": "Scalar"
+                            "field_base_type_kind": "Scalar",
+                            "parent_type": {
+                              "subgraph": "default",
+                              "name": "author"
+                            },
+                            "argument_types": {}
                           }
                         }
                       },
                       "namespaced": null
                     },
-                    "arguments": {},
-                    "directives": {}
+                    "arguments": {}
                   }
                 ]
               ],
@@ -246,14 +256,18 @@
                               },
                               "nullable": false
                             },
-                            "field_base_type_kind": "Scalar"
+                            "field_base_type_kind": "Scalar",
+                            "parent_type": {
+                              "subgraph": "default",
+                              "name": "author"
+                            },
+                            "argument_types": {}
                           }
                         }
                       },
                       "namespaced": null
                     },
-                    "arguments": {},
-                    "directives": {}
+                    "arguments": {}
                   }
                 ]
               ],
@@ -287,7 +301,9 @@
               },
               "capabilities": {
                 "supports_explaining_queries": true,
-                "supports_explaining_mutations": false
+                "supports_explaining_mutations": false,
+                "supports_nested_object_filtering": true,
+                "supports_nested_object_aggregations": false
               }
             },
             "collection": "author",
@@ -325,17 +341,20 @@
                 "author_id": {
                   "Column": {
                     "column": "id",
-                    "nested_selection": null
+                    "nested_selection": null,
+                    "arguments": {}
                   }
                 },
                 "first_name": {
                   "Column": {
                     "column": "first_name",
-                    "nested_selection": null
+                    "nested_selection": null,
+                    "arguments": {}
                   }
                 }
               }
-            }
+            },
+            "aggregate_selection": null
           },
           "type_container": {
             "base": {

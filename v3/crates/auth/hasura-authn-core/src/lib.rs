@@ -179,8 +179,8 @@ pub async fn resolve_session<'a, B>(
                 Ok(h) => SessionVariableValue::new(h),
             };
 
-            if session_variable == SESSION_VARIABLE_ROLE.to_owned() {
-                role = Some(Role::new(&variable_value.0))
+            if session_variable == SESSION_VARIABLE_ROLE {
+                role = Some(Role::new(&variable_value.0));
             } else {
                 // TODO: Handle the duplicate case?
                 session_variables.insert(session_variable, variable_value);

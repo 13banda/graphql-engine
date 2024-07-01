@@ -70,23 +70,24 @@ makeSourceJoinCall ::
   IntMap.IntMap JoinArgument ->
   [HTTP.Header] ->
   Maybe G.Name ->
+  TraceQueryStatus ->
   -- | The resulting join index (see 'buildJoinIndex') if any.
   m (Maybe (IntMap.IntMap AO.Value, [ModelInfoPart]))
-makeSourceJoinCall networkFunction userInfo remoteSourceJoin jaFieldName joinArguments reqHeaders operationName =
-  Tracing.newSpan ("Remote join to data source " <> sourceName <<> " for field " <>> jaFieldName) do
+makeSourceJoinCall networkFunction userInfo remoteSourceJoin jaFieldName joinArguments reqHeaders operationName traceQueryStatus =
+  Tracing.newSpan ("Remote join to data source " <> sourceName <<> " for field " <>> jaFieldName) Tracing.SKClient do
     -- step 1: create the SourceJoinCall
     -- maybeSourceCall <-
     --   AB.dispatchAnyBackend @EB.BackendExecute remoteSourceJoin \(sjc :: SourceJoinCall b) ->
     --     buildSourceJoinCall @b userInfo jaFieldName joinArguments sjc
     maybeSourceCall <-
       AB.dispatchAnyBackend @EB.BackendExecute remoteSourceJoin
-        $ buildSourceJoinCall userInfo jaFieldName joinArguments reqHeaders operationName
+        $ buildSourceJoinCall userInfo jaFieldName joinArguments reqHeaders operationName traceQueryStatus
     -- if there actually is a remote call:
     for maybeSourceCall \(sourceCall, modelInfoList) -> do
       -- step 2: send this call over the network
       sourceResponse <- networkFunction sourceCall
       -- step 3: build the join index
-      Tracing.newSpan "Build remote join index"
+      Tracing.newSpan "Build remote join index" Tracing.SKInternal
         $ (,(modelInfoList))
         <$> buildJoinIndex sourceResponse
   where
@@ -115,10 +116,11 @@ buildSourceJoinCall ::
   IntMap.IntMap JoinArgument ->
   [HTTP.Header] ->
   Maybe G.Name ->
+  TraceQueryStatus ->
   RemoteSourceJoin b ->
   m (Maybe (AB.AnyBackend SourceJoinCall, [ModelInfoPart]))
-buildSourceJoinCall userInfo jaFieldName joinArguments reqHeaders operationName remoteSourceJoin = do
-  Tracing.newSpan "Resolve execution step for remote join field" do
+buildSourceJoinCall userInfo jaFieldName joinArguments reqHeaders operationName traceQueryStatus remoteSourceJoin = do
+  Tracing.newSpan "Resolve execution step for remote join field" Tracing.SKInternal do
     let rows =
           IntMap.toList joinArguments <&> \(argumentId, argument) ->
             KM.insert "__argument_id__" (J.toJSON argumentId)
@@ -142,6 +144,7 @@ buildSourceJoinCall userInfo jaFieldName joinArguments reqHeaders operationName 
           reqHeaders
           operationName
           (_rsjStringifyNum remoteSourceJoin)
+          traceQueryStatus
       -- This should never fail, as field names in remote relationships are
       -- validated when building the schema cache.
       fieldName <-

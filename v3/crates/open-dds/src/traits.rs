@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::{impl_OpenDd_default_for, map_impl, seq_impl};
+use jsonschema_tidying::deduplicate_definitions;
 
 mod macros;
 
@@ -36,6 +37,20 @@ impl_OpenDd_default_for!(bool);
 impl_OpenDd_default_for!(i32);
 impl_OpenDd_default_for!(u32);
 impl_OpenDd_default_for!(());
+
+impl<T: OpenDd> OpenDd for Box<T> {
+    fn deserialize(json: serde_json::Value) -> Result<Self, OpenDdDeserializeError> {
+        T::deserialize(json).map(Box::new)
+    }
+
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        T::json_schema(gen)
+    }
+
+    fn _schema_name() -> String {
+        T::_schema_name()
+    }
+}
 
 impl<T: OpenDd> OpenDd for Option<T> {
     fn deserialize(json: serde_json::Value) -> Result<Self, OpenDdDeserializeError> {
@@ -87,7 +102,7 @@ impl<T: OpenDd> OpenDd for Option<T> {
 fn add_null_type(instance_type: &mut SingleOrVec<InstanceType>) {
     match instance_type {
         SingleOrVec::Single(ty) if **ty != InstanceType::Null => {
-            *instance_type = vec![**ty, InstanceType::Null].into()
+            *instance_type = vec![**ty, InstanceType::Null].into();
         }
         SingleOrVec::Vec(ty) if !ty.contains(&InstanceType::Null) => ty.push(InstanceType::Null),
         _ => {}
@@ -167,6 +182,8 @@ pub fn gen_root_schema_for<T: OpenDd>(
             }
         }
     }
+
+    deduplicate_definitions(&mut root_schema);
     root_schema
 }
 
@@ -193,8 +210,8 @@ impl std::fmt::Display for JSONPath {
             .0
             .iter()
             .map(|element| match element {
-                JSONPathElement::Key(key) => format!(".{}", key),
-                JSONPathElement::Index(index) => format!("[{}]", index),
+                JSONPathElement::Key(key) => format!(".{key}"),
+                JSONPathElement::Index(index) => format!("[{index}]"),
             })
             .collect::<Vec<String>>();
         let mut path = vec!["$".to_string()];
@@ -288,7 +305,7 @@ mod tests {
             name: "Foo".to_string(),
             age: 25,
         });
-        assert_eq!(expected, traits::OpenDd::deserialize(json).unwrap())
+        assert_eq!(expected, traits::OpenDd::deserialize(json).unwrap());
     }
 
     #[test]
@@ -313,7 +330,7 @@ mod tests {
             name: "Foo".to_string(),
             age: 25,
         });
-        assert_eq!(expected, traits::OpenDd::deserialize(json).unwrap())
+        assert_eq!(expected, traits::OpenDd::deserialize(json).unwrap());
     }
 
     #[test]
@@ -340,7 +357,7 @@ mod tests {
                 .unwrap_err()
                 .error
                 .to_string()
-        )
+        );
     }
 
     #[test]
@@ -369,7 +386,7 @@ mod tests {
                 .unwrap_err()
                 .path
                 .to_string()
-        )
+        );
     }
 
     // Untagged enum deserialize tests
@@ -425,7 +442,7 @@ mod tests {
             first: "First".to_string(),
             second: "Second".to_string(),
         }));
-        assert_eq!(expected, traits::OpenDd::deserialize(json).unwrap())
+        assert_eq!(expected, traits::OpenDd::deserialize(json).unwrap());
     }
 
     #[test]
@@ -531,7 +548,7 @@ mod tests {
             ],
         };
 
-        assert_eq!(expected, traits::OpenDd::deserialize(json).unwrap())
+        assert_eq!(expected, traits::OpenDd::deserialize(json).unwrap());
     }
 
     #[test]
@@ -561,7 +578,7 @@ mod tests {
                 .unwrap_err()
                 .error
                 .to_string()
-        )
+        );
     }
 
     #[test]
@@ -594,7 +611,7 @@ mod tests {
                 .unwrap_err()
                 .path
                 .to_string()
-        )
+        );
     }
 
     #[test]
@@ -611,7 +628,7 @@ mod tests {
                 .unwrap_err()
                 .error
                 .to_string(),
-        )
+        );
     }
 
     #[test]

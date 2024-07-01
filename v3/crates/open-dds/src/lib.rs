@@ -4,6 +4,7 @@ use schemars::{schema::Schema::Object as SchemaObjectVariant, JsonSchema};
 use serde::{Deserialize, Serialize};
 
 pub mod accessor;
+pub mod aggregates;
 pub mod arguments;
 pub mod boolean_expression;
 pub mod commands;
@@ -12,6 +13,7 @@ pub mod flags;
 pub mod graphql_config;
 pub mod identifier;
 pub mod models;
+pub mod order_by_expression;
 pub mod permissions;
 pub mod relationships;
 pub mod session_variables;
@@ -79,18 +81,25 @@ pub enum OpenDdSubgraphObject {
     DataConnectorLink(data_connector::DataConnectorLink),
 
     // GraphQL "super-graph" level config
-    #[opendd(hidden = true)]
-    GraphqlConfig(graphql_config::GraphqlConfig),
+    // This is boxed because it bloats the enum's size
+    // See: https://rust-lang.github.io/rust-clippy/master/index.html#large_enum_variant
+    GraphqlConfig(Box<graphql_config::GraphqlConfig>),
 
     // Types
     ObjectType(types::ObjectType),
     ScalarType(types::ScalarType),
     ObjectBooleanExpressionType(types::ObjectBooleanExpressionType),
-    #[opendd(hidden = true)]
     BooleanExpressionType(boolean_expression::BooleanExpressionType),
+
+    // OrderBy Expressions
+    #[opendd(hidden = true)]
+    OrderByExpression(order_by_expression::OrderByExpression),
 
     // Data Connector Scalar Representation
     DataConnectorScalarRepresentation(types::DataConnectorScalarRepresentation),
+
+    // Aggregate Expressions
+    AggregateExpression(aggregates::AggregateExpression),
 
     // Models
     Model(models::Model),

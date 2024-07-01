@@ -1,22 +1,39 @@
-use std::collections::BTreeMap;
 use std::fmt::Display;
+use std::{collections::BTreeMap, fmt::Write};
 
 use open_dds::types::{BaseType, CustomTypeName, InbuiltType, TypeName, TypeReference};
+use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, ser::SerializeMap, Deserialize, Serialize};
 use serde_json;
 
 #[derive(
-    Serialize, Deserialize, Clone, Debug, PartialEq, Hash, Eq, derive_more::Display, PartialOrd, Ord,
+    Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq, Hash, Eq, PartialOrd, Ord,
 )]
-#[display(fmt = "{name} (in subgraph {subgraph})")]
 pub struct Qualified<T: Display> {
-    subgraph: String,
-    name: T,
+    pub subgraph: String,
+    pub name: T,
+}
+
+impl<T: Display> Display for Qualified<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let qualifier = self.fmt_and_return_qualifier(f)?;
+        write!(f, "{qualifier}")
+    }
 }
 
 impl<T: Display> Qualified<T> {
     pub fn new(subgraph: String, name: T) -> Self {
         Qualified { subgraph, name }
+    }
+
+    /// Write the display string to the formatter, but return the qualifier string
+    /// separately so it can be appended later
+    fn fmt_and_return_qualifier(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<String, std::fmt::Error> {
+        write!(f, "{}", self.name)?;
+        Ok(format!(" (in subgraph {})", self.subgraph))
     }
 }
 
@@ -28,11 +45,31 @@ pub struct QualifiedTypeReference {
 
 impl Display for QualifiedTypeReference {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.underlying_type)?;
+        let qualifier = self.fmt_and_return_qualifier(f)?;
+        write!(f, "{qualifier}")
+    }
+}
+
+impl QualifiedTypeReference {
+    /// Write the display string to the formatter, but return the qualifier string
+    /// separately so it can be appended later
+    fn fmt_and_return_qualifier(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<String, std::fmt::Error> {
+        let qualifier = self.underlying_type.fmt_and_return_qualifier(f)?;
         if !self.nullable {
             write!(f, "!")?;
         }
-        Ok(())
+        Ok(qualifier)
+    }
+
+    /// Get the underlying type name by resolving Array and Nullable container types
+    pub fn get_underlying_type_name(&self) -> &QualifiedTypeName {
+        match &self.underlying_type {
+            QualifiedBaseType::List(list_type) => list_type.get_underlying_type_name(),
+            QualifiedBaseType::Named(type_name) => type_name,
+        }
     }
 }
 
@@ -42,16 +79,66 @@ pub struct ArgumentInfo {
     pub description: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, derive_more::Display, PartialEq, Hash, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Hash, Eq)]
 pub enum QualifiedBaseType {
     Named(QualifiedTypeName),
     List(Box<QualifiedTypeReference>),
 }
 
-#[derive(Serialize, Deserialize, Clone, derive_more::Display, Debug, PartialEq, Hash, Eq)]
+impl Display for QualifiedBaseType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let qualifier = self.fmt_and_return_qualifier(f)?;
+        write!(f, "{qualifier}")
+    }
+}
+
+impl QualifiedBaseType {
+    /// Write the display string to the formatter, but return the qualifier string
+    /// separately so it can be appended later
+    fn fmt_and_return_qualifier(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<String, std::fmt::Error> {
+        match self {
+            QualifiedBaseType::Named(named_type) => named_type.fmt_and_return_qualifier(f),
+            QualifiedBaseType::List(element_type) => {
+                f.write_char('[')?;
+                let qualifier = element_type.fmt_and_return_qualifier(f)?;
+                f.write_char(']')?;
+                Ok(qualifier)
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Hash, Eq)]
 pub enum QualifiedTypeName {
     Inbuilt(InbuiltType),
     Custom(Qualified<CustomTypeName>),
+}
+
+impl Display for QualifiedTypeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let qualifier = self.fmt_and_return_qualifier(f)?;
+        write!(f, "{qualifier}")
+    }
+}
+
+impl QualifiedTypeName {
+    /// Write the display string to the formatter, but return the qualifier string
+    /// separately so it can be appended later
+    fn fmt_and_return_qualifier(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<String, std::fmt::Error> {
+        match self {
+            QualifiedTypeName::Inbuilt(inbuilt_type) => {
+                write!(f, "{inbuilt_type}")?;
+                Ok(String::new()) // No qualifier for inbuilt types!
+            }
+            QualifiedTypeName::Custom(custom_type) => custom_type.fmt_and_return_qualifier(f),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -100,7 +187,7 @@ where
     let map: BTreeMap<String, V> = Deserialize::deserialize(deserializer)?;
     let mut result = BTreeMap::new();
     for (key, value) in map {
-        let qualified = serde_json::from_str(&key.to_owned()).map_err(serde::de::Error::custom)?;
+        let qualified = serde_json::from_str(&key).map_err(serde::de::Error::custom)?;
         result.insert(qualified, value);
     }
     Ok(result)
@@ -135,7 +222,7 @@ where
     let map: BTreeMap<String, V> = Deserialize::deserialize(deserializer)?;
     let mut result = BTreeMap::new();
     for (key, value) in map {
-        let qualified = serde_json::from_str(&key.to_owned()).map_err(serde::de::Error::custom)?;
+        let qualified = serde_json::from_str(&key).map_err(serde::de::Error::custom)?;
         result.insert(qualified, value);
     }
     Ok(result)

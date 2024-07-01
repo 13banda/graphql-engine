@@ -132,20 +132,20 @@ fn generate_named_fields_value<'a>(
 
 fn impl_json_schema_named_fields(fields: &[NamedField<'_>]) -> proc_macro2::TokenStream {
     let mut fields_gen = Vec::new();
-    for field in fields {
+    let visible_fields = fields.iter().filter(|f| !f.hidden);
+    for field in visible_fields {
         let field_name = field.renamed_field.as_str();
         let ty = field.field_type.clone();
 
         let default_prop = if field.is_default {
-            let default_exp = field
-                .default_exp
-                .as_ref()
-                .map(quote::ToTokens::to_token_stream)
-                .unwrap_or_else(|| {
+            let default_exp = field.default_exp.as_ref().map_or_else(
+                || {
                     quote! {
                         serde_json::json!(<#ty as Default>::default())
                     }
-                });
+                },
+                quote::ToTokens::to_token_stream,
+            );
             quote! {
                 metadata.default = Some(#default_exp);
             }

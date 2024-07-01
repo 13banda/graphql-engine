@@ -62,9 +62,8 @@ impl<S: SchemaContext> Object<S> {
     fn generate_sdl<NSGet: NamespacedGetter<S>>(
         &self,
         namespaced_getter: &NSGet,
-        namespace: &S::Namespace,
     ) -> Option<String> {
-        let fields_sdl = generate_fields_sdl(&self.fields, namespaced_getter, namespace);
+        let fields_sdl = generate_fields_sdl(&self.fields, namespaced_getter);
         if fields_sdl.is_empty() {
             None
         } else {
@@ -94,13 +93,12 @@ impl<S: SchemaContext> InputObject<S> {
     fn generate_sdl<NSGet: NamespacedGetter<S>>(
         &self,
         namespaced_getter: &NSGet,
-        namespace: &S::Namespace,
     ) -> Option<String> {
         let fields_sdl = self
             .fields
             .iter()
             .filter_map(|(field_name, field)| {
-                namespaced_getter.get(field, namespace).map(|(data, _)| {
+                namespaced_getter.get(field).map(|(data, _)| {
                     with_description(
                         &data.description,
                         format_field_with_type::<S, NSGet>(
@@ -109,7 +107,6 @@ impl<S: SchemaContext> InputObject<S> {
                             &data.field_type,
                             &data.deprecation_status,
                             namespaced_getter,
-                            namespace,
                         ),
                     )
                 })
@@ -164,13 +161,12 @@ impl<S: SchemaContext> Enum<S> {
     fn generate_sdl<NSGet: NamespacedGetter<S>>(
         &self,
         namespaced_getter: &NSGet,
-        namespace: &S::Namespace,
     ) -> Option<String> {
         let fields_sdl = self
             .values
             .values()
             .filter_map(|enum_val| {
-                namespaced_getter.get(enum_val, namespace).map(|(data, _)| {
+                namespaced_getter.get(enum_val).map(|(data, _)| {
                     with_description(
                         &data.description,
                         format!(
@@ -208,13 +204,12 @@ impl<S: SchemaContext> Union<S> {
     fn generate_sdl<NSGet: NamespacedGetter<S>>(
         &self,
         namespaced_getter: &NSGet,
-        namespace: &S::Namespace,
     ) -> Option<String> {
         let members_sdl = &self
             .members
             .iter()
             .filter_map(|(union_member, member_value)| {
-                if namespaced_getter.get(member_value, namespace).is_some() {
+                if namespaced_getter.get(member_value).is_some() {
                     Some(union_member.to_string())
                 } else {
                     None
@@ -249,9 +244,8 @@ impl<S: SchemaContext> Interface<S> {
     fn generate_sdl<NSGet: NamespacedGetter<S>>(
         &self,
         namespaced_getter: &NSGet,
-        namespace: &S::Namespace,
     ) -> Option<String> {
-        let fields_sdl = generate_fields_sdl(&self.fields, namespaced_getter, namespace);
+        let fields_sdl = generate_fields_sdl(&self.fields, namespaced_getter);
         if fields_sdl.is_empty() {
             None
         } else {
@@ -272,34 +266,27 @@ impl<S: SchemaContext> TypeInfo<S> {
     fn generate_sdl<NSGet: NamespacedGetter<S>>(
         &self,
         namespaced_getter: &NSGet,
-        namespace: &S::Namespace,
     ) -> Option<String> {
         match self {
             TypeInfo::Scalar(scalar) => Some(scalar.generate_sdl()),
-            TypeInfo::Enum(enm) => enm.generate_sdl(namespaced_getter, namespace),
-            TypeInfo::Object(object) => object.generate_sdl(namespaced_getter, namespace),
-            TypeInfo::Interface(interface) => interface.generate_sdl(namespaced_getter, namespace),
-            TypeInfo::Union(union) => union.generate_sdl(namespaced_getter, namespace),
-            TypeInfo::InputObject(input_object) => {
-                input_object.generate_sdl(namespaced_getter, namespace)
-            }
+            TypeInfo::Enum(enm) => enm.generate_sdl(namespaced_getter),
+            TypeInfo::Object(object) => object.generate_sdl(namespaced_getter),
+            TypeInfo::Interface(interface) => interface.generate_sdl(namespaced_getter),
+            TypeInfo::Union(union) => union.generate_sdl(namespaced_getter),
+            TypeInfo::InputObject(input_object) => input_object.generate_sdl(namespaced_getter),
         }
     }
 }
 
 impl<S: SchemaContext> Schema<S> {
-    pub fn generate_sdl<NSGet: NamespacedGetter<S>>(
-        &self,
-        namespaced_getter: &NSGet,
-        namespace: &S::Namespace,
-    ) -> String {
-        let schema_sdl = get_schema_sdl(self, namespaced_getter, namespace);
+    pub fn generate_sdl<NSGet: NamespacedGetter<S>>(&self, namespaced_getter: &NSGet) -> String {
+        let schema_sdl = get_schema_sdl(self, namespaced_getter);
         self.types
             .iter()
             .fold(schema_sdl, |mut acc, (type_name, type_info)| {
                 // Ignore schema related types
                 if !type_name.as_str().starts_with("__") {
-                    if let Some(type_sdl) = type_info.generate_sdl(namespaced_getter, namespace) {
+                    if let Some(type_sdl) = type_info.generate_sdl(namespaced_getter) {
                         acc.push_str("\n\n");
                         acc.push_str(&type_sdl);
                     }
@@ -327,7 +314,6 @@ impl<S: SchemaContext> Schema<S> {
 fn get_schema_sdl<S: SchemaContext, NSGet: NamespacedGetter<S>>(
     schema: &Schema<S>,
     namespaced_getter: &NSGet,
-    namespace: &S::Namespace,
 ) -> String {
     let query_field = format!("query: {} ", &schema.query_type);
     let mutation_field = schema.mutation_type.as_ref().and_then(|t| {
@@ -335,11 +321,11 @@ fn get_schema_sdl<S: SchemaContext, NSGet: NamespacedGetter<S>>(
             TypeInfo::Object(object) => {
                 // If there is only __typename in the mutation fields, ignore the mutation altogether
                 if object.fields.iter().all(|(k, v)| {
-                    (k.as_str() == "__typename") || (namespaced_getter.get(v, namespace).is_none())
+                    (k.as_str() == "__typename") || (namespaced_getter.get(v).is_none())
                 }) {
                     None
                 } else {
-                    Some(format!("mutation: {} ", t))
+                    Some(format!("mutation: {t} "))
                 }
             }
             _ => None,
@@ -348,7 +334,7 @@ fn get_schema_sdl<S: SchemaContext, NSGet: NamespacedGetter<S>>(
     let subscription_field = schema
         .subscription_type
         .as_ref()
-        .map(|t| format!("subscription: {} ", t));
+        .map(|t| format!("subscription: {t} "));
     format!(
         "schema {}",
         in_curly_braces(
@@ -364,7 +350,7 @@ fn get_schema_sdl<S: SchemaContext, NSGet: NamespacedGetter<S>>(
 fn generate_description_sdl(description: &Option<String>) -> String {
     description
         .as_ref()
-        .map(|d| format!("\"\"\"{}\"\"\"", d))
+        .map(|d| format!("\"\"\"{d}\"\"\""))
         .unwrap_or_default()
 }
 
@@ -391,7 +377,7 @@ fn generate_directives_sdl(
                 if args.is_empty() {
                     String::default()
                 } else {
-                    format!("({})", args)
+                    format!("({args})")
                 }
             )
         })
@@ -401,9 +387,9 @@ fn generate_directives_sdl(
         Some(DeprecationStatus::Deprecated { reason }) => {
             let reason_arg = reason
                 .as_ref()
-                .map(|r| format!("(reason: {})", r))
+                .map(|r| format!("(reason: {r})"))
                 .unwrap_or_default();
-            format!("@deprecated{} {}", reason_arg, other_directives)
+            format!("@deprecated{reason_arg} {other_directives}")
         }
         _ => other_directives,
     }
@@ -413,13 +399,12 @@ fn generate_directives_sdl(
 fn generate_fields_sdl<S: SchemaContext, NSGet: NamespacedGetter<S>>(
     fields: &BTreeMap<ast::Name, Namespaced<S, Field<S>>>,
     namespaced_getter: &NSGet,
-    namespace: &S::Namespace,
 ) -> Vec<String> {
     let mut fields_sdl = Vec::new();
     for (field_name, field) in fields {
         // Ignore schema related fields
         if !field_name.as_str().starts_with("__") {
-            if let Some((data, _)) = namespaced_getter.get(field, namespace) {
+            if let Some((data, _)) = namespaced_getter.get(field) {
                 fields_sdl.push(with_description(
                     &data.description,
                     format_field_with_type(
@@ -428,7 +413,6 @@ fn generate_fields_sdl<S: SchemaContext, NSGet: NamespacedGetter<S>>(
                         &data.field_type,
                         &data.deprecation_status,
                         namespaced_getter,
-                        namespace,
                     ),
                 ));
             }
@@ -450,7 +434,7 @@ fn format_input_field_with_type(
     default_value: Option<&ConstValue>,
 ) -> String {
     let field_sdl = match default_value {
-        None => format!("{}: {}", field_name, field_type),
+        None => format!("{field_name}: {field_type}"),
         Some(default_value) => {
             let default_value_sdl = default_value.to_json().to_string();
             let mut default_value_lines = default_value_sdl.lines();
@@ -466,7 +450,7 @@ fn format_input_field_with_type(
                     with_indent(default_value_sdl.as_str())
                 )
             } else {
-                format!("{}: {} = {}", field_name, field_type, default_value_sdl)
+                format!("{field_name}: {field_type} = {default_value_sdl}")
             }
         }
     };
@@ -493,12 +477,11 @@ fn format_field_with_type<S: SchemaContext, NSGet: NamespacedGetter<S>>(
     field_type: &ast::TypeContainer<ast::TypeName>,
     deprecation_status: &DeprecationStatus,
     namespaced_getter: &NSGet,
-    namespace: &S::Namespace,
 ) -> String {
     let field_sdl = if field_arguments.is_empty() {
-        format!("{}: {}", field_name, field_type)
+        format!("{field_name}: {field_type}")
     } else {
-        let arguments_sdl = generate_arguments_sdl(field_arguments, namespaced_getter, namespace);
+        let arguments_sdl = generate_arguments_sdl(field_arguments, namespaced_getter);
         let mut arguments_lines = arguments_sdl.lines();
         let multiple_lines = {
             arguments_lines.next();
@@ -513,7 +496,7 @@ fn format_field_with_type<S: SchemaContext, NSGet: NamespacedGetter<S>>(
                 field_type
             )
         } else {
-            format!("{}({}): {}", field_name, arguments_sdl, field_type)
+            format!("{field_name}({arguments_sdl}): {field_type}")
         }
     };
     if deprecation_status == &DeprecationStatus::NotDeprecated {
@@ -530,21 +513,18 @@ fn format_field_with_type<S: SchemaContext, NSGet: NamespacedGetter<S>>(
 fn generate_arguments_sdl<S: SchemaContext, NSGet: NamespacedGetter<S>>(
     field_arguments: &BTreeMap<ast::Name, Namespaced<S, InputField<S>>>,
     namespaced_getter: &NSGet,
-    namespace: &S::Namespace,
 ) -> String {
     field_arguments
         .iter()
         .filter_map(|(field_name, namespaced)| {
-            namespaced_getter
-                .get(namespaced, namespace)
-                .map(|(input_field, _)| {
-                    format_input_field_with_type(
-                        field_name,
-                        &input_field.field_type,
-                        &input_field.deprecation_status,
-                        input_field.default_value.as_ref(),
-                    )
-                })
+            namespaced_getter.get(namespaced).map(|(input_field, _)| {
+                format_input_field_with_type(
+                    field_name,
+                    &input_field.field_type,
+                    &input_field.deprecation_status,
+                    input_field.default_value.as_ref(),
+                )
+            })
         })
         .collect::<Vec<String>>()
         .join(",\n")
@@ -571,7 +551,7 @@ fn in_curly_braces(strings: Vec<String>) -> String {
 
 fn with_indent(sdl: &str) -> String {
     sdl.lines()
-        .map(|l| format!("  {}", l))
+        .map(|l| format!("  {l}"))
         .collect::<Vec<String>>()
         .join("\n")
 }

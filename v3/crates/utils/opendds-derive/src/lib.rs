@@ -12,9 +12,7 @@ use crate::container::*;
 #[proc_macro_derive(OpenDd, attributes(opendd))]
 pub fn derive(input_tok: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input_tok as DeriveInput);
-    impl_opendd(&input)
-        .map(TokenStream::from)
-        .unwrap_or_else(TokenStream::from)
+    impl_opendd(&input).map_or_else(TokenStream::from, TokenStream::from)
 }
 
 fn impl_opendd(input: &DeriveInput) -> MacroResult<proc_macro2::TokenStream> {
@@ -35,7 +33,7 @@ fn impl_opendd(input: &DeriveInput) -> MacroResult<proc_macro2::TokenStream> {
         Data::Struct(struct_data) => struct_derive::impl_opendd_struct(name, &struct_data),
     };
     let json_schema_metadata = cont.json_schema_metadata;
-    let schema_name = &json_schema_metadata.schema_name.to_string();
+    let schema_name = json_schema_metadata.schema_name.to_string();
     let impl_json_schema = helpers::apply_schema_metadata(&json_schema, json_schema_metadata);
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     Ok(quote! {

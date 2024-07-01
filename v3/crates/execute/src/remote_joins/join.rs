@@ -104,8 +104,7 @@ fn join_command_response(
             return Err(error::FieldError::from(
                 error::FieldInternalError::InternalGeneric {
                     description: format!(
-                        "unexpected command response: {}; expected Array or Object",
-                        command_json_val
+                        "unexpected command response: {command_json_val}; expected Array or Object"
                     ),
                 },
             ));
@@ -206,7 +205,7 @@ fn visit_location_path_and_insert_value(
                                 inner_row,
                                 remote_alias.to_string(),
                                 rhs_response,
-                            )?
+                            )?;
                         }
                         *row_field_val = ndc_models::RowFieldValue(json::to_value(rows)?);
                     }

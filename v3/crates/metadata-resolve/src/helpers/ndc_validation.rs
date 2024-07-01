@@ -1,4 +1,9 @@
-use crate::stages::{commands, data_connectors, models, object_types};
+use std::collections::BTreeMap;
+
+use crate::{
+    data_connectors::CommandsResponseConfig,
+    stages::{commands, data_connectors, models, object_types},
+};
 use ndc_models;
 use open_dds::{
     commands::{CommandName, DataConnectorCommand, FunctionName, ProcedureName},
@@ -8,9 +13,7 @@ use open_dds::{
 };
 use thiserror::Error;
 
-use crate::types::subgraph::{
-    Qualified, QualifiedBaseType, QualifiedTypeName, QualifiedTypeReference,
-};
+use crate::types::subgraph::{Qualified, QualifiedTypeName, QualifiedTypeReference};
 
 #[derive(Debug, Error)]
 pub enum NDCValidationError {
@@ -118,14 +121,39 @@ pub enum NDCValidationError {
     QueryCapabilityUnsupported,
     #[error("data connector does not support mutations")]
     MutationCapabilityUnsupported,
-}
 
-// Get the underlying type name by resolving Array and Nullable container types
-fn get_underlying_type_name(output_type: &QualifiedTypeReference) -> &QualifiedTypeName {
-    match &output_type.underlying_type {
-        QualifiedBaseType::List(output_type) => get_underlying_type_name(output_type),
-        QualifiedBaseType::Named(type_name) => type_name,
-    }
+    // for `DataConnectorLink.argumentPresets` not all type representations are supported.
+    #[error("Unsupported type representation {representation:} in scalar type {scalar_type:}, for argument preset name {argument_name:}. Only 'json' representation is supported.")]
+    UnsupportedTypeInDataConnectorLinkArgumentPreset {
+        representation: String,
+        scalar_type: String,
+        argument_name: open_dds::arguments::ArgumentName,
+    },
+
+    #[error("Cannot use argument '{argument_name:}' in command '{command_name:}', as it already used as argument preset in data connector '{data_connector_name:}'.")]
+    CannotUseDataConnectorLinkArgumentPresetInCommand {
+        argument_name: open_dds::arguments::ArgumentName,
+        command_name: Qualified<CommandName>,
+        data_connector_name: Qualified<DataConnectorName>,
+    },
+
+    #[error("Argument '{argument_name:}' used in argument mapping for the field '{field_name:}' in object type '{object_type_name:}' is not defined in the data connector '{data_connector_name:}'.")]
+    NoSuchArgumentInNDCArgumentMapping {
+        argument_name: open_dds::arguments::ArgumentName,
+        field_name: FieldName,
+        object_type_name: Qualified<CustomTypeName>,
+        data_connector_name: Qualified<DataConnectorName>,
+    },
+
+    #[error("Field {field_name:} not found in object type {object_type:} in data connector {data_connector_name:}.")]
+    NoSuchFieldInObjectType {
+        data_connector_name: Qualified<DataConnectorName>,
+        field_name: String,
+        object_type: String,
+    },
+
+    #[error("Internal error while serializing error message. Error: {err:}")]
+    InternalSerializationError { err: serde_json::Error },
 }
 
 pub fn validate_ndc(
@@ -172,7 +200,7 @@ pub fn validate_ndc(
         })?;
     for (field_name, field_mapping) in field_mappings {
         let column_name = &field_mapping.column;
-        let _column =
+        let column =
             collection_type
                 .fields
                 .get(&column_name.0)
@@ -183,6 +211,17 @@ pub fn validate_ndc(
                     collection_name: collection_name.clone(),
                     column_name: column_name.clone(),
                 })?;
+        // Check if the arguments in the mapping are valid
+        for (open_dd_argument_name, dc_argument_name) in &field_mapping.argument_mappings {
+            if !column.arguments.contains_key(&dc_argument_name.0) {
+                return Err(NDCValidationError::NoSuchArgumentInNDCArgumentMapping {
+                    argument_name: open_dd_argument_name.clone(),
+                    field_name: field_name.clone(),
+                    object_type_name: model.data_type.clone(),
+                    data_connector_name: db.name.clone(),
+                });
+            }
+        }
         // if field_mapping.field_mapping.column_type != column.r#type {
         //     Err(NDCValidationError::ColumnTypeDoesNotMatch {
         //         db_name: db.name.clone(),
@@ -232,13 +271,13 @@ pub fn validate_ndc(
 // Validate the mappings b/w dds object and ndc objects present in command source.
 pub fn validate_ndc_command(
     command_name: &Qualified<CommandName>,
-    command: &commands::Command,
+    command_source: &commands::CommandSource,
+    command_output_type: &QualifiedTypeReference,
     schema: &data_connectors::DataConnectorSchema,
-) -> std::result::Result<(), NDCValidationError> {
-    // Check if the command source exists for the command
-    let Some(command_source) = &command.source else {
-        return Ok(());
-    };
+    commands_response_config: Option<&CommandsResponseConfig>,
+) -> Result<bool, NDCValidationError> {
+    // is the source type or open
+    let mut source_type_open_dd_type_same = true;
 
     let db = &command_source.data_connector;
 
@@ -280,20 +319,38 @@ pub fn validate_ndc_command(
         }
     };
 
+    let dc_link_argument_presets = db
+        .argument_presets
+        .iter()
+        .map(|preset| &preset.name)
+        .collect::<Vec<_>>();
+
     // Check if the arguments are correctly mapped
-    for mapped_argument_name in command_source.argument_mappings.values() {
-        if !command_source_ndc_arguments.contains_key(&mapped_argument_name.0) {
+    for (open_dd_argument_name, ndc_argument_name) in &command_source.argument_mappings {
+        // Arguments already used in DataConnectorLink.argumentPresets can't be
+        // used as command arguments
+        if dc_link_argument_presets.contains(&open_dd_argument_name) {
+            return Err(
+                NDCValidationError::CannotUseDataConnectorLinkArgumentPresetInCommand {
+                    argument_name: open_dd_argument_name.clone(),
+                    command_name: command_name.clone(),
+                    data_connector_name: db.name.clone(),
+                },
+            );
+        }
+
+        if !command_source_ndc_arguments.contains_key(&ndc_argument_name.0) {
             return Err(NDCValidationError::NoSuchArgumentForCommand {
                 db_name: db.name.clone(),
                 func_proc_name: command_source_func_proc_name.clone(),
-                argument_name: mapped_argument_name.clone(),
+                argument_name: ndc_argument_name.clone(),
             });
         }
     }
 
     // Validate if the result type of function/procedure exists in the schema types(scalar + object)
     let command_source_ndc_result_type_name =
-        get_underlying_named_type(command_source_ndc_result_type)?;
+        get_underlying_named_type(command_source_ndc_result_type);
     if !(schema
         .scalar_types
         .contains_key(command_source_ndc_result_type_name)
@@ -308,7 +365,7 @@ pub fn validate_ndc_command(
 
     // Check if the result_type of function/procedure actually has a scalar type or an object type.
     // If it is an object type, then validate the type mapping.
-    match get_underlying_type_name(&command.output_type) {
+    match command_output_type.get_underlying_type_name() {
         QualifiedTypeName::Inbuilt(_command_output_type) => {
             // TODO: Validate that the type of command.output_type is
             // same as the &command_source_ndc.result_type
@@ -317,6 +374,15 @@ pub fn validate_ndc_command(
             match schema.object_types.get(command_source_ndc_result_type_name) {
                 // Check if the command.output_type is available in schema.object_types
                 Some(command_source_ndc_type) => {
+                    let actual_command_source_type = resolve_actual_command_source_type(
+                        commands_response_config,
+                        command_source_ndc_type,
+                        schema,
+                        command_source_ndc_result_type_name,
+                        &db.name,
+                    )?;
+                    source_type_open_dd_type_same =
+                        actual_command_source_type == command_source_ndc_type;
                     // Check if the command.output_type has typeMappings
                     let object_types::TypeMapping::Object { field_mappings, .. } = command_source
                         .type_mappings
@@ -328,7 +394,10 @@ pub fn validate_ndc_command(
                     // Check if the field mappings for the output_type is valid
                     for (field_name, field_mapping) in field_mappings {
                         let column_name = &field_mapping.column;
-                        if !command_source_ndc_type.fields.contains_key(&column_name.0) {
+                        if !actual_command_source_type
+                            .fields
+                            .contains_key(&column_name.0)
+                        {
                             return Err(NDCValidationError::NoSuchColumnForCommand {
                                 db_name: db.name.clone(),
                                 command_name: command_name.clone(),
@@ -350,18 +419,122 @@ pub fn validate_ndc_command(
             };
         }
     }
+    Ok(source_type_open_dd_type_same)
+}
+
+/// When `CommandsResponseConfig` is configured, a source/procedure's result
+/// type may not match the output type of a corresponding Command. The result
+/// type of the NDC function/procedure would be an object type with "headers"
+/// and "result" fields. And "result" field's type is what should match the
+/// Command's output type.
+pub fn resolve_actual_command_source_type<'a>(
+    commands_response_config: Option<&CommandsResponseConfig>,
+    command_source_ndc_type: &'a ndc_models::ObjectType,
+    schema: &'a data_connectors::DataConnectorSchema,
+    command_source_ndc_type_name: &str,
+    db_name: &Qualified<DataConnectorName>,
+) -> Result<&'a ndc_models::ObjectType, NDCValidationError> {
+    match commands_response_config {
+        None => Ok(command_source_ndc_type),
+        Some(response_config) => {
+            if command_source_ndc_type
+                .fields
+                .contains_key(&response_config.headers_field)
+                && command_source_ndc_type
+                    .fields
+                    .contains_key(&response_config.result_field)
+            {
+                let result_field = command_source_ndc_type
+                    .fields
+                    .get(&response_config.result_field)
+                    .ok_or_else(|| NDCValidationError::NoSuchFieldInObjectType {
+                        data_connector_name: db_name.clone(),
+                        field_name: response_config.result_field.clone(),
+                        object_type: command_source_ndc_type_name.to_string(),
+                    })?;
+
+                let type_name = get_underlying_named_type(&result_field.r#type);
+                schema
+                    .object_types
+                    .get(type_name)
+                    .ok_or_else(|| NDCValidationError::NoSuchType(type_name.clone()))
+            } else {
+                Ok(command_source_ndc_type)
+            }
+        }
+    }
+}
+
+/// Validate argument presets of a 'DataConnectorLink' with NDC schema
+pub(crate) fn validate_ndc_argument_presets(
+    argument_presets: &Vec<data_connectors::ArgumentPreset>,
+    schema: &data_connectors::DataConnectorSchema,
+) -> Result<(), NDCValidationError> {
+    for argument_preset in argument_presets {
+        for function_info in schema.functions.values() {
+            validate_argument_preset_type(&argument_preset.name, &function_info.arguments, schema)?;
+        }
+
+        for procedure_info in schema.procedures.values() {
+            validate_argument_preset_type(
+                &argument_preset.name,
+                &procedure_info.arguments,
+                schema,
+            )?;
+        }
+    }
     Ok(())
 }
 
-pub fn get_underlying_named_type(
-    result_type: &ndc_models::Type,
-) -> Result<&String, NDCValidationError> {
+// The type of an argument preset (in argument presets of the data connector), cannot be
+// completely arbitrary. As engine would have to map the request headers (and other additional
+// headers) to this type. Ideally we would introduce a "map" representation in NDC. So, in JSON
+// transport the "map" can be represented as a JSON key-value object and in, say protobuf, it
+// can represented as a protobuf map type. But, for now if this scalar type has a representation
+// other than "json", we error out. Later if we added a "map" type then we would support both
+// "map" and "json".
+fn validate_argument_preset_type(
+    preset_argument_name: &open_dds::arguments::ArgumentName,
+    arguments: &BTreeMap<String, ndc_models::ArgumentInfo>,
+    schema: &data_connectors::DataConnectorSchema,
+) -> Result<(), NDCValidationError> {
+    for (arg_name, arg_info) in arguments {
+        if arg_name.as_str() == preset_argument_name.0.as_str() {
+            let type_name = get_underlying_named_type(&arg_info.argument_type);
+            let scalar_type = schema
+                .scalar_types
+                .get(type_name)
+                .ok_or_else(|| NDCValidationError::NoSuchType(type_name.clone()))?;
+
+            // if there is no representation default is assumed to be JSON
+            // (https://github.com/hasura/ndc-spec/blob/main/ndc-models/src/lib.rs#L130),
+            // so that's fine
+            if let Some(scalar_type_representation) = &scalar_type.representation {
+                if *scalar_type_representation != ndc_models::TypeRepresentation::JSON {
+                    return Err(
+                        NDCValidationError::UnsupportedTypeInDataConnectorLinkArgumentPreset {
+                            representation: serde_json::to_string(&scalar_type_representation)
+                                .map_err(|e| NDCValidationError::InternalSerializationError {
+                                    err: e,
+                                })?,
+                            scalar_type: type_name.clone(),
+                            argument_name: preset_argument_name.clone(),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn get_underlying_named_type(result_type: &ndc_models::Type) -> &String {
     match result_type {
-        ndc_models::Type::Named { name } => Ok(name),
+        ndc_models::Type::Named { name } => name,
         ndc_models::Type::Array { element_type } => get_underlying_named_type(element_type),
         ndc_models::Type::Nullable { underlying_type } => {
             get_underlying_named_type(underlying_type)
         }
-        ndc_models::Type::Predicate { object_type_name } => Ok(object_type_name),
+        ndc_models::Type::Predicate { object_type_name } => object_type_name,
     }
 }

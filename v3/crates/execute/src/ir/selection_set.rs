@@ -8,6 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::arguments::map_argument_value_to_ndc_type;
 use super::commands::FunctionBasedCommand;
 use super::model_selection::ModelSelection;
 use super::relationship::{
@@ -32,6 +33,7 @@ pub(crate) enum FieldSelection<'s> {
     Column {
         column: String,
         nested_selection: Option<NestedSelection<'s>>,
+        arguments: BTreeMap<String, ndc_models::Argument>,
     },
     ModelRelationshipLocal {
         query: ModelSelection<'s>,
@@ -48,7 +50,7 @@ pub(crate) enum FieldSelection<'s> {
     },
     ModelRelationshipRemote {
         ir: ModelSelection<'s>,
-        relationship_info: RemoteModelRelationshipInfo<'s>,
+        relationship_info: RemoteModelRelationshipInfo,
     },
     CommandRelationshipRemote {
         ir: FunctionBasedCommand<'s>,
@@ -89,7 +91,7 @@ impl NDCRelationshipName {
 }
 
 /// IR that represents the selected fields of an output type.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 pub(crate) struct ResultSelectionSet<'s> {
     // The fields in the selection set. They are stored in the form that would
     // be converted and sent over the wire. Serialized the map as ordered to
@@ -137,6 +139,7 @@ fn build_global_id_fields(
             FieldSelection::Column {
                 column: field_mapping.column.0.clone(),
                 nested_selection: None,
+                arguments: BTreeMap::new(),
             },
         );
     }
@@ -153,6 +156,7 @@ pub(crate) fn generate_nested_selection<'s>(
         metadata_resolve::TypeMapping,
     >,
     session_variables: &SessionVariables,
+    request_headers: &reqwest::header::HeaderMap,
     usage_counts: &mut UsagesCounts,
 ) -> Result<Option<NestedSelection<'s>>, error::Error> {
     match &qualified_type_reference.underlying_type {
@@ -164,6 +168,7 @@ pub(crate) fn generate_nested_selection<'s>(
                 data_connector,
                 type_mappings,
                 session_variables,
+                request_headers,
                 usage_counts,
             )?;
             Ok(array_selection.map(|a| NestedSelection::Array(Box::new(a))))
@@ -189,6 +194,7 @@ pub(crate) fn generate_nested_selection<'s>(
                                 type_mappings,
                                 field_mappings,
                                 session_variables,
+                                request_headers,
                                 usage_counts,
                             )?;
                             Ok(Some(NestedSelection::Object(nested_selection)))
@@ -213,6 +219,7 @@ pub(crate) fn generate_selection_set_ir<'s>(
     >,
     field_mappings: &BTreeMap<FieldName, metadata_resolve::FieldMapping>,
     session_variables: &SessionVariables,
+    request_headers: &reqwest::header::HeaderMap,
     usage_counts: &mut UsagesCounts,
 ) -> Result<ResultSelectionSet<'s>, error::Error> {
     let mut fields = IndexMap::new();
@@ -224,6 +231,8 @@ pub(crate) fn generate_selection_set_ir<'s>(
                     name,
                     field_type,
                     field_base_type_kind,
+                    parent_type: _,
+                    argument_types,
                 } => {
                     let field_mapping = &field_mappings.get(name).ok_or_else(|| {
                         error::InternalEngineError::InternalGeneric {
@@ -237,13 +246,49 @@ pub(crate) fn generate_selection_set_ir<'s>(
                         data_connector,
                         type_mappings,
                         session_variables,
+                        request_headers,
                         usage_counts,
                     )?;
+                    let mut field_arguments = BTreeMap::new();
+                    for (argument_name, argument_type) in argument_types {
+                        let argument_value = match field_call.arguments.get(argument_name) {
+                            None => {
+                                if argument_type.nullable {
+                                    Ok(None)
+                                } else {
+                                    Err(error::Error::MissingNonNullableArgument {
+                                        argument_name: argument_name.to_string(),
+                                        field_name: name.to_string(),
+                                    })
+                                }
+                            }
+                            Some(val) => map_argument_value_to_ndc_type(
+                                argument_type,
+                                &val.value,
+                                type_mappings,
+                            )
+                            .map(Some),
+                        }?;
+                        if let Some(argument_value) = argument_value {
+                            let argument = ndc_models::Argument::Literal {
+                                value: argument_value,
+                            };
+                            // If argument name is not found in the mapping, use the open_dd argument name as the ndc argument name
+                            let ndc_argument_name = field_mapping
+                                .argument_mappings
+                                .get(argument_name.as_str())
+                                .map(|n| n.0.clone())
+                                .unwrap_or(argument_name.to_string());
+                            field_arguments.insert(ndc_argument_name, argument);
+                        }
+                    }
+
                     fields.insert(
                         field.alias.to_string(),
                         FieldSelection::Column {
                             column: field_mapping.column.0.clone(),
                             nested_selection,
+                            arguments: field_arguments,
                         },
                     );
                 }
@@ -271,8 +316,7 @@ pub(crate) fn generate_selection_set_ir<'s>(
                     let global_id_fields = typename_mappings.get(&type_name).ok_or(
                         error::InternalEngineError::InternalGeneric {
                             description: format!(
-                                "Global ID fields not found of the type {}",
-                                type_name
+                                "Global ID fields not found of the type {type_name}"
                             ),
                         },
                     )?;
@@ -293,6 +337,20 @@ pub(crate) fn generate_selection_set_ir<'s>(
                             data_connector,
                             type_mappings,
                             session_variables,
+                            request_headers,
+                            usage_counts,
+                        )?,
+                    );
+                }
+                OutputAnnotation::RelationshipToModelAggregate(relationship_annotation) => {
+                    fields.insert(
+                        field.alias.to_string(),
+                        relationship::generate_model_aggregate_relationship_ir(
+                            field,
+                            relationship_annotation,
+                            data_connector,
+                            type_mappings,
+                            session_variables,
                             usage_counts,
                         )?,
                     );
@@ -306,6 +364,7 @@ pub(crate) fn generate_selection_set_ir<'s>(
                             data_connector,
                             type_mappings,
                             session_variables,
+                            request_headers,
                             usage_counts,
                         )?,
                     );

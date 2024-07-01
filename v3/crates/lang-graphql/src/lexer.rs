@@ -402,7 +402,7 @@ impl<'a> Lexer<'a> {
                     // line is incremented only if the next character is not '\n'
                     if let Some(&b'\n') = self.bytes.get(self.ix + 1) {
                     } else {
-                        self.seek_line()
+                        self.seek_line();
                     }
                 }
                 _ => break,
@@ -477,7 +477,7 @@ mod tests {
         );
         assert_eq!(
             Lexer::new("\n\n\r\rfoo").read_next_token(),
-            Some(Ok(spanned_token(5, 1, 5, 3, Token::from(foo_name.clone()))))
+            Some(Ok(spanned_token(5, 1, 5, 3, Token::from(foo_name))))
         );
     }
 
@@ -536,7 +536,7 @@ mod tests {
         );
         assert_eq!(
             Lexer::new(",,,foo,,,").read_next_token(),
-            Some(Ok(spanned_token(1, 4, 1, 6, Token::from(foo_name.clone()))))
+            Some(Ok(spanned_token(1, 4, 1, 6, Token::from(foo_name))))
         );
     }
 

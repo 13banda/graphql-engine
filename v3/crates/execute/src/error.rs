@@ -33,12 +33,18 @@ pub enum RequestError {
 }
 
 impl RequestError {
-    pub fn to_graphql_error(&self) -> GraphQLError {
-        let message = match self {
+    pub fn to_graphql_error(
+        &self,
+        expose_internal_errors: crate::ExposeInternalErrors,
+    ) -> GraphQLError {
+        let message = match (self, expose_internal_errors) {
             // Error messages for internal errors from IR conversion and Plan generations are masked.
-            Self::IRConversionError(ir::error::Error::Internal(_))
-            | Self::PlanError(plan::error::Error::Internal(_)) => "internal error".into(),
-            e => e.to_string(),
+            (
+                Self::IRConversionError(ir::error::Error::Internal(_))
+                | Self::PlanError(plan::error::Error::Internal(_)),
+                crate::ExposeInternalErrors::Censor,
+            ) => "internal error".into(),
+            (e, _) => e.to_string(),
         };
         GraphQLError {
             message,
@@ -63,6 +69,7 @@ impl TraceableError for RequestError {
 
 /// Field errors are raised during execution from a root field
 /// Ref: <https://spec.graphql.org/October2021/#sec-Errors.Field-errors>
+#[allow(clippy::duplicated_attributes)] // suppress spurious warnings from Clippy
 #[derive(Error, Debug, Transitive)]
 #[transitive(from(json::Error, FieldInternalError))]
 #[transitive(from(NDCUnexpectedError, FieldInternalError))]
@@ -88,21 +95,25 @@ impl FieldError {
                 Some(connector_error.error_response.details.clone())
             }
             Self::InternalError(internal) => internal.get_details(),
-            _ => None,
+            Self::FieldNotFoundInService { .. } => None,
         }
     }
 
-    pub fn to_graphql_error(&self, path: Option<Vec<gql::http::PathSegment>>) -> GraphQLError {
+    pub fn to_graphql_error(
+        &self,
+        expose_internal_errors: crate::ExposeInternalErrors,
+        path: Option<Vec<gql::http::PathSegment>>,
+    ) -> GraphQLError {
         let details = self.get_details();
-        match self {
-            Self::InternalError(_internal) => GraphQLError {
+        match (self, expose_internal_errors) {
+            (Self::InternalError(_internal), crate::ExposeInternalErrors::Censor) => GraphQLError {
                 message: "internal error".into(),
                 path,
                 // Internal errors showing up in the API response is not desirable.
                 // Hence, extensions are masked for internal errors.
                 extensions: None,
             },
-            e => GraphQLError {
+            (e, _) => GraphQLError {
                 message: e.to_string(),
                 path,
                 extensions: details.map(|details| gql::http::Extensions { details }),
@@ -208,5 +219,17 @@ impl From<ndc_client::Error> for FieldError {
         FieldError::InternalError(FieldInternalError::NDCUnexpected(
             NDCUnexpectedError::NDCClientError(ndc_client_error),
         ))
+    }
+}
+
+#[derive(Error, Debug)]
+#[error("Query usage analytics encoding failed: {0}")]
+/// Error occurs while generating query usage analytics JSON.
+/// Wraps JSON encoding error, the only error currently encountered.
+pub struct QueryUsageAnalyzeError(#[from] serde_json::Error);
+
+impl TraceableError for QueryUsageAnalyzeError {
+    fn visibility(&self) -> ErrorVisibility {
+        ErrorVisibility::Internal
     }
 }

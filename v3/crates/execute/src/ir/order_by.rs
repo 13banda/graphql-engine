@@ -55,7 +55,7 @@ pub(crate) fn build_ndc_order_by<'s>(
                             )?;
                             ndc_order_elements.extend(order_by_element);
                         } else {
-                            Err(error::Error::OrderByObjectShouldExactlyHaveOneKeyValuePair)?
+                            Err(error::Error::OrderByObjectShouldExactlyHaveOneKeyValuePair)?;
                         }
                     }
                     _ => Err(error::InternalEngineError::InternalGeneric {
@@ -113,7 +113,7 @@ pub(crate) fn build_ndc_order_by_element<'s>(
         // a relationship column, we'll have to join all the paths to specify NDC,
         // what relationships needs to be traversed to access this column
         Annotation::Input(InputAnnotation::Model(
-            schema::ModelInputAnnotation::ModelOrderByArgument { ndc_column },
+            schema::ModelInputAnnotation::ModelOrderByArgument { ndc_column, .. },
         )) => {
             let order_by_value = argument.value.as_enum()?;
             let order_direction = match &order_by_value.info.generic {
@@ -162,7 +162,7 @@ pub(crate) fn build_ndc_order_by_element<'s>(
                         // Currently we only support the 1st type of sort. Hence we don't have any expressions/predicate.
                         expressions: Vec::new(),
                     })),
-                })
+                });
             }
 
             let order_element = ndc_models::OrderByElement {
@@ -171,6 +171,7 @@ pub(crate) fn build_ndc_order_by_element<'s>(
                 target: ndc_models::OrderByTarget::Column {
                     name: ndc_column.0.clone(),
                     path: order_by_element_path,
+                    field_path: None,
                 },
             };
 

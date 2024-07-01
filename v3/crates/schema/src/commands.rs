@@ -14,6 +14,7 @@ use open_dds::commands::DataConnectorCommand;
 
 use std::collections::{BTreeMap, HashMap};
 
+use super::types::input_type::build_input_field_presets_annotation;
 use super::types::output_type::get_type_kind;
 
 // look at the permissions and remove arguments with presets for this role
@@ -51,7 +52,9 @@ pub(crate) fn generate_command_argument(
         // if there is a preset for this argument, remove it from the schema
         // so the user cannot provide one
         if !permission.argument_presets.contains_key(argument_name) {
-            namespaced_annotations.insert(namespace.clone(), None);
+            let annotation =
+                build_input_field_presets_annotation(gds, namespace, &argument_type.argument_type);
+            namespaced_annotations.insert(namespace.clone(), annotation);
         }
     }
 
@@ -117,10 +120,11 @@ pub(crate) fn function_command_field(
                 data_connector: command_source.data_connector.clone(),
                 type_mappings: command_source.type_mappings.clone(),
                 argument_mappings: command_source.argument_mappings.clone(),
+                ndc_type_opendd_type_same: command_source.ndc_type_opendd_type_same,
             };
             let function_name = match &command_source.source {
                 DataConnectorCommand::Function(function_name) => function_name.clone(),
-                _ => {
+                DataConnectorCommand::Procedure(_) => {
                     return Err(crate::Error::IncorrectCommandBacking {
                         command_name: command.command.name.clone(),
                     })
@@ -170,10 +174,11 @@ pub(crate) fn procedure_command_field(
                 data_connector: command_source.data_connector.clone(),
                 type_mappings: command_source.type_mappings.clone(),
                 argument_mappings: command_source.argument_mappings.clone(),
+                ndc_type_opendd_type_same: command_source.ndc_type_opendd_type_same,
             };
             let procedure_name = match &command_source.source {
                 DataConnectorCommand::Procedure(procedure_name) => procedure_name.clone(),
-                _ => {
+                DataConnectorCommand::Function(_) => {
                     return Err(crate::Error::IncorrectCommandBacking {
                         command_name: command.command.name.clone(),
                     })

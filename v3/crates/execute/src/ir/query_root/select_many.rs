@@ -47,6 +47,7 @@ pub(crate) fn select_many_generate_ir<'n, 's>(
     data_type: &Qualified<open_dds::types::CustomTypeName>,
     model_source: &'s metadata_resolve::ModelSource,
     session_variables: &SessionVariables,
+    request_headers: &reqwest::header::HeaderMap,
     model_name: &'s Qualified<open_dds::models::ModelName>,
 ) -> Result<ModelSelectMany<'n, 's>, error::Error> {
     let mut limit = None;
@@ -73,7 +74,7 @@ pub(crate) fn select_many_generate_ir<'n, 's>(
                             .value
                             .as_int_u32()
                             .map_err(error::Error::map_unexpected_value_to_external_error)?,
-                    )
+                    );
                 }
                 ModelInputAnnotation::ModelOffsetArgument => {
                     offset = Some(
@@ -81,7 +82,7 @@ pub(crate) fn select_many_generate_ir<'n, 's>(
                             .value
                             .as_int_u32()
                             .map_err(error::Error::map_unexpected_value_to_external_error)?,
-                    )
+                    );
                 }
                 ModelInputAnnotation::ModelArgumentsExpression => match &argument.value {
                     normalized_ast::Value::Object(arguments) => {
@@ -99,7 +100,7 @@ pub(crate) fn select_many_generate_ir<'n, 's>(
                     })?,
                 },
                 ModelInputAnnotation::ModelOrderByExpression => {
-                    order_by = Some(build_ndc_order_by(argument, &mut usage_counts)?)
+                    order_by = Some(build_ndc_order_by(argument, &mut usage_counts)?);
                 }
                 _ => {
                     return Err(error::InternalEngineError::UnexpectedAnnotation {
@@ -113,6 +114,7 @@ pub(crate) fn select_many_generate_ir<'n, 's>(
             )) => {
                 filter_clause = filter::resolve_filter_expression(
                     argument.value.as_object()?,
+                    &model_source.data_connector,
                     &model_source.type_mappings,
                     &mut usage_counts,
                 )?;
@@ -152,6 +154,7 @@ pub(crate) fn select_many_generate_ir<'n, 's>(
         offset,
         order_by,
         session_variables,
+        request_headers,
         // Get all the models/commands that were used as relationships
         &mut usage_counts,
     )?;

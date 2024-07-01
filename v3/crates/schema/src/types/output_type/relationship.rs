@@ -28,11 +28,20 @@ pub struct ModelRelationshipAnnotation {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ModelAggregateRelationshipAnnotation {
+    pub source_type: Qualified<CustomTypeName>,
+    pub relationship_name: RelationshipName,
+    pub model_name: Qualified<ModelName>,
+    pub target_source: Option<metadata_resolve::ModelTargetSource>,
+    pub target_type: Qualified<CustomTypeName>,
+    pub mappings: Vec<metadata_resolve::RelationshipModelMapping>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FilterRelationshipAnnotation {
     pub relationship_name: RelationshipName,
     pub relationship_type: RelationshipType,
     pub source_type: Qualified<CustomTypeName>,
-    pub source_data_connector: metadata_resolve::DataConnectorLink,
     pub target_source: metadata_resolve::ModelTargetSource,
     pub target_type: Qualified<CustomTypeName>,
     pub target_model_name: Qualified<ModelName>,
@@ -77,7 +86,7 @@ pub struct CommandTargetSource {
 impl CommandTargetSource {
     pub fn new(
         command: &metadata_resolve::CommandWithPermissions,
-        relationship: &metadata_resolve::Relationship,
+        relationship: &metadata_resolve::RelationshipField,
     ) -> Result<Option<Self>, crate::Error> {
         command
             .command
@@ -89,6 +98,7 @@ impl CommandTargetSource {
                         data_connector: command_source.data_connector.clone(),
                         type_mappings: command_source.type_mappings.clone(),
                         argument_mappings: command_source.argument_mappings.clone(),
+                        ndc_type_opendd_type_same: command_source.ndc_type_opendd_type_same,
                     },
                     function_name: match &command_source.source {
                         crate::types::output_type::DataConnectorCommand::Function(
@@ -103,7 +113,7 @@ impl CommandTargetSource {
                         .as_ref()
                         .ok_or_else(|| crate::Error::InternalMissingRelationshipCapabilities {
                             type_name: relationship.source.clone(),
-                            relationship: relationship.name.clone(),
+                            relationship: relationship.relationship_name.clone(),
                         })?
                         .clone(),
                 })

@@ -17,41 +17,43 @@ pub(crate) fn collect_relationships(
     relationships: &mut BTreeMap<String, ndc_models::Relationship>,
 ) -> Result<(), error::Error> {
     // from selection fields
-    for field in ir.selection.fields.values() {
-        match field {
-            FieldSelection::ModelRelationshipLocal {
-                query,
-                name,
-                relationship_info,
-            } => {
-                relationships.insert(
-                    name.to_string(),
-                    process_model_relationship_definition(relationship_info)?,
-                );
-                collect_relationships(query, relationships)?;
-            }
-            FieldSelection::CommandRelationshipLocal {
-                ir,
-                name,
-                relationship_info,
-            } => {
-                relationships.insert(
-                    name.to_string(),
-                    process_command_relationship_definition(relationship_info)?,
-                );
-                if let Some(nested_selection) = &ir.command_info.selection {
-                    selection_set::collect_relationships_from_nested_selection(
-                        nested_selection,
-                        relationships,
-                    )?;
+    if let Some(selection) = &ir.selection {
+        for field in selection.fields.values() {
+            match field {
+                FieldSelection::ModelRelationshipLocal {
+                    query,
+                    name,
+                    relationship_info,
+                } => {
+                    relationships.insert(
+                        name.to_string(),
+                        process_model_relationship_definition(relationship_info)?,
+                    );
+                    collect_relationships(query, relationships)?;
                 }
-            }
-            FieldSelection::Column { .. }
-            // we ignore remote relationships as we are generating relationship
-            // definition for one data connector
-            | FieldSelection::ModelRelationshipRemote { .. }
-            | FieldSelection::CommandRelationshipRemote { .. } => (),
-        };
+                FieldSelection::CommandRelationshipLocal {
+                    ir,
+                    name,
+                    relationship_info,
+                } => {
+                    relationships.insert(
+                        name.to_string(),
+                        process_command_relationship_definition(relationship_info)?,
+                    );
+                    if let Some(nested_selection) = &ir.command_info.selection {
+                        selection_set::collect_relationships_from_nested_selection(
+                            nested_selection,
+                            relationships,
+                        )?;
+                    }
+                }
+                FieldSelection::Column { .. }
+                // we ignore remote relationships as we are generating relationship
+                // definition for one data connector
+                | FieldSelection::ModelRelationshipRemote { .. }
+                | FieldSelection::CommandRelationshipRemote { .. } => (),
+            };
+        }
     }
 
     // from filter clause
@@ -71,7 +73,7 @@ pub(crate) fn collect_relationships(
     Ok(())
 }
 
-pub(crate) fn process_model_relationship_definition(
+pub fn process_model_relationship_definition(
     relationship_info: &LocalModelRelationshipInfo,
 ) -> Result<ndc_models::Relationship, error::Error> {
     let &LocalModelRelationshipInfo {
@@ -125,10 +127,10 @@ pub(crate) fn process_model_relationship_definition(
                 Err(error::InternalError::MappingExistsInRelationship {
                     source_column: source_field_path.field_name.clone(),
                     relationship_name: relationship_name.clone(),
-                })?
+                })?;
             }
         } else {
-            Err(error::InternalError::RemoteRelationshipsAreNotSupported)?
+            Err(error::InternalError::RemoteRelationshipsAreNotSupported)?;
         }
     }
     let ndc_relationship = ndc_models::Relationship {
@@ -190,10 +192,10 @@ pub(crate) fn process_command_relationship_definition(
                 Err(error::InternalError::MappingExistsInRelationship {
                     source_column: source_field_path.field_name.clone(),
                     relationship_name: annotation.relationship_name.clone(),
-                })?
+                })?;
             }
         } else {
-            Err(error::InternalError::RemoteRelationshipsAreNotSupported)?
+            Err(error::InternalError::RemoteRelationshipsAreNotSupported)?;
         }
     }
 

@@ -62,6 +62,7 @@ pub(crate) fn process_selection_set_ir<'s, 'ir>(
             FieldSelection::Column {
                 column,
                 nested_selection,
+                arguments,
             } => {
                 let (nested_field, nested_join_locations) = nested_selection
                     .as_ref()
@@ -75,6 +76,7 @@ pub(crate) fn process_selection_set_ir<'s, 'ir>(
                     ndc_models::Field::Column {
                         column: column.clone(),
                         fields: nested_field,
+                        arguments: arguments.clone(),
                     },
                 );
                 if let Some(jl) = nested_join_locations {
@@ -217,6 +219,7 @@ pub(crate) fn process_selection_set_ir<'s, 'ir>(
                     process_response_as: ProcessResponseAs::CommandResponse {
                         command_name: &ir.command_info.command_name,
                         type_container: &ir.command_info.type_container,
+                        response_config: &ir.command_info.data_connector.response_config,
                     },
                     remote_join_type: RemoteJoinType::ToCommand,
                 };
@@ -253,6 +256,7 @@ fn process_remote_relationship_field_mapping(
                 ndc_models::Field::Column {
                     column: field.column.0.clone(),
                     fields: None,
+                    arguments: BTreeMap::new(),
                 },
             );
             SourceFieldAlias(internal_alias)

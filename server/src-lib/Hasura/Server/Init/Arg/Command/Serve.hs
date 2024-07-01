@@ -31,6 +31,7 @@ module Hasura.Server.Init.Arg.Command.Serve
     enableTelemetryOption,
     wsReadCookieOption,
     stringifyNumOption,
+    disableNativeQueryValidationOption,
     dangerousBooleanCollapseOption,
     backwardsCompatibleNullInNonNullableVariablesOption,
     remoteNullForwardingPolicyOption,
@@ -71,6 +72,7 @@ module Hasura.Server.Init.Arg.Command.Serve
     persistedQueriesTtlOption,
     remoteSchemaResponsePriorityOption,
     configuredHeaderPrecedenceOption,
+    traceQueryStatusOption,
 
     -- * Pretty Printer
     serveCmdFooter,
@@ -87,6 +89,7 @@ import Hasura.Backends.Postgres.Connection.MonadTx qualified as MonadTx
 import Hasura.Cache.Bounded qualified as Bounded
 import Hasura.GraphQL.Execute.Subscription.Options qualified as Subscription.Options
 import Hasura.Logging qualified as Logging
+import Hasura.NativeQuery.Validation qualified as NativeQuery
 import Hasura.Prelude
 import Hasura.RQL.Types.Metadata (MetadataDefaults, emptyMetadataDefaults)
 import Hasura.RQL.Types.NamingCase qualified as NC
@@ -167,6 +170,8 @@ serveCommandParser =
     <*> parsePersistedQueriesTtl
     <*> parseRemoteSchemaResponsePriority
     <*> parseConfiguredHeaderPrecedence
+    <*> parseTraceQueryStatus
+    <*> parseDisableNativeQueryValidation
 
 --------------------------------------------------------------------------------
 -- Serve Options
@@ -623,6 +628,22 @@ stringifyNumOption =
     { Config._default = Options.Don'tStringifyNumbers,
       Config._envVar = "HASURA_GRAPHQL_STRINGIFY_NUMERIC_TYPES",
       Config._helpMessage = "Stringify numeric types (default: false)"
+    }
+
+parseDisableNativeQueryValidation :: Opt.Parser NativeQuery.DisableNativeQueryValidation
+parseDisableNativeQueryValidation =
+  fmap (bool NativeQuery.AlwaysValidateNativeQueries NativeQuery.NeverValidateNativeQueries)
+    $ Opt.switch
+      ( Opt.long "disable-native-query-validation"
+          <> Opt.help (Config._helpMessage disableNativeQueryValidationOption)
+      )
+
+disableNativeQueryValidationOption :: Config.Option NativeQuery.DisableNativeQueryValidation
+disableNativeQueryValidationOption =
+  Config.Option
+    { Config._default = NativeQuery.AlwaysValidateNativeQueries,
+      Config._envVar = "HASURA_GRAPHQL_DISABLE_NATIVE_QUERY_VALIDATION",
+      Config._helpMessage = "Disable Native Query validation (default: false)"
     }
 
 parseDangerousBooleanCollapse :: Opt.Parser (Maybe Options.DangerouslyCollapseBooleans)
@@ -1341,6 +1362,14 @@ parseConfiguredHeaderPrecedence =
           <> Opt.help (Config._helpMessage configuredHeaderPrecedenceOption)
       )
 
+parseTraceQueryStatus :: Opt.Parser (Maybe Types.TraceQueryStatus)
+parseTraceQueryStatus =
+  (bool Nothing (Just Types.TraceQueryEnabled))
+    <$> Opt.switch
+      ( Opt.long "trace-sql-query"
+          <> Opt.help (Config._helpMessage traceQueryStatusOption)
+      )
+
 configuredHeaderPrecedenceOption :: Config.Option Types.HeaderPrecedence
 configuredHeaderPrecedenceOption =
   Config.Option
@@ -1349,6 +1378,15 @@ configuredHeaderPrecedenceOption =
       Config._helpMessage =
         "Forward configured metadata headers with higher precedence than client headers"
           <> "when delivering payload to webhook for actions and input validations. (default: false)"
+    }
+
+traceQueryStatusOption :: Config.Option Types.TraceQueryStatus
+traceQueryStatusOption =
+  Config.Option
+    { Config._default = Types.TraceQueryDisabled,
+      Config._envVar = "HASURA_GRAPHQL_ENABLE_QUERY_TRACING",
+      Config._helpMessage =
+        "Enable query tracing for all queries. (default: false)"
     }
 
 --------------------------------------------------------------------------------

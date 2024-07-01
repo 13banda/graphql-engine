@@ -80,6 +80,7 @@ pub(crate) fn entities_ir<'n, 's>(
     field_call: &'n normalized_ast::FieldCall<'s, GDS>,
     typename_mappings: &'s HashMap<ast::TypeName, EntityFieldTypeNameMapping>,
     session_variables: &SessionVariables,
+    request_headers: &reqwest::header::HeaderMap,
 ) -> Result<Vec<EntitySelect<'n, 's>>, error::Error> {
     let representations = field_call
         .expected_argument(&lang_graphql::mk_name!("representations"))?
@@ -140,15 +141,16 @@ pub(crate) fn entities_ir<'n, 's>(
                 .iter()
                 .map(|(field_name, field_mapping)| {
                     // Get the value of the field from the representation
-                    let val = representation.get(&field_name.0 .0).ok_or(
+                    let val = representation.get(field_name.0.as_str()).ok_or(
                         error::Error::FieldNotFoundInEntityRepresentation {
-                            field_name: field_name.0 .0.clone(),
+                            field_name: field_name.0.to_string(),
                         },
                     )?;
                     Ok(ndc_models::Expression::BinaryComparisonOperator {
                         column: ndc_models::ComparisonTarget::Column {
                             name: field_mapping.column.0.clone(),
                             path: vec![], // We don't support nested fields in the key fields, so the path is empty
+                            field_path: None,
                         },
                         operator: field_mapping.equal_operator.clone(),
                         value: ndc_models::ComparisonValue::Scalar { value: val.clone() },
@@ -177,6 +179,7 @@ pub(crate) fn entities_ir<'n, 's>(
                 None, // offset
                 None, // order_by
                 session_variables,
+                request_headers,
                 // Get all the models/commands that were used as relationships
                 &mut usage_counts,
             )?;

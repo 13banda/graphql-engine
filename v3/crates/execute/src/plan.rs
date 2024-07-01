@@ -4,6 +4,8 @@ mod model_selection;
 mod relationships;
 pub(crate) mod selection_set;
 
+pub use relationships::process_model_relationship_definition;
+
 use gql::normalized_ast;
 use gql::schema::NamespacedGetter;
 use hasura_authn_core::Role;
@@ -13,6 +15,7 @@ use lang_graphql::ast::common as ast;
 use serde_json as json;
 use tracing_util::{set_attribute_on_active_span, AttributeVisibility, Traceable};
 
+use super::ir;
 use super::ir::model_selection::ModelSelection;
 use super::ir::root_field;
 use super::ndc;
@@ -23,6 +26,7 @@ use super::remote_joins::types::{
 };
 use super::{HttpContext, ProjectId};
 use crate::error::FieldError;
+use crate::process_response::{process_mutation_response, ProcessedResponse};
 use schema::GDSRoleNamespaceGetter;
 use schema::GDS;
 
@@ -131,7 +135,10 @@ pub enum ProcessResponseAs<'ir> {
     CommandResponse {
         command_name: &'ir metadata_resolve::Qualified<open_dds::commands::CommandName>,
         type_container: &'ir ast::TypeContainer<ast::TypeName>,
+        // how to process a command response
+        response_config: &'ir Option<metadata_resolve::data_connectors::CommandsResponseConfig>,
     },
+    Aggregates,
 }
 
 impl<'ir> ProcessResponseAs<'ir> {
@@ -140,6 +147,7 @@ impl<'ir> ProcessResponseAs<'ir> {
             ProcessResponseAs::Object { is_nullable }
             | ProcessResponseAs::Array { is_nullable } => *is_nullable,
             ProcessResponseAs::CommandResponse { type_container, .. } => type_container.nullable,
+            ProcessResponseAs::Aggregates { .. } => false,
         }
     }
 }
@@ -148,46 +156,23 @@ impl<'ir> ProcessResponseAs<'ir> {
 /// plan, but currently can't be both. This may change when we support protocols other than
 /// GraphQL.
 pub fn generate_request_plan<'n, 's, 'ir>(
-    ir: &'ir IndexMap<ast::Alias, root_field::RootField<'n, 's>>,
+    ir: &'ir ir::IR<'n, 's>,
 ) -> Result<RequestPlan<'n, 's, 'ir>, error::Error> {
-    let mut request_plan = None;
-
-    for (alias, field) in ir {
-        match field {
-            root_field::RootField::QueryRootField(field_ir) => {
-                let mut query_plan = match request_plan {
-                    Some(RequestPlan::MutationPlan(_)) => {
-                        Err(error::InternalError::InternalGeneric {
-                            description:
-                                "Parsed engine request contains mixed mutation/query operations"
-                                    .to_string(),
-                        })?
-                    }
-                    Some(RequestPlan::QueryPlan(query_plan)) => query_plan,
-                    None => IndexMap::new(),
-                };
-
-                query_plan.insert(alias.clone(), plan_query(field_ir)?);
-                request_plan = Some(RequestPlan::QueryPlan(query_plan));
+    match ir {
+        ir::IR::Query(ir) => {
+            let mut query_plan = IndexMap::new();
+            for (alias, field) in ir {
+                query_plan.insert(alias.clone(), plan_query(field)?);
             }
-
-            root_field::RootField::MutationRootField(field_ir) => {
-                let mut mutation_plan = match request_plan {
-                    Some(RequestPlan::QueryPlan(_)) => {
-                        Err(error::InternalError::InternalGeneric {
-                            description:
-                                "Parsed engine request contains mixed mutation/query operations"
-                                    .to_string(),
-                        })?
-                    }
-                    Some(RequestPlan::MutationPlan(mutation_plan)) => mutation_plan,
-                    None => MutationPlan {
-                        nodes: IndexMap::new(),
-                        type_names: IndexMap::new(),
-                    },
-                };
-
-                match field_ir {
+            Ok(RequestPlan::QueryPlan(query_plan))
+        }
+        ir::IR::Mutation(ir) => {
+            let mut mutation_plan = MutationPlan {
+                nodes: IndexMap::new(),
+                type_names: IndexMap::new(),
+            };
+            for (alias, field) in ir {
+                match field {
                     root_field::MutationRootField::TypeName { type_name } => {
                         mutation_plan
                             .type_names
@@ -195,7 +180,6 @@ pub fn generate_request_plan<'n, 's, 'ir>(
                     }
                     root_field::MutationRootField::ProcedureBasedCommand { selection_set, ir } => {
                         let plan = plan_mutation(selection_set, ir)?;
-
                         mutation_plan
                             .nodes
                             .entry(plan.data_connector.clone())
@@ -203,17 +187,10 @@ pub fn generate_request_plan<'n, 's, 'ir>(
                             .insert(alias.clone(), plan);
                     }
                 };
-
-                request_plan = Some(RequestPlan::MutationPlan(mutation_plan));
             }
+            Ok(RequestPlan::MutationPlan(mutation_plan))
         }
     }
-
-    request_plan.ok_or(error::Error::Internal(
-        error::InternalError::InternalGeneric {
-            description: "Parsed an empty request".to_string(),
-        },
-    ))
 }
 
 // Given a singular root field of a mutation, plan the execution of that root field.
@@ -235,6 +212,7 @@ fn plan_mutation<'n, 's, 'ir>(
         process_response_as: ProcessResponseAs::CommandResponse {
             command_name: &ir.command_info.command_name,
             type_container: &ir.command_info.type_container,
+            response_config: &ir.command_info.data_connector.response_config,
         },
     })
 }
@@ -293,6 +271,16 @@ fn plan_query<'n, 's, 'ir>(
                 },
             })
         }
+        root_field::QueryRootField::ModelSelectAggregate { ir, selection_set } => {
+            let execution_tree = generate_execution_tree(&ir.model_selection)?;
+            NodeQueryPlan::NDCQueryExecution(NDCQueryExecution {
+                execution_tree,
+                selection_set,
+                execution_span_attribute: "execute_model_select_aggregate",
+                field_span_attribute: ir.field_name.to_string(),
+                process_response_as: ProcessResponseAs::Aggregates,
+            })
+        }
         root_field::QueryRootField::NodeSelect(optional_ir) => match optional_ir {
             Some(ir) => {
                 let execution_tree = generate_execution_tree(&ir.model_selection)?;
@@ -324,6 +312,7 @@ fn plan_query<'n, 's, 'ir>(
                 process_response_as: ProcessResponseAs::CommandResponse {
                     command_name: &ir.command_info.command_name,
                     type_container: &ir.command_info.type_container,
+                    response_config: &ir.command_info.data_connector.response_config,
                 },
             })
         }
@@ -352,7 +341,9 @@ fn plan_query<'n, 's, 'ir>(
                 role,
             },
         ) => {
-            let sdl = schema.generate_sdl(&GDSRoleNamespaceGetter, role);
+            let sdl = schema.generate_sdl(&GDSRoleNamespaceGetter {
+                scope: role.clone(),
+            });
             NodeQueryPlan::ApolloFederationSelect(ApolloFederationSelect::ServiceField {
                 sdl,
                 selection_set,
@@ -446,7 +437,7 @@ fn assign_join_ids<'s, 'ir>(
                 }
             };
             let new_location = Location {
-                join_node: new_node.to_owned(),
+                join_node: new_node,
                 rest: assign_join_ids(&location.rest, state),
             };
             (key.to_string(), new_location)
@@ -497,6 +488,7 @@ impl<'s, 'ir> RemoteJoinCounter<'s, 'ir> {
 pub struct RootFieldResult {
     pub is_nullable: bool,
     pub result: Result<json::Value, FieldError>,
+    pub headers: Option<reqwest::header::HeaderMap>,
 }
 
 impl Traceable for RootFieldResult {
@@ -512,6 +504,24 @@ impl RootFieldResult {
         Self {
             is_nullable,
             result,
+            headers: None,
+        }
+    }
+    pub fn from_processed_response(
+        is_nullable: bool,
+        result: Result<ProcessedResponse, FieldError>,
+    ) -> Self {
+        match result {
+            Ok(processed_response) => Self {
+                is_nullable,
+                result: Ok(processed_response.response),
+                headers: processed_response.response_headers.map(|h| h.0),
+            },
+            Err(field_error) => Self {
+                is_nullable,
+                result: Err(field_error),
+                headers: None,
+            },
         }
     }
 }
@@ -521,12 +531,19 @@ pub struct ExecuteQueryResult {
     pub root_fields: IndexMap<ast::Alias, RootFieldResult>,
 }
 
+const SET_COOKIE_HEADER_NAME: axum::http::HeaderName =
+    axum::http::HeaderName::from_static("set-cookie");
+
 impl ExecuteQueryResult {
     /// Converts the result into a GraphQL response
     #[allow(clippy::wrong_self_convention)]
-    pub fn to_graphql_response(self) -> gql::http::Response {
+    pub fn to_graphql_response(
+        self,
+        expose_internal_errors: crate::ExposeInternalErrors,
+    ) -> gql::http::Response {
         let mut data = IndexMap::new();
         let mut errors = Vec::new();
+        let mut headers = Vec::new();
         for (alias, field_result) in self.root_fields {
             let result = match field_result.result {
                 Ok(value) => value,
@@ -535,17 +552,54 @@ impl ExecuteQueryResult {
                     // When error occur, check if the field is nullable
                     if field_result.is_nullable {
                         // If field is nullable, collect error and mark the field as null
-                        errors.push(e.to_graphql_error(Some(path)));
+                        errors.push(e.to_graphql_error(expose_internal_errors, Some(path)));
                         json::Value::Null
                     } else {
-                        // If the field is not nullable, return `null` data response with the error
-                        return gql::http::Response::error(e.to_graphql_error(Some(path)));
+                        // If the field is not nullable, return `null` data response with the error.
+                        // We return whatever headers we have collected until this point.
+                        return gql::http::Response::error(
+                            e.to_graphql_error(expose_internal_errors, Some(path)),
+                            Self::merge_headers(headers),
+                        );
                     }
                 }
             };
             data.insert(alias, result);
+
+            // if this root field result has headers, collect it
+            if let Some(header_map) = field_result.headers {
+                headers.push(header_map);
+            }
         }
-        gql::http::Response::partial(data, errors)
+
+        gql::http::Response::partial(data, errors, Self::merge_headers(headers))
+    }
+
+    // merge all the headers of all root fields
+    fn merge_headers(headers: Vec<axum::http::HeaderMap>) -> axum::http::HeaderMap {
+        let mut result_map = axum::http::HeaderMap::new();
+        for header_map in headers {
+            for (name, val) in header_map {
+                if let Some(name) = name {
+                    match result_map.entry(&name) {
+                        axum::http::header::Entry::Vacant(vacant) => {
+                            vacant.insert(val);
+                        }
+                        axum::http::header::Entry::Occupied(mut occupied) => {
+                            if name == SET_COOKIE_HEADER_NAME {
+                                let prev_val = occupied.get();
+                                if prev_val != val {
+                                    occupied.append(val);
+                                }
+                            } else {
+                                occupied.insert(val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result_map
     }
 }
 
@@ -561,7 +615,7 @@ async fn execute_query_field_plan<'n, 's, 'ir>(
     tracer
         .in_span_async(
             "execute_query_field_plan",
-            format!("{} field planning", field_alias),
+            format!("{field_alias} field planning"),
             tracing_util::SpanVisibility::User,
             || {
                 Box::pin(async {
@@ -590,7 +644,7 @@ async fn execute_query_field_plan<'n, 's, 'ir>(
                             );
                             RootFieldResult::new(
                                 true, // __type(name: String!): __Type ; the type field is nullable
-                                resolve_type_field(selection_set, schema, &type_name, &GDSRoleNamespaceGetter, &namespace),
+                                resolve_type_field(selection_set, schema, &type_name, &GDSRoleNamespaceGetter{scope:namespace}),
                             )
                         }
                         NodeQueryPlan::SchemaField {
@@ -605,14 +659,14 @@ async fn execute_query_field_plan<'n, 's, 'ir>(
                             );
                             RootFieldResult::new(
                                 false, // __schema: __Schema! ; the schema field is not nullable
-                                resolve_schema_field(selection_set, schema, &GDSRoleNamespaceGetter, &namespace),
+                                resolve_schema_field(selection_set, schema, &GDSRoleNamespaceGetter{scope:namespace}),
                             )
                         }
-                        NodeQueryPlan::NDCQueryExecution(ndc_query) => RootFieldResult::new(
+                        NodeQueryPlan::NDCQueryExecution(ndc_query) => RootFieldResult::from_processed_response(
                             ndc_query.process_response_as.is_nullable(),
                             resolve_ndc_query_execution(http_context, &ndc_query, project_id).await,
                         ),
-                        NodeQueryPlan::RelayNodeSelect(optional_query) => RootFieldResult::new(
+                        NodeQueryPlan::RelayNodeSelect(optional_query) => RootFieldResult::from_processed_response(
                             optional_query.as_ref().map_or(true, |ndc_query| {
                                 ndc_query.process_response_as.is_nullable()
                             }),
@@ -643,7 +697,8 @@ async fn execute_query_field_plan<'n, 's, 'ir>(
                             let mut entities_result = Vec::new();
                             for result in executed_entities {
                                 match result {
-                                    (Ok(value),) => entities_result.push(value),
+                                    // for apollo federation, we ignore any response headers we get
+                                    (Ok(value),) => entities_result.push(value.response),
                                     (Err(e),) => {
                                         return RootFieldResult::new(true, Err(e));
                                     }
@@ -713,7 +768,7 @@ async fn execute_mutation_field_plan<'n, 's, 'ir>(
             tracing_util::SpanVisibility::User,
             || {
                 Box::pin(async {
-                    RootFieldResult::new(
+                    RootFieldResult::from_processed_response(
                         mutation_plan.process_response_as.is_nullable(),
                         resolve_ndc_mutation_execution(http_context, mutation_plan, project_id)
                             .await,
@@ -756,8 +811,7 @@ pub async fn execute_mutation_plan<'n, 's, 'ir>(
         }
     }
 
-    for executed_root_field in executed_root_fields {
-        let (alias, root_field) = executed_root_field;
+    for (alias, root_field) in executed_root_fields {
         root_fields.insert(alias, root_field);
     }
 
@@ -783,8 +837,7 @@ pub async fn execute_query_plan<'n, 's, 'ir>(
         })
         .await;
 
-    for executed_root_field in executed_root_fields {
-        let (alias, root_field) = executed_root_field;
+    for (alias, root_field) in executed_root_fields {
         root_fields.insert(alias, root_field);
     }
 
@@ -800,13 +853,11 @@ fn resolve_type_field<NSGet: NamespacedGetter<GDS>>(
     schema: &gql::schema::Schema<GDS>,
     type_name: &ast::TypeName,
     namespaced_getter: &NSGet,
-    namespace: &Role,
 ) -> Result<json::Value, FieldError> {
     match schema.get_type(type_name) {
         Some(type_info) => Ok(json::to_value(gql::introspection::named_type(
             schema,
             namespaced_getter,
-            namespace,
             type_info,
             selection_set,
         )?)?),
@@ -818,12 +869,10 @@ fn resolve_schema_field<NSGet: NamespacedGetter<GDS>>(
     selection_set: &normalized_ast::SelectionSet<'_, GDS>,
     schema: &gql::schema::Schema<GDS>,
     namespaced_getter: &NSGet,
-    namespace: &Role,
 ) -> Result<json::Value, FieldError> {
     Ok(json::to_value(gql::introspection::schema_type(
         schema,
         namespaced_getter,
-        namespace,
         selection_set,
     )?)?)
 }
@@ -832,7 +881,7 @@ async fn resolve_ndc_query_execution(
     http_context: &HttpContext,
     ndc_query: &NDCQueryExecution<'_, '_>,
     project_id: Option<&ProjectId>,
-) -> Result<json::Value, FieldError> {
+) -> Result<ProcessedResponse, FieldError> {
     let NDCQueryExecution {
         execution_tree,
         selection_set,
@@ -840,6 +889,7 @@ async fn resolve_ndc_query_execution(
         field_span_attribute,
         process_response_as,
     } = ndc_query;
+
     let mut response = ndc::execute_ndc_query(
         http_context,
         &execution_tree.root_node.query,
@@ -849,6 +899,7 @@ async fn resolve_ndc_query_execution(
         project_id,
     )
     .await?;
+
     // TODO: Failures in remote joins should result in partial response
     // https://github.com/hasura/v3-engine/issues/229
     execute_join_locations(
@@ -860,6 +911,7 @@ async fn resolve_ndc_query_execution(
         project_id,
     )
     .await?;
+
     process_response(selection_set, response, process_response_as)
 }
 
@@ -867,7 +919,7 @@ async fn resolve_ndc_mutation_execution(
     http_context: &HttpContext,
     ndc_query: NDCMutationExecution<'_, '_, '_>,
     project_id: Option<&ProjectId>,
-) -> Result<json::Value, FieldError> {
+) -> Result<ProcessedResponse, FieldError> {
     let NDCMutationExecution {
         query,
         data_connector,
@@ -878,26 +930,30 @@ async fn resolve_ndc_mutation_execution(
         // TODO: remote joins are not handled for mutations
         join_locations: _,
     } = ndc_query;
-    ndc::execute_ndc_mutation(
+
+    let response = ndc::execute_ndc_mutation(
         http_context,
         &query,
         data_connector,
-        selection_set,
         execution_span_attribute,
         field_span_attribute,
-        process_response_as,
         project_id,
     )
-    .await
+    .await?;
+
+    process_mutation_response(selection_set, response, &process_response_as)
 }
 
 async fn resolve_optional_ndc_select(
     http_context: &HttpContext,
     optional_query: Option<NDCQueryExecution<'_, '_>>,
     project_id: Option<&ProjectId>,
-) -> Result<json::Value, FieldError> {
+) -> Result<ProcessedResponse, FieldError> {
     match optional_query {
-        None => Ok(json::Value::Null),
+        None => Ok(ProcessedResponse {
+            response_headers: None,
+            response: json::Value::Null,
+        }),
         Some(ndc_query) => resolve_ndc_query_execution(http_context, &ndc_query, project_id).await,
     }
 }

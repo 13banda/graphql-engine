@@ -409,7 +409,11 @@ mkSpockAction appStateRef qErrEncoder qErrModifier apiHandler = do
     let queryTime = Just (ioWaitTime, serviceTime)
 
     -- https://opentelemetry.io/docs/reference/specification/trace/semantic_conventions/span-general/#general-identity-attributes
-    lift $ Tracing.attachMetadata [("enduser.role", roleNameToTxt $ _uiRole userInfo)]
+    lift
+      $ Tracing.attachMetadata
+        [ ("enduser.role", roleNameToTxt $ _uiRole userInfo),
+          ("session_variables", lbsToTxt $ J.encode (_uiSession userInfo))
+        ]
 
     -- apply the error modifier
     let modResult = fmapL qErrModifier result
@@ -517,7 +521,7 @@ v1MetadataHandler ::
   WS.WebsocketCloseOnMetadataChangeAction ->
   RQLMetadata ->
   m (HttpResponse EncJSON)
-v1MetadataHandler schemaCacheRefUpdater closeWebsocketsOnMetadataChangeAction query = Tracing.newSpan "Metadata" $ do
+v1MetadataHandler schemaCacheRefUpdater closeWebsocketsOnMetadataChangeAction query = Tracing.newSpan "Metadata" Tracing.SKInternal $ do
   (liftEitherM . authorizeV1MetadataApi query) =<< ask
   appContext <- asks hcAppContext
   r <-
@@ -547,7 +551,7 @@ v2QueryHandler ::
   ((RebuildableSchemaCache -> m (EncJSON, RebuildableSchemaCache)) -> m EncJSON) ->
   V2Q.RQLQuery ->
   m (HttpResponse EncJSON)
-v2QueryHandler schemaCacheRefUpdater query = Tracing.newSpan "v2 Query" $ do
+v2QueryHandler schemaCacheRefUpdater query = Tracing.newSpan "v2 Query" Tracing.SKInternal $ do
   schemaCache <- asks hcSchemaCache
   (liftEitherM . authorizeV2QueryApi query) =<< ask
   res <-
@@ -591,7 +595,7 @@ v1Alpha1GQHandler queryType query = do
   reqHeaders <- asks hcReqHeaders
   ipAddress <- asks hcSourceIpAddress
   requestId <- asks hcRequestId
-  GH.runGQBatched acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId acResponseInternalErrorsConfig acRemoteSchemaResponsePriority acHeaderPrecedence userInfo ipAddress reqHeaders queryType query
+  GH.runGQBatched acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId acResponseInternalErrorsConfig acRemoteSchemaResponsePriority acHeaderPrecedence acTraceQueryStatus userInfo ipAddress reqHeaders queryType query
 
 v1GQHandler ::
   ( MonadIO m,
@@ -829,7 +833,7 @@ mkWaiApp setupHook appStateRef consoleType ekgStore wsServerEnv = do
   appEnv@AppEnv {..} <- askAppEnv
   spockApp <- liftWithStateless $ \lowerIO ->
     Spock.spockAsApp
-      $ Spock.spockT lowerIO
+      $ Spock.spockConfigT (mkSpockConfig lowerIO (_lsLogger appEnvLoggers)) lowerIO
       $ httpApp setupHook appStateRef appEnv consoleType ekgStore
       $ WS.mkCloseWebsocketsOnMetadataChangeAction (WS._wseServer wsServerEnv)
 
@@ -840,6 +844,30 @@ mkWaiApp setupHook appStateRef consoleType ekgStore wsServerEnv = do
     pure $ WSC.websocketsOr appEnvConnectionOptions (\ip conn -> lowerIO $ wsServerApp ip conn) spockApp
 
   pure $ HasuraApp waiApp (ES._ssAsyncActions appEnvSubscriptionState) stopWSServer
+
+-- | Build a spock config that handles internal errors arising from spock
+mkSpockConfig ::
+  (MonadIO m, Tracing.MonadTraceContext m) =>
+  (m () -> IO ()) ->
+  L.Logger L.Hasura ->
+  Spock.SpockConfig
+mkSpockConfig lowerIO logger =
+  Spock.defaultSpockConfig
+    { Spock.sc_errorHandler = spockInternalErrorHandler,
+      Spock.sc_logError = lowerIO . spockInternalErrorLogger logger
+    }
+
+-- | Handler for internal errors arising from spock
+spockInternalErrorHandler :: HTTP.Status -> Spock.ActionCtxT ctx IO ()
+spockInternalErrorHandler _status = do
+  -- Ignore the status code and always return 500
+  Spock.setStatus HTTP.status500
+  Spock.lazyBytes $ J.encodingToLazyByteString $ encodeQErr False $ err500 Unexpected "Internal Server Error"
+
+-- | Logger for internal errors arising from spock
+spockInternalErrorLogger :: (Tracing.MonadTraceContext m, MonadIO m) => L.Logger L.Hasura -> Text -> m ()
+spockInternalErrorLogger logger msg =
+  L.unLoggerTracing logger $ L.UnhandledInternalErrorLog $ ErrorCallWithLocation (T.unpack msg) ""
 
 httpApp ::
   forall m impl.
@@ -960,7 +988,7 @@ httpApp setupHook appStateRef AppEnv {..} consoleType ekgStore closeWebsocketsOn
               Spock.PATCH -> pure EP.PATCH
               other -> throw400 BadRequest $ "Method " <> tshow other <> " not supported."
             _ -> throw400 BadRequest $ "Nonstandard method not allowed for REST endpoints"
-        fmap JSONResp <$> runCustomEndpoint acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode acRemoteSchemaResponsePriority acHeaderPrecedence appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId userInfo reqHeaders ipAddress req endpoints responseErrorsConfig
+        fmap JSONResp <$> runCustomEndpoint acEnvironment acSQLGenCtx schemaCache acEnableAllowlist appEnvEnableReadOnlyMode acRemoteSchemaResponsePriority acHeaderPrecedence acTraceQueryStatus appEnvPrometheusMetrics (_lsLogger appEnvLoggers) appEnvLicenseKeyCache requestId userInfo reqHeaders ipAddress req endpoints responseErrorsConfig
 
   -- See Issue #291 for discussion around restified feature
   Spock.hookRouteAll ("api" <//> "rest" <//> Spock.wildcard) $ \wildcard -> do

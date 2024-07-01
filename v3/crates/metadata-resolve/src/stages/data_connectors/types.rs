@@ -1,26 +1,117 @@
-use crate::helpers::http::{HeaderError, SerializableHeaderMap, SerializableUrl};
+use crate::configuration::UnstableFeatures;
+use crate::helpers::http::{
+    HeaderError, SerializableHeaderMap, SerializableHeaderName, SerializableUrl,
+};
+use crate::helpers::ndc_validation::validate_ndc_argument_presets;
+use crate::ndc_migration;
 use crate::types::error::Error;
+use crate::types::permission::ValueExpression;
 use crate::types::subgraph::Qualified;
 use indexmap::IndexMap;
 use lang_graphql::ast::common::OperationType;
 use ndc_models;
+use open_dds::arguments::ArgumentName;
 use open_dds::{
     commands::{FunctionName, ProcedureName},
     data_connector::{
-        self, DataConnectorName, DataConnectorScalarType, DataConnectorUrl, ReadWriteUrls,
-        VersionedSchemaAndCapabilities,
+        self, DataConnectorName, DataConnectorUrl, ReadWriteUrls, VersionedSchemaAndCapabilities,
     },
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// information that does not change between resolver stages
-#[derive(Clone)]
-pub struct DataConnectorCoreInfo<'a> {
+#[derive(Debug, Eq, PartialEq, Clone, Copy)]
+pub enum NdcVersion {
+    V01,
+    V02,
+}
+
+/// Map of resolved data connectors information that are used in the later
+/// stages of metadata resolving. This structure is not kept in the finally
+/// resolved metadata.
+pub struct DataConnectors<'a>(pub BTreeMap<Qualified<DataConnectorName>, DataConnectorContext<'a>>);
+
+/// information about a data connector
+pub struct DataConnectorContext<'a> {
     pub url: &'a data_connector::DataConnectorUrl,
-    pub headers: &'a IndexMap<String, open_dds::EnvironmentValue>,
+    pub headers: IndexMap<String, String>,
     pub schema: DataConnectorSchema,
-    pub capabilities: &'a ndc_models::CapabilitiesResponse,
+    pub capabilities: ndc_models::Capabilities,
+    pub supported_ndc_version: NdcVersion,
+    pub argument_presets: Vec<ArgumentPreset>,
+    pub response_headers: Option<CommandsResponseConfig>,
+}
+
+impl<'a> DataConnectorContext<'a> {
+    pub fn new(
+        data_connector: &'a data_connector::DataConnectorLinkV1,
+        data_connector_name: &Qualified<DataConnectorName>,
+        unstable_features: &UnstableFeatures,
+    ) -> Result<Self, Error> {
+        let (resolved_schema, capabilities, supported_ndc_version) = match &data_connector.schema {
+            VersionedSchemaAndCapabilities::V01(schema_and_capabilities) => {
+                let schema =
+                    DataConnectorSchema::new(ndc_migration::v02::migrate_schema_response_from_v01(
+                        schema_and_capabilities.schema.clone(),
+                    ));
+                let capabilities = ndc_migration::v02::migrate_capabilities_from_v01(
+                    schema_and_capabilities.capabilities.capabilities.clone(),
+                );
+                (schema, capabilities, NdcVersion::V01)
+            }
+            VersionedSchemaAndCapabilities::V02(schema_and_capabilities) => {
+                let schema = DataConnectorSchema::new(schema_and_capabilities.schema.clone());
+                let capabilities = schema_and_capabilities.capabilities.capabilities.clone();
+                (schema, capabilities, NdcVersion::V02)
+            }
+        };
+
+        if !unstable_features.enable_ndc_v02_support && supported_ndc_version == NdcVersion::V02 {
+            return Err(Error::NdcV02DataConnectorNotSupported {
+                data_connector: data_connector_name.clone(),
+            });
+        }
+
+        let argument_presets = data_connector
+            .argument_presets
+            .iter()
+            .map(|argument_preset| -> Result<_, Error> {
+                let header_presets = HttpHeadersPreset::new(
+                    &argument_preset.value.http_headers,
+                    data_connector_name,
+                )?;
+                Ok(ArgumentPreset {
+                    name: argument_preset.argument.clone(),
+                    value: ArgumentPresetValue {
+                        http_headers: header_presets,
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // validate the argument presets with NDC schema
+        validate_ndc_argument_presets(&argument_presets, &resolved_schema)?;
+
+        let response_headers = if let Some(headers) = &data_connector.response_headers {
+            Some(CommandsResponseConfig::new(headers, data_connector_name)?)
+        } else {
+            None
+        };
+
+        Ok(DataConnectorContext {
+            url: &data_connector.url,
+            headers: data_connector
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.value.clone()))
+                .collect(),
+            schema: resolved_schema,
+            capabilities,
+            supported_ndc_version,
+            argument_presets,
+            response_headers,
+        })
+    }
 }
 
 /// information provided in the `ndc_models::SchemaResponse`, processed to make it easier to work
@@ -40,112 +131,47 @@ pub struct DataConnectorSchema {
     pub procedures: BTreeMap<ProcedureName, ndc_models::ProcedureInfo>,
 }
 
-/// information about a data connector
-/// currently this contains partial ScalarTypeInfo, which we add to later
-pub struct DataConnectorContext<'a> {
-    pub inner: DataConnectorCoreInfo<'a>,
-    pub scalars: BTreeMap<DataConnectorScalarType, ScalarTypeInfo<'a>>,
-}
-
-fn create_data_connector_schema(schema: &ndc_models::SchemaResponse) -> DataConnectorSchema {
-    DataConnectorSchema {
-        scalar_types: schema.scalar_types.clone(),
-        object_types: schema.object_types.clone(),
-        collections: schema
-            .collections
-            .iter()
-            .map(|collection_info| (collection_info.name.clone(), collection_info.clone()))
-            .collect(),
-        functions: schema
-            .functions
-            .iter()
-            .map(|function_info| {
-                (
-                    FunctionName(function_info.name.clone()),
-                    function_info.clone(),
-                )
-            })
-            .collect(),
-        procedures: schema
-            .procedures
-            .iter()
-            .map(|procedure_info| {
-                (
-                    ProcedureName(procedure_info.name.clone()),
-                    procedure_info.clone(),
-                )
-            })
-            .collect(),
-    }
-}
-
-impl<'a> DataConnectorContext<'a> {
-    pub fn new(data_connector: &'a data_connector::DataConnectorLinkV1) -> Result<Self, Error> {
-        let VersionedSchemaAndCapabilities::V01(schema_and_capabilities) = &data_connector.schema;
-        let resolved_schema = create_data_connector_schema(&schema_and_capabilities.schema);
-
-        Ok(DataConnectorContext {
-            inner: DataConnectorCoreInfo {
-                url: &data_connector.url,
-                headers: &data_connector.headers,
-                schema: resolved_schema,
-                capabilities: &schema_and_capabilities.capabilities,
-            },
-            scalars: schema_and_capabilities
-                .schema
-                .scalar_types
-                .iter()
-                .map(|(k, v)| (DataConnectorScalarType(k.clone()), ScalarTypeInfo::new(v)))
+impl DataConnectorSchema {
+    fn new(schema: ndc_models::SchemaResponse) -> Self {
+        Self {
+            scalar_types: schema.scalar_types,
+            object_types: schema.object_types,
+            collections: schema
+                .collections
+                .into_iter()
+                .map(|collection_info| (collection_info.name.clone(), collection_info))
                 .collect(),
-        })
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash, Default)]
-pub struct ComparisonOperators {
-    pub equal_operators: Vec<String>,
-    pub in_operators: Vec<String>,
-}
-
-// basic scalar type info
-#[derive(Debug)]
-pub struct ScalarTypeInfo<'a> {
-    pub scalar_type: &'a ndc_models::ScalarType,
-    pub comparison_operators: ComparisonOperators,
-}
-
-impl<'a> ScalarTypeInfo<'a> {
-    pub(crate) fn new(source_scalar: &'a ndc_models::ScalarType) -> Self {
-        let mut comparison_operators = ComparisonOperators::default();
-        for (operator_name, operator_definition) in &source_scalar.comparison_operators {
-            match operator_definition {
-                ndc_models::ComparisonOperatorDefinition::Equal => {
-                    comparison_operators
-                        .equal_operators
-                        .push(operator_name.clone());
-                }
-                ndc_models::ComparisonOperatorDefinition::In => {
-                    comparison_operators
-                        .in_operators
-                        .push(operator_name.clone());
-                }
-                ndc_models::ComparisonOperatorDefinition::Custom { argument_type: _ } => {}
-            };
-        }
-        ScalarTypeInfo {
-            scalar_type: source_scalar,
-            comparison_operators,
+            functions: schema
+                .functions
+                .into_iter()
+                .map(|function_info| (FunctionName(function_info.name.clone()), function_info))
+                .collect(),
+            procedures: schema
+                .procedures
+                .into_iter()
+                .map(|procedure_info| (ProcedureName(procedure_info.name.clone()), procedure_info))
+                .collect(),
         }
     }
 }
 
-pub struct DataConnectors<'a>(pub BTreeMap<Qualified<DataConnectorName>, DataConnectorContext<'a>>);
-
+/// This represents part of resolved data connector info that is eventually kept
+/// in the resolved metadata. This is used inside model/command sources, and
+/// this info is required only during execution.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DataConnectorLink {
     pub name: Qualified<DataConnectorName>,
     pub url: ResolvedDataConnectorUrl,
+    /// These are headers used in the protocol level
     pub headers: SerializableHeaderMap,
+    /// Presets for arguments that applies to all functions/procedures of the
+    /// data connector
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub argument_presets: Vec<ArgumentPreset>,
+    /// HTTP response headers configuration that is forwarded from a NDC
+    /// function/procedure to the client.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub response_config: Option<CommandsResponseConfig>,
     pub capabilities: DataConnectorCapabilities,
 }
 
@@ -154,16 +180,16 @@ impl std::hash::Hash for DataConnectorLink {
     where
         H: std::hash::Hasher,
     {
-        self.name.hash(h)
+        self.name.hash(h);
     }
 }
 
 impl DataConnectorLink {
     pub(crate) fn new(
         name: Qualified<DataConnectorName>,
-        info: &DataConnectorCoreInfo<'_>,
+        context: &DataConnectorContext<'_>,
     ) -> Result<Self, Error> {
-        let url = match info.url {
+        let url = match context.url {
             DataConnectorUrl::SingleUrl(url) => ResolvedDataConnectorUrl::SingleUrl(
                 SerializableUrl::new(&url.value).map_err(|e| Error::InvalidDataConnectorUrl {
                     data_connector_name: name.clone(),
@@ -187,7 +213,7 @@ impl DataConnectorLink {
                 })
             }
         };
-        let headers = SerializableHeaderMap::new(info.headers).map_err(|e| match e {
+        let headers = SerializableHeaderMap::new(&context.headers).map_err(|e| match e {
             HeaderError::InvalidHeaderName { header_name } => Error::InvalidHeaderName {
                 data_connector: name.clone(),
                 header_name,
@@ -198,12 +224,19 @@ impl DataConnectorLink {
             },
         })?;
         let capabilities = DataConnectorCapabilities {
-            supports_explaining_queries: info.capabilities.capabilities.query.explain.is_some(),
-            supports_explaining_mutations: info
+            supports_explaining_queries: context.capabilities.query.explain.is_some(),
+            supports_explaining_mutations: context.capabilities.mutation.explain.is_some(),
+            supports_nested_object_filtering: context
                 .capabilities
+                .query
+                .nested_fields
+                .filter_by
+                .is_some(),
+            supports_nested_object_aggregations: context
                 .capabilities
-                .mutation
-                .explain
+                .query
+                .nested_fields
+                .aggregates
                 .is_some(),
         };
         Ok(Self {
@@ -211,6 +244,8 @@ impl DataConnectorLink {
             url,
             headers,
             capabilities,
+            argument_presets: context.argument_presets.clone(),
+            response_config: context.response_headers.clone(),
         })
     }
 }
@@ -235,8 +270,8 @@ impl ResolvedDataConnectorUrl {
             ResolvedDataConnectorUrl::SingleUrl(url) => &url.0,
             ResolvedDataConnectorUrl::ReadWriteUrls(ResolvedReadWriteUrls { read, write }) => {
                 match operation {
-                    OperationType::Query => &read.0,
-                    OperationType::Mutation | OperationType::Subscription => &write.0,
+                    OperationType::Query | OperationType::Subscription => &read.0,
+                    OperationType::Mutation => &write.0,
                 }
             }
         }
@@ -244,9 +279,123 @@ impl ResolvedDataConnectorUrl {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ArgumentPreset {
+    pub name: ArgumentName,
+    pub value: ArgumentPresetValue,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ArgumentPresetValue {
+    /// HTTP headers that can be preset from request
+    pub http_headers: HttpHeadersPreset,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct HttpHeadersPreset {
+    /// List of HTTP headers that should be forwarded from HTTP requests
+    pub forward: Vec<SerializableHeaderName>,
+    /// Additional (header, value) pairs that should be forwarded
+    pub additional: IndexMap<SerializableHeaderName, ValueExpression>,
+}
+
+impl HttpHeadersPreset {
+    fn new(
+        headers_preset: &open_dds::data_connector::HttpHeadersPreset,
+        data_connector_name: &Qualified<DataConnectorName>,
+    ) -> Result<Self, Error> {
+        let forward = headers_preset
+            .forward
+            .iter()
+            .map(|header| {
+                SerializableHeaderName::new(header.to_string())
+                    .map_err(|err| to_error(err, data_connector_name))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+
+        let additional = headers_preset
+            .additional
+            .iter()
+            .map(|(header_name, header_val)| {
+                let key = SerializableHeaderName::new(header_name.to_string())
+                    .map_err(|err| to_error(err, data_connector_name))?;
+                let val = resolve_value_expression(header_val.clone())?;
+                Ok((key, val))
+            })
+            .collect::<Result<IndexMap<_, _>, Error>>()?;
+
+        Ok(Self {
+            forward,
+            additional,
+        })
+    }
+}
+
+fn resolve_value_expression(
+    value_expression_input: open_dds::permissions::ValueExpression,
+) -> Result<ValueExpression, Error> {
+    match value_expression_input {
+        open_dds::permissions::ValueExpression::SessionVariable(session_variable) => {
+            Ok::<ValueExpression, Error>(ValueExpression::SessionVariable(session_variable))
+        }
+        open_dds::permissions::ValueExpression::Literal(json_value) => {
+            Ok(ValueExpression::Literal(json_value))
+        }
+        open_dds::permissions::ValueExpression::BooleanExpression(_) => {
+            Err(Error::BooleanExpressionInValueExpressionForHeaderPresetsNotSupported)
+        }
+    }
+}
+
+fn to_error(err: HeaderError, data_connector_name: &Qualified<DataConnectorName>) -> Error {
+    match err {
+        HeaderError::InvalidHeaderName { header_name } => Error::InvalidHeaderName {
+            data_connector: data_connector_name.clone(),
+            header_name,
+        },
+        HeaderError::InvalidHeaderValue { header_name } => Error::InvalidHeaderValue {
+            data_connector: data_connector_name.clone(),
+            header_name,
+        },
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+/// Configure how NDC functions/procedures should be processed to extract
+/// headers and result
+pub struct CommandsResponseConfig {
+    pub headers_field: String,
+    pub result_field: String,
+    pub forward_headers: Vec<SerializableHeaderName>,
+}
+
+impl CommandsResponseConfig {
+    fn new(
+        response_headers: &open_dds::data_connector::ResponseHeaders,
+        data_connector_name: &Qualified<DataConnectorName>,
+    ) -> Result<Self, Error> {
+        let forward_headers = response_headers
+            .forward_headers
+            .iter()
+            .map(|header| {
+                SerializableHeaderName::new(header.to_string())
+                    .map_err(|err| to_error(err, data_connector_name))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Self {
+            headers_field: response_headers.headers_field.clone(),
+            result_field: response_headers.result_field.clone(),
+            forward_headers,
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DataConnectorCapabilities {
     pub supports_explaining_queries: bool,
     pub supports_explaining_mutations: bool,
+    pub supports_nested_object_filtering: bool,
+    pub supports_nested_object_aggregations: bool,
 }
 
 #[cfg(test)]
@@ -254,7 +403,10 @@ mod tests {
     use ndc_models;
     use open_dds::data_connector::DataConnectorLinkV1;
 
-    use crate::stages::data_connectors::types::DataConnectorContext;
+    use crate::{
+        configuration::UnstableFeatures, data_connectors::types::NdcVersion,
+        stages::data_connectors::types::DataConnectorContext, Qualified,
+    };
 
     #[test]
     fn test_url_serialization_deserialization() {
@@ -273,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn test_data_connector_context_capablities() {
+    fn test_data_connector_context_v01_capablities() {
         let data_connector_with_capabilities: DataConnectorLinkV1 =
             open_dds::traits::OpenDd::deserialize(serde_json::json!(
                 {
@@ -281,7 +433,7 @@ mod tests {
                     "url": { "singleUrl": { "value": "http://test.com" } },
                     "schema": {
                         "version": "v0.1",
-                        "capabilities": { "version": "1", "capabilities": { "query": {}, "mutation": {} }},
+                        "capabilities": { "version": "0.1.3", "capabilities": { "query": { "nested_fields": {} }, "mutation": {} }},
                         "schema": {
                             "scalar_types": {},
                             "object_types": {},
@@ -294,18 +446,75 @@ mod tests {
             ))
             .unwrap();
 
-        let explicit_capabilities: ndc_models::CapabilitiesResponse = serde_json::from_str(
-            r#" { "version": "1", "capabilities": { "query": {}, "mutation": {} } }"#,
-        )
-        .unwrap();
+        let explicit_capabilities: ndc_models::Capabilities =
+            serde_json::from_value(serde_json::json!(
+                { "query": { "nested_fields": {} }, "mutation": {} }
+            ))
+            .unwrap();
 
         // With explicit capabilities specified, we should use them
-        assert_eq!(
-            DataConnectorContext::new(&data_connector_with_capabilities)
-                .unwrap()
-                .inner
-                .capabilities,
-            &explicit_capabilities
+        let dc_name = Qualified::new(
+            "foo".to_string(),
+            data_connector_with_capabilities.name.clone(),
         );
+        let unstable_features = UnstableFeatures {
+            enable_ndc_v02_support: true,
+            ..Default::default()
+        };
+        let context = DataConnectorContext::new(
+            &data_connector_with_capabilities,
+            &dc_name,
+            &unstable_features,
+        )
+        .unwrap();
+        assert_eq!(context.capabilities, explicit_capabilities);
+        assert_eq!(context.supported_ndc_version, NdcVersion::V01);
+    }
+
+    #[test]
+    fn test_data_connector_context_v02_capablities() {
+        let data_connector_with_capabilities: DataConnectorLinkV1 =
+            open_dds::traits::OpenDd::deserialize(serde_json::json!(
+                {
+                    "name": "foo",
+                    "url": { "singleUrl": { "value": "http://test.com" } },
+                    "schema": {
+                        "version": "v0.2",
+                        "capabilities": { "version": "0.2.0", "capabilities": { "query": { "nested_fields": {} }, "mutation": {} }},
+                        "schema": {
+                            "scalar_types": {},
+                            "object_types": {},
+                            "collections": [],
+                            "functions": [],
+                            "procedures": []
+                        }
+                    }
+                }
+            ))
+            .unwrap();
+
+        let explicit_capabilities: ndc_models::Capabilities =
+            serde_json::from_value(serde_json::json!(
+                { "query": { "nested_fields": {} }, "mutation": {} }
+            ))
+            .unwrap();
+
+        // With explicit capabilities specified, we should use them
+        let dc_name = Qualified::new(
+            "foo".to_string(),
+            data_connector_with_capabilities.name.clone(),
+        );
+        let unstable_features = UnstableFeatures {
+            enable_ndc_v02_support: true,
+            ..Default::default()
+        };
+        let context = DataConnectorContext::new(
+            &data_connector_with_capabilities,
+            &dc_name,
+            &unstable_features,
+        )
+        .unwrap();
+        assert_eq!(context.capabilities, explicit_capabilities);
+        assert_eq!(context.supported_ndc_version, NdcVersion::V02);
     }
 }

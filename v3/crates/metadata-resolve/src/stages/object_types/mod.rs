@@ -1,13 +1,17 @@
-use std::collections::{BTreeMap, BTreeSet};
 pub mod types;
+
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
+
+use open_dds::commands::ArgumentMapping;
 use open_dds::{data_connector::DataConnectorColumnName, types::CustomTypeName};
-use ref_cast::RefCast;
 pub use types::{
     DataConnectorTypeMappingsForObject, DataConnectorTypeMappingsOutput, FieldDefinition,
     FieldMapping, ObjectTypeRepresentation, ObjectTypeWithTypeMappings,
     ResolvedApolloFederationObjectKey, ResolvedObjectApolloFederationConfig, TypeMapping,
 };
 
+use crate::helpers::ndc_validation::get_underlying_named_type;
 use crate::helpers::types::{mk_name, store_new_graphql_type};
 use crate::stages::data_connectors;
 
@@ -102,11 +106,30 @@ pub(crate) fn resolve(
 fn resolve_field(
     field: &open_dds::types::FieldDefinition,
     subgraph: &str,
+    qualified_type_name: &Qualified<CustomTypeName>,
 ) -> Result<FieldDefinition, Error> {
+    let mut field_arguments = IndexMap::new();
+    for argument in &field.arguments {
+        let field_argument_definition = crate::ArgumentInfo {
+            argument_type: mk_qualified_type_reference(&argument.argument_type, subgraph),
+            description: argument.description.clone(),
+        };
+        if field_arguments
+            .insert(argument.name.clone(), field_argument_definition)
+            .is_some()
+        {
+            return Err(Error::DuplicateArgumentDefinition {
+                field_name: field.name.clone(),
+                argument_name: argument.name.clone(),
+                type_name: qualified_type_name.clone(),
+            });
+        }
+    }
     Ok(FieldDefinition {
         field_type: mk_qualified_type_reference(&field.field_type, subgraph),
         description: field.description.clone(),
         deprecated: field.deprecated.clone(),
+        field_arguments,
     })
 }
 
@@ -129,7 +152,10 @@ pub fn resolve_object_type(
 
     for field in &object_type_definition.fields {
         if resolved_fields
-            .insert(field.name.clone(), resolve_field(field, subgraph)?)
+            .insert(
+                field.name.clone(),
+                resolve_field(field, subgraph, qualified_type_name)?,
+            )
             .is_some()
         {
             return Err(Error::DuplicateFieldDefinition {
@@ -156,7 +182,7 @@ pub fn resolve_object_type(
             };
             for global_id_field in global_id_fields {
                 if resolved_fields.contains_key(global_id_field) {
-                    resolved_global_id_fields.push(global_id_field.clone())
+                    resolved_global_id_fields.push(global_id_field.clone());
                 } else {
                     return Err(Error::UnknownFieldInGlobalId {
                         field_name: global_id_field.clone(),
@@ -266,7 +292,6 @@ pub fn resolve_data_connector_type_mapping(
         })?;
 
     let ndc_object_type = data_connector_context
-        .inner
         .schema
         .object_types
         .get(&data_connector_type_mapping.data_connector_object_type.0)
@@ -288,20 +313,35 @@ pub fn resolve_data_connector_type_mapping(
         .collect::<BTreeMap<_, _>>();
     let mut resolved_field_mappings = BTreeMap::new();
     for field_name in type_representation.fields.keys() {
-        let resolved_field_mapping_column: &DataConnectorColumnName =
+        let (resolved_field_mapping_column, resolved_argument_mappings) =
             if let Some(field_mapping) = unconsumed_field_mappings.remove(field_name) {
                 match field_mapping {
-                    open_dds::types::FieldMapping::Column(column_mapping) => &column_mapping.name,
+                    open_dds::types::FieldMapping::Column(column_mapping) => (
+                        Cow::Borrowed(&column_mapping.name),
+                        column_mapping.argument_mapping.clone().unwrap_or_default(),
+                    ),
                 }
             } else {
                 // If no mapping is defined for a field, implicitly create a mapping
                 // with the same column name as the field.
-                DataConnectorColumnName::ref_cast(&field_name.0 .0)
+                (
+                    Cow::Owned(DataConnectorColumnName(field_name.0.to_string())),
+                    ArgumentMapping::default(),
+                )
             };
-        let source_column = get_column(ndc_object_type, field_name, resolved_field_mapping_column)?;
+        let source_column =
+            get_column(ndc_object_type, field_name, &resolved_field_mapping_column)?;
+        let underlying_column_type = get_underlying_named_type(&source_column.r#type);
+        let column_type_representation = data_connector_context
+            .schema
+            .scalar_types
+            .get(underlying_column_type)
+            .and_then(|scalar_type| scalar_type.representation.clone());
         let resolved_field_mapping = FieldMapping {
-            column: resolved_field_mapping_column.clone(),
+            column: resolved_field_mapping_column.into_owned(),
             column_type: source_column.r#type.clone(),
+            column_type_representation,
+            argument_mappings: resolved_argument_mappings.0,
         };
 
         let existing_mapping =

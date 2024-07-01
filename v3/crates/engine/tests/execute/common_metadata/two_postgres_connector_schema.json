@@ -17,7 +17,26 @@
               "schema": {
                 "scalar_types": {
                   "String": {
-                    "aggregate_functions": {},
+                    "aggregate_functions": {
+                      "min": {
+                        "result_type": {
+                          "type": "nullable",
+                          "underlying_type": {
+                            "type": "named",
+                            "name": "String"
+                          }
+                        }
+                      },
+                      "max": {
+                        "result_type": {
+                          "type": "nullable",
+                          "underlying_type": {
+                            "type": "named",
+                            "name": "String"
+                          }
+                        }
+                      }
+                    },
                     "comparison_operators": {
                       "_eq": {
                         "type": "equal"
@@ -782,7 +801,11 @@
                   "query": {
                     "explain": {},
                     "aggregates": {},
-                    "variables": {}
+                    "variables": {},
+                    "nested_fields": {
+                      "filter_by": {},
+                      "order_by": {}
+                    }
                   },
                   "mutation": {},
                   "relationships": {
@@ -790,7 +813,7 @@
                     "order_by_aggregate": {}
                   }
                 },
-                "version": "0.1.0"
+                "version": "0.1.3"
               }
             }
           },
@@ -815,7 +838,26 @@
               "schema": {
                 "scalar_types": {
                   "String": {
-                    "aggregate_functions": {},
+                    "aggregate_functions": {
+                      "min": {
+                        "result_type": {
+                          "type": "nullable",
+                          "underlying_type": {
+                            "type": "named",
+                            "name": "String"
+                          }
+                        }
+                      },
+                      "max": {
+                        "result_type": {
+                          "type": "nullable",
+                          "underlying_type": {
+                            "type": "named",
+                            "name": "String"
+                          }
+                        }
+                      }
+                    },
                     "comparison_operators": {
                       "_neq": {
                         "argument_type": {
@@ -1580,7 +1622,11 @@
                   "query": {
                     "explain": {},
                     "aggregates": {},
-                    "variables": {}
+                    "variables": {},
+                    "nested_fields": {
+                      "filter_by": {},
+                      "order_by": {}
+                    }
                   },
                   "mutation": {},
                   "relationships": {
@@ -1588,7 +1634,7 @@
                     "order_by_aggregate": {}
                   }
                 },
-                "version": "0.1.0"
+                "version": "0.1.3"
               }
             }
           },

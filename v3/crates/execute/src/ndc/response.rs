@@ -10,8 +10,7 @@ pub(crate) async fn handle_response_with_size_limit<T: for<'de> serde::Deseriali
         // Check with content length
         if *content_length > size_limit as u64 {
             Err(ndc_client::Error::ResponseTooLarge(format!(
-                "Received content length {} exceeds the limit {}",
-                content_length, size_limit
+                "Received content length {content_length} exceeds the limit {size_limit}"
             )))
         } else {
             Ok(response.json().await?)
@@ -36,8 +35,7 @@ async fn handle_response_by_chunks_with_size_limit<T: for<'de> serde::Deserializ
         size += chunk.len();
         if size > size_limit {
             return Err(ndc_client::Error::ResponseTooLarge(format!(
-                "Size exceeds the limit {}",
-                size_limit
+                "Size exceeds the limit {size_limit}"
             )));
         }
         buf.extend_from_slice(&chunk);
@@ -66,7 +64,7 @@ mod test {
         assert_eq!(
             err.to_string(),
             "response received from connector is too large: Received content length 20 exceeds the limit 10"
-        )
+        );
     }
 
     #[tokio::test]
@@ -87,7 +85,7 @@ mod test {
         assert_eq!(
             err.to_string(),
             "response received from connector is too large: Size exceeds the limit 5"
-        )
+        );
     }
 
     #[tokio::test]
@@ -111,7 +109,7 @@ mod test {
         let res = super::handle_response_with_size_limit::<serde_json::Value>(response, 100)
             .await
             .unwrap();
-        assert_eq!(json, res)
+        assert_eq!(json, res);
     }
 
     #[tokio::test]
@@ -136,6 +134,6 @@ mod test {
             super::handle_response_by_chunks_with_size_limit::<serde_json::Value>(response, 100)
                 .await
                 .unwrap();
-        assert_eq!(json, res)
+        assert_eq!(json, res);
     }
 }

@@ -1,8 +1,10 @@
+use open_dds::aggregates::AggregateExpressionName;
 use open_dds::data_connector::DataConnectorObjectType;
 use thiserror::Error;
 
 use crate::helpers::argument::ArgumentMappingError;
-use crate::types::subgraph::{Qualified, QualifiedTypeReference};
+use crate::stages::aggregates::AggregateExpressionError;
+use crate::types::subgraph::{Qualified, QualifiedTypeName, QualifiedTypeReference};
 use lang_graphql::ast::common as ast;
 use open_dds::{
     arguments::ArgumentName,
@@ -10,7 +12,7 @@ use open_dds::{
     data_connector::{DataConnectorName, DataConnectorScalarType},
     models::ModelName,
     relationships::RelationshipName,
-    types::{CustomTypeName, FieldName, OperatorName, TypeReference},
+    types::{CustomTypeName, FieldName, OperatorName, TypeName, TypeReference},
 };
 
 use crate::helpers::{
@@ -206,6 +208,10 @@ pub enum Error {
     },
     #[error("model arguments graphql input configuration has been specified for model {model_name:} that does not have arguments")]
     UnnecessaryModelArgumentsGraphQlInputConfiguration { model_name: Qualified<ModelName> },
+    #[error("an unnecessary filter input type name graphql configuration has been specified for model {model_name:} that does not use aggregates")]
+    UnnecessaryFilterInputTypeNameGraphqlConfiguration { model_name: Qualified<ModelName> },
+    #[error("filter input type name graphql configuration must be specified for model {model_name:} because aggregates are used with it")]
+    MissingFilterInputTypeNameGraphqlConfiguration { model_name: Qualified<ModelName> },
     #[error("multiple graphql types found with the same name: {graphql_type_name:}")]
     ConflictingGraphQlType { graphql_type_name: ast::TypeName },
     #[error("unknown field {field_name:} in unique identifier defined for model {model_name:}")]
@@ -446,6 +452,12 @@ pub enum Error {
         data_connector: Qualified<DataConnectorName>,
         scalar_type: DataConnectorScalarType,
     },
+    #[error("conflicting type representations found for data connector {data_connector:}: {old_representation:} and {new_representation:}")]
+    DataConnectorScalarRepresentationMismatch {
+        data_connector: Qualified<DataConnectorName>,
+        old_representation: TypeName,
+        new_representation: TypeName,
+    },
     #[error(
         "scalar type representation required for type {scalar_type:} in data connector {data_connector:}"
     )]
@@ -579,6 +591,73 @@ pub enum Error {
     },
     #[error("{type_error:}")]
     TypeError { type_error: TypeError },
+    #[error("{0:}")]
+    AggregateExpressionError(AggregateExpressionError),
+    #[error("{0}")]
+    ModelAggregateExpressionError(ModelAggregateExpressionError),
+
+    // TODO: (anon) refactor the data connector error types
+    #[error(
+        "Boolean Expression in ValueExpression for Data Connector headers preset is not supported."
+    )]
+    BooleanExpressionInValueExpressionForHeaderPresetsNotSupported,
+
+    #[error("the following argument for field {field_name:} in type {type_name:} is defined more than once: {argument_name:}")]
+    DuplicateArgumentDefinition {
+        field_name: FieldName,
+        argument_name: ArgumentName,
+        type_name: Qualified<CustomTypeName>,
+    },
+
+    #[error("The data connector {data_connector} uses ndc-spec v0.2.* and is not yet supported")]
+    NdcV02DataConnectorNotSupported {
+        data_connector: Qualified<DataConnectorName>,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum ModelAggregateExpressionError {
+    #[error("a source must be defined for model {model:} in order to use aggregate expressions")]
+    CannotUseAggregateExpressionsWithoutSource { model: Qualified<ModelName> },
+    #[error("the aggregate expression {aggregate_expression} used with model {model_name} has not been defined")]
+    UnknownModelAggregateExpression {
+        model_name: Qualified<ModelName>,
+        aggregate_expression: Qualified<AggregateExpressionName>,
+    },
+    #[error("the aggregate expression {aggregate_expression} is used with the model {model_name} but its operand type {aggregate_operand_type} does not match the model's type {model_type}")]
+    ModelAggregateExpressionOperandTypeMismatch {
+        model_name: Qualified<ModelName>,
+        aggregate_expression: Qualified<AggregateExpressionName>,
+        model_type: QualifiedTypeName,
+        aggregate_operand_type: QualifiedTypeName,
+    },
+    #[error("the aggregate expression {aggregate_expression} is used with the model {model_name} which has the countDistinct aggregation enabled, but countDistinct is not valid when aggregating a model as every object is already logically distinct")]
+    ModelAggregateExpressionCountDistinctNotAllowed {
+        model_name: Qualified<ModelName>,
+        aggregate_expression: Qualified<AggregateExpressionName>,
+    },
+    #[error("the aggregate expression {aggregate_expression} is used with the model {model_name} but the NDC type of the field {field_name} for data connector {data_connector_name} was not a optionally nullable named type")]
+    ModelAggregateExpressionUnexpectedDataConnectorType {
+        model_name: Qualified<ModelName>,
+        aggregate_expression: Qualified<AggregateExpressionName>,
+        data_connector_name: Qualified<DataConnectorName>,
+        field_name: FieldName,
+    },
+    #[error("the aggregate expression {aggregate_expression} is used with the model {model_name} but for the data connector {data_connector_name} and scalar type {data_connector_operand_type}, mappings are not provided for all aggregation functions in the aggregate expression")]
+    ModelAggregateExpressionDataConnectorMappingMissing {
+        model_name: Qualified<ModelName>,
+        aggregate_expression: Qualified<AggregateExpressionName>,
+        data_connector_name: Qualified<DataConnectorName>,
+        data_connector_operand_type: DataConnectorScalarType,
+    },
+    #[error("{0}")]
+    OtherError(Box<Error>),
+}
+
+impl From<ModelAggregateExpressionError> for Error {
+    fn from(val: ModelAggregateExpressionError) -> Self {
+        Error::ModelAggregateExpressionError(val)
+    }
 }
 
 impl From<BooleanExpressionError> for Error {
@@ -591,8 +670,6 @@ impl From<BooleanExpressionError> for Error {
 
 #[derive(Debug, Error)]
 pub enum BooleanExpressionError {
-    #[error("new boolean expression types are not enabled")]
-    NewBooleanExpressionTypesAreDisabled,
     #[error("unknown type used in object boolean expression: {type_name:}")]
     UnknownTypeInObjectBooleanExpressionType {
         type_name: Qualified<CustomTypeName>,
@@ -636,10 +713,10 @@ pub enum BooleanExpressionError {
         name: Qualified<CustomTypeName>,
         model: Qualified<ModelName>,
     },
-    #[error("unknown scalar boolean expression type {scalar_boolean_expression:} is used in boolean expression {boolean_expression:}")]
-    ScalarBooleanExpressionCouldNotBeFound {
-        boolean_expression: Qualified<CustomTypeName>,
-        scalar_boolean_expression: Qualified<CustomTypeName>,
+    #[error("could not find boolean expression type {child_boolean_expression:} referenced within boolean expression {parent_boolean_expression:}")]
+    BooleanExpressionCouldNotBeFound {
+        parent_boolean_expression: Qualified<CustomTypeName>,
+        child_boolean_expression: Qualified<CustomTypeName>,
     },
     #[error("the boolean expression type {name:} used in model {model:} corresponds to object type {boolean_expression_object_type:} whereas the model's object type is {model_object_type:}")]
     BooleanExpressionTypeForInvalidObjectTypeInModel {
@@ -653,6 +730,19 @@ pub enum BooleanExpressionError {
         boolean_expression_name: Qualified<CustomTypeName>,
         field: FieldName,
         data_connector_name: Qualified<DataConnectorName>,
+    },
+    #[error("The data connector {data_connector_name} cannot be used for filtering nested object {nested_type_name:} within {parent_type_name:} as it has not defined any capabilities for nested object filtering")]
+    NoNestedObjectFilteringCapabilitiesDefined {
+        parent_type_name: Qualified<CustomTypeName>,
+        nested_type_name: Qualified<CustomTypeName>,
+        data_connector_name: Qualified<DataConnectorName>,
+    },
+    #[error("The field {field_name:} has type {field_type:} but the field's boolean expression type {field_boolean_expression_type_name:} has type {underlying_type:}")]
+    FieldTypeMismatch {
+        field_name: FieldName,
+        field_type: QualifiedTypeName,
+        field_boolean_expression_type_name: Qualified<CustomTypeName>,
+        underlying_type: QualifiedTypeName,
     },
 }
 
@@ -709,6 +799,25 @@ pub enum RelationshipError {
         relationship_name: RelationshipName,
         data_connector_name: Qualified<DataConnectorName>,
     },
+    #[error("The relationship {relationship_name} on type {type_name} defines an aggregate, but aggregates can only be used with array relationships, not object relationships")]
+    AggregateIsOnlyAllowedOnArrayRelationships {
+        type_name: Qualified<CustomTypeName>,
+        relationship_name: RelationshipName,
+    },
+    #[error("The aggregate defined on the relationship {relationship_name} on type {type_name} has an error: {error}")]
+    ModelAggregateExpressionError {
+        type_name: Qualified<CustomTypeName>,
+        relationship_name: RelationshipName,
+        error: ModelAggregateExpressionError,
+    },
+}
+
+impl From<RelationshipError> for Error {
+    fn from(val: RelationshipError) -> Self {
+        Error::RelationshipError {
+            relationship_error: val,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -773,6 +882,10 @@ pub enum TypePredicateError {
     ObjectTypeNotFound {
         type_name: Qualified<CustomTypeName>,
     },
+    #[error("operator mappings not found for data connector {data_connector_name:}")]
+    OperatorMappingsNotFound {
+        data_connector_name: Qualified<DataConnectorName>,
+    },
 }
 
 impl From<TypePredicateError> for Error {
@@ -789,15 +902,15 @@ pub enum GraphqlConfigError {
     MissingGraphqlConfig,
     #[error("graphql configuration should be defined only once in supergraph")]
     MultipleGraphqlConfigDefinition,
-    #[error("the fieldName for limitInput need to be defined in GraphqlConfig, when models have selectMany graphql API")]
+    #[error("the fieldName for limitInput needs to be defined in GraphqlConfig, when models have a selectMany graphql API")]
     MissingLimitFieldInGraphqlConfig,
-    #[error("the fieldName for offsetInput need to be defined in GraphqlConfig, when models have selectMany graphql API")]
+    #[error("the fieldName for offsetInput needs to be defined in GraphqlConfig, when models have a selectMany graphql API")]
     MissingOffsetFieldInGraphqlConfig,
-    #[error("the filterInput need to be defined in GraphqlConfig, when models have filterExpressionType")]
+    #[error("the filterInput needs to be defined in GraphqlConfig, when models have filterExpressionType")]
     MissingFilterInputFieldInGraphqlConfig,
-    #[error("the orderByInput need to be defined in GraphqlConfig, when models have orderByExpressionType")]
+    #[error("the orderByInput needs to be defined in GraphqlConfig, when models have orderByExpressionType")]
     MissingOrderByInputFieldInGraphqlConfig,
-    #[error("the orderByInput.enumTypeNames need to be defined in GraphqlConfig, when models have orderByExpressionType")]
+    #[error("the orderByInput.enumTypeNames needs to be defined in GraphqlConfig, when models have orderByExpressionType")]
     MissingOrderByEnumTypeNamesInGraphqlConfig,
     #[error("only one enumTypeNames can be defined in GraphqlConfig, whose direction values are both 'asc' and 'desc'.")]
     MultipleOrderByEnumTypeNamesInGraphqlConfig,
@@ -805,8 +918,10 @@ pub enum GraphqlConfigError {
             "invalid directions: {directions} defined in orderByInput of GraphqlConfig , currently there is no support for partial directions. Please specify a type which has both 'asc' and 'desc' directions"
         )]
     InvalidOrderByDirection { directions: String },
-    #[error("the fieldName for argumentsInput need to be defined in GraphqlConfig, when models have argumentsInputType")]
+    #[error("the fieldName for argumentsInput needs to be defined in GraphqlConfig, when models have argumentsInputType")]
     MissingArgumentsInputFieldInGraphqlConfig,
+    #[error("the filterInputFieldName for aggregate needs to be defined in GraphqlConfig, when models have a selectAggregate graphql API")]
+    MissingAggregateFilterInputFieldNameInGraphqlConfig,
 }
 
 #[derive(Error, Debug)]
@@ -828,10 +943,6 @@ pub enum TypeMappingValidationError {
     UnknownSourceType {
         type_name: Qualified<CustomTypeName>,
     },
-    #[error("the mapping for type {type_name:} is incompatible with the type representation")]
-    IncompatibleTypeMappingDefinition {
-        type_name: Qualified<CustomTypeName>,
-    },
     #[error(
         "the following fields in field mappings of type {type_name:} are unknown: {}",
         field_names.join(", ")
@@ -840,7 +951,7 @@ pub enum TypeMappingValidationError {
         type_name: Qualified<CustomTypeName>,
         field_names: Vec<FieldName>,
     },
-    #[error("unknown target column name {column_name:} for field {field_name:} ")]
+    #[error("unknown target column name {column_name:} for field {field_name:}")]
     UnknownTargetColumn {
         column_name: String,
         field_name: FieldName,
@@ -886,5 +997,11 @@ pub enum TypeMappingValidationError {
         unknown_ndc_field_type_name: String,
     },
     #[error("ndc validation error: {0}")]
-    NDCValidationError(NDCValidationError),
+    NDCValidationError(#[from] NDCValidationError),
+}
+
+impl From<AggregateExpressionError> for Error {
+    fn from(val: AggregateExpressionError) -> Self {
+        Error::AggregateExpressionError(val)
+    }
 }

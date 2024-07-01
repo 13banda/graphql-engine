@@ -3,14 +3,14 @@ use std::collections::BTreeMap;
 use indexmap::IndexMap;
 use lang_graphql::ast::common as ast;
 use lang_graphql::normalized_ast;
-use metadata_resolve::{FieldMapping, Qualified};
+use metadata_resolve::{DataConnectorLink, FieldMapping, Qualified};
 use ndc_models;
 use serde::Serialize;
 
 use crate::ir::error;
 use crate::model_tracking::{count_model, UsagesCounts};
 use open_dds::{
-    data_connector::DataConnectorColumnName,
+    data_connector::{DataConnectorColumnName, DataConnectorOperatorName},
     types::{CustomTypeName, FieldName},
 };
 use schema::FilterRelationshipAnnotation;
@@ -32,14 +32,20 @@ pub(crate) struct ResolvedFilterExpression<'s> {
 /// Generates the IR for GraphQL 'where' boolean expression
 pub(crate) fn resolve_filter_expression<'s>(
     fields: &IndexMap<ast::Name, normalized_ast::InputField<'s, GDS>>,
+    data_connector_link: &'s DataConnectorLink,
     type_mappings: &'s BTreeMap<Qualified<CustomTypeName>, metadata_resolve::TypeMapping>,
     usage_counts: &mut UsagesCounts,
 ) -> Result<ResolvedFilterExpression<'s>, error::Error> {
     let mut expressions = Vec::new();
     let mut relationships = BTreeMap::new();
     for field in fields.values() {
-        let field_filter_expression =
-            build_filter_expression(field, &mut relationships, type_mappings, usage_counts)?;
+        let field_filter_expression = build_filter_expression(
+            field,
+            &mut relationships,
+            data_connector_link,
+            type_mappings,
+            usage_counts,
+        )?;
         expressions.push(field_filter_expression);
     }
     let expression = ndc_models::Expression::And { expressions };
@@ -50,20 +56,55 @@ pub(crate) fn resolve_filter_expression<'s>(
     Ok(resolved_filter_expression)
 }
 
+fn get_boolean_expression_annotation(
+    annotation: &schema::Annotation,
+) -> Result<&BooleanExpressionAnnotation, error::Error> {
+    match annotation {
+        schema::Annotation::Input(InputAnnotation::BooleanExpression(
+            boolean_expression_annotation,
+        )) => Ok(boolean_expression_annotation),
+        _ => Err(error::InternalEngineError::UnexpectedAnnotation {
+            annotation: annotation.clone(),
+        }
+        .into()),
+    }
+}
+
 // Build the NDC filter expression by traversing the relationships when present
 fn build_filter_expression<'s>(
     field: &normalized_ast::InputField<'s, GDS>,
     relationships: &mut BTreeMap<NDCRelationshipName, LocalModelRelationshipInfo<'s>>,
+    data_connector_link: &'s DataConnectorLink,
     type_mappings: &'s BTreeMap<Qualified<CustomTypeName>, metadata_resolve::TypeMapping>,
     usage_counts: &mut UsagesCounts,
 ) -> Result<ndc_models::Expression, error::Error> {
-    match field.info.generic {
+    let boolean_expression_annotation = get_boolean_expression_annotation(field.info.generic)?;
+    build_filter_expression_from_boolean_expression(
+        boolean_expression_annotation,
+        field,
+        relationships,
+        data_connector_link,
+        type_mappings,
+        &mut vec![],
+        usage_counts,
+    )
+}
+
+// build filter expression, specifically matching on BooleanExpressionAnnotation
+fn build_filter_expression_from_boolean_expression<'s>(
+    boolean_expression_annotation: &'s BooleanExpressionAnnotation,
+    field: &normalized_ast::InputField<'s, GDS>,
+    relationships: &mut BTreeMap<NDCRelationshipName, LocalModelRelationshipInfo<'s>>,
+    data_connector_link: &'s DataConnectorLink,
+    type_mappings: &'s BTreeMap<Qualified<CustomTypeName>, metadata_resolve::TypeMapping>,
+    field_path: &mut Vec<DataConnectorColumnName>,
+    usage_counts: &mut UsagesCounts,
+) -> Result<ndc_models::Expression, error::Error> {
+    match boolean_expression_annotation {
         // "_and"
-        schema::Annotation::Input(InputAnnotation::BooleanExpression(
-            BooleanExpressionAnnotation::BooleanExpressionArgument {
-                field: schema::ModelFilterArgument::AndOp,
-            },
-        )) => {
+        BooleanExpressionAnnotation::BooleanExpressionArgument {
+            field: schema::ModelFilterArgument::AndOp,
+        } => {
             let mut and_expressions = Vec::new();
             // The "_and" field value should be a list
             let and_values = field.value.as_list()?;
@@ -74,6 +115,7 @@ fn build_filter_expression<'s>(
                 and_expressions.push(resolve_filter_object(
                     value_object,
                     relationships,
+                    data_connector_link,
                     type_mappings,
                     usage_counts,
                 )?);
@@ -83,11 +125,9 @@ fn build_filter_expression<'s>(
             })
         }
         // "_or"
-        schema::Annotation::Input(InputAnnotation::BooleanExpression(
-            BooleanExpressionAnnotation::BooleanExpressionArgument {
-                field: schema::ModelFilterArgument::OrOp,
-            },
-        )) => {
+        BooleanExpressionAnnotation::BooleanExpressionArgument {
+            field: schema::ModelFilterArgument::OrOp,
+        } => {
             let mut or_expressions = Vec::new();
             // The "_or" field value should be a list
             let or_values = field.value.as_list()?;
@@ -97,6 +137,7 @@ fn build_filter_expression<'s>(
                 or_expressions.push(resolve_filter_object(
                     value_object,
                     relationships,
+                    data_connector_link,
                     type_mappings,
                     usage_counts,
                 )?);
@@ -107,124 +148,214 @@ fn build_filter_expression<'s>(
             })
         }
         // "_not"
-        schema::Annotation::Input(InputAnnotation::BooleanExpression(
-            BooleanExpressionAnnotation::BooleanExpressionArgument {
-                field: schema::ModelFilterArgument::NotOp,
-            },
-        )) => {
+        BooleanExpressionAnnotation::BooleanExpressionArgument {
+            field: schema::ModelFilterArgument::NotOp,
+        } => {
             // The "_not" field value should be an object
             let not_value = field.value.as_object()?;
 
-            let not_filter_expression =
-                resolve_filter_object(not_value, relationships, type_mappings, usage_counts)?;
+            let not_filter_expression = resolve_filter_object(
+                not_value,
+                relationships,
+                data_connector_link,
+                type_mappings,
+                usage_counts,
+            )?;
             Ok(ndc_models::Expression::Not {
                 expression: Box::new(not_filter_expression),
             })
         }
         // The column that we want to use for filtering.
-        schema::Annotation::Input(InputAnnotation::BooleanExpression(
-            BooleanExpressionAnnotation::BooleanExpressionArgument {
-                field:
-                    schema::ModelFilterArgument::Field {
-                        field_name,
-                        object_type,
-                    },
-            },
-        )) => {
+        BooleanExpressionAnnotation::BooleanExpressionArgument {
+            field:
+                schema::ModelFilterArgument::Field {
+                    field_name,
+                    object_type,
+                },
+        } => {
             let FieldMapping { column, .. } =
                 get_field_mapping_of_field_name(type_mappings, object_type, field_name)?;
-            let mut expressions = Vec::new();
-            for (_op_name, op_value) in field.value.as_object()? {
-                match op_value.info.generic {
-                    schema::Annotation::Input(InputAnnotation::Model(
-                        ModelInputAnnotation::IsNullOperation,
-                    )) => {
-                        let expression = build_is_null_expression(column.clone(), &op_value.value)?;
-                        expressions.push(expression);
-                    }
-                    schema::Annotation::Input(InputAnnotation::Model(
-                        ModelInputAnnotation::ComparisonOperation { operator },
-                    )) => {
-                        let expression = build_binary_comparison_expression(
-                            operator,
-                            column.clone(),
-                            &op_value.value,
-                        );
-                        expressions.push(expression)
-                    }
-                    annotation => Err(error::InternalEngineError::UnexpectedAnnotation {
-                        annotation: annotation.clone(),
-                    })?,
-                }
-            }
-            Ok(ndc_models::Expression::And { expressions })
+
+            build_comparison_expression(
+                field,
+                field_path,
+                &column,
+                data_connector_link,
+                type_mappings,
+            )
         }
         // Relationship field used for filtering.
         // This relationship can either point to another relationship or a column.
-        schema::Annotation::Input(InputAnnotation::BooleanExpression(
-            BooleanExpressionAnnotation::BooleanExpressionArgument {
-                field:
-                    schema::ModelFilterArgument::RelationshipField(FilterRelationshipAnnotation {
-                        relationship_name,
-                        relationship_type,
-                        source_type,
-                        source_data_connector,
-                        target_source,
-                        target_type,
-                        target_model_name,
-                        mappings,
-                    }),
-            },
-        )) => {
-            // Add the target model being used in the usage counts
-            count_model(target_model_name, usage_counts);
-
-            let ndc_relationship_name = NDCRelationshipName::new(source_type, relationship_name)?;
-            relationships.insert(
-                ndc_relationship_name.clone(),
-                LocalModelRelationshipInfo {
+        BooleanExpressionAnnotation::BooleanExpressionArgument {
+            field:
+                schema::ModelFilterArgument::RelationshipField(FilterRelationshipAnnotation {
                     relationship_name,
                     relationship_type,
                     source_type,
-                    source_data_connector,
-                    source_type_mappings: type_mappings,
                     target_source,
                     target_type,
+                    target_model_name,
                     mappings,
-                },
-            );
+                }),
+        } => {
+            // Add the target model being used in the usage counts
+            count_model(target_model_name, usage_counts);
 
-            // This map contains the relationships or the columns of the
-            // relationship that needs to be used for ordering.
-            let filter_object = field.value.as_object()?;
+            // filter expression with relationships is currently only supported for local relationships
+            // this is the first point at which we know the source data connector, so we must
+            // ensure only a local relationship is used
+            match metadata_resolve::relationship_execution_category(
+                data_connector_link,
+                &target_source.model.data_connector,
+                &target_source.capabilities,
+            ) {
+                metadata_resolve::RelationshipExecutionCategory::RemoteForEach => {
+                    Err(error::Error::Internal(error::InternalError::Engine(
+                        error::InternalEngineError::InternalGeneric {
+                            description:
+                                "Remote relationships are not supported in boolean expressions"
+                                    .to_string(),
+                        },
+                    )))
+                }
 
-            let mut expressions = Vec::new();
+                metadata_resolve::RelationshipExecutionCategory::Local => {
+                    let ndc_relationship_name =
+                        NDCRelationshipName::new(source_type, relationship_name)?;
 
-            for field in filter_object.values() {
-                let field_filter_expression = build_filter_expression(
-                    field,
-                    relationships,
-                    &target_source.model.type_mappings,
-                    usage_counts,
-                )?;
-                expressions.push(field_filter_expression);
+                    relationships.insert(
+                        ndc_relationship_name.clone(),
+                        LocalModelRelationshipInfo {
+                            relationship_name,
+                            relationship_type,
+                            source_type,
+                            source_data_connector: data_connector_link,
+                            source_type_mappings: type_mappings,
+                            target_source,
+                            target_type,
+                            mappings,
+                        },
+                    );
+
+                    // This map contains the relationships or the columns of the
+                    // relationship that needs to be used for ordering.
+                    let filter_object = field.value.as_object()?;
+
+                    let mut expressions = Vec::new();
+
+                    for field in filter_object.values() {
+                        let field_filter_expression = build_filter_expression(
+                            field,
+                            relationships,
+                            &target_source.model.data_connector,
+                            &target_source.model.type_mappings,
+                            usage_counts,
+                        )?;
+                        expressions.push(field_filter_expression);
+                    }
+
+                    // Using exists clause to build the filter expression for relationship fields.
+                    let exists_filter_clause = ndc_models::Expression::And { expressions };
+                    let exists_in_relationship = ndc_models::ExistsInCollection::Related {
+                        relationship: ndc_relationship_name.0,
+                        arguments: BTreeMap::new(),
+                    };
+
+                    Ok(ndc_models::Expression::Exists {
+                        in_collection: exists_in_relationship,
+                        predicate: Some(Box::new(exists_filter_clause)),
+                    })
+                }
             }
-
-            // Using exists clause to build the filter expression for relationship fields.
-            let exists_filter_clause = ndc_models::Expression::And { expressions };
-            let exists_in_relationship = ndc_models::ExistsInCollection::Related {
-                relationship: ndc_relationship_name.0,
-                arguments: BTreeMap::new(),
-            };
-            Ok(ndc_models::Expression::Exists {
-                in_collection: exists_in_relationship,
-                predicate: Some(Box::new(exists_filter_clause)),
-            })
         }
-        annotation => Err(error::InternalEngineError::UnexpectedAnnotation {
-            annotation: annotation.clone(),
+        other_boolean_annotation => Err(error::InternalEngineError::UnexpectedAnnotation {
+            annotation: schema::Annotation::Input(InputAnnotation::BooleanExpression(
+                other_boolean_annotation.clone(),
+            )),
         })?,
     }
+}
+
+fn build_comparison_expression<'s>(
+    field: &normalized_ast::InputField<'s, GDS>,
+    field_path: &mut Vec<DataConnectorColumnName>,
+    column: &DataConnectorColumnName,
+    data_connector_link: &'s DataConnectorLink,
+    type_mappings: &'s BTreeMap<Qualified<CustomTypeName>, metadata_resolve::TypeMapping>,
+) -> Result<ndc_models::Expression, error::Error> {
+    let mut expressions = Vec::new();
+
+    for (_op_name, op_value) in field.value.as_object()? {
+        match op_value.info.generic {
+            schema::Annotation::Input(InputAnnotation::Model(
+                ModelInputAnnotation::IsNullOperation,
+            )) => {
+                let expression =
+                    build_is_null_expression(column.clone(), &op_value.value, field_path.clone())?;
+                expressions.push(expression);
+            }
+            schema::Annotation::Input(InputAnnotation::Model(
+                ModelInputAnnotation::ComparisonOperation { operator_mapping },
+            )) => {
+                let operator =
+                    operator_mapping
+                        .get(&data_connector_link.name)
+                        .ok_or_else(|| {
+                            error::InternalEngineError::OperatorMappingError(
+                                error::OperatorMappingError::MissingEntryForDataConnector {
+                                    column_name: column.clone(),
+                                    data_connector_name: data_connector_link.name.clone(),
+                                },
+                            )
+                        })?;
+
+                let expression = build_binary_comparison_expression(
+                    operator,
+                    column.clone(),
+                    &op_value.value,
+                    field_path.clone(),
+                );
+                expressions.push(expression);
+            }
+            schema::Annotation::Input(InputAnnotation::BooleanExpression(
+                BooleanExpressionAnnotation::BooleanExpressionArgument {
+                    field:
+                        schema::ModelFilterArgument::Field {
+                            field_name: inner_field_name,
+                            object_type: inner_object_type,
+                        },
+                },
+            )) => {
+                // get correct inner column name
+                let FieldMapping {
+                    column: inner_column,
+                    ..
+                } = get_field_mapping_of_field_name(
+                    type_mappings,
+                    inner_object_type,
+                    inner_field_name,
+                )?;
+
+                // add it to the path
+                field_path.push(inner_column);
+
+                let inner_expression = build_comparison_expression(
+                    op_value,
+                    field_path,
+                    column,
+                    data_connector_link,
+                    type_mappings,
+                )?;
+
+                expressions.push(inner_expression);
+            }
+
+            annotation => Err(error::InternalEngineError::UnexpectedAnnotation {
+                annotation: annotation.clone(),
+            })?,
+        }
+    }
+    Ok(ndc_models::Expression::And { expressions })
 }
 
 /// get column name for field name
@@ -253,6 +384,7 @@ fn get_field_mapping_of_field_name(
 fn resolve_filter_object<'s>(
     fields: &IndexMap<ast::Name, normalized_ast::InputField<'s, GDS>>,
     relationships: &mut BTreeMap<NDCRelationshipName, LocalModelRelationshipInfo<'s>>,
+    data_connector_link: &'s DataConnectorLink,
     type_mappings: &'s BTreeMap<Qualified<CustomTypeName>, metadata_resolve::TypeMapping>,
     usage_counts: &mut UsagesCounts,
 ) -> Result<ndc_models::Expression, error::Error> {
@@ -262,25 +394,37 @@ fn resolve_filter_object<'s>(
         expressions.push(build_filter_expression(
             field,
             relationships,
+            data_connector_link,
             type_mappings,
             usage_counts,
-        )?)
+        )?);
     }
     Ok(ndc_models::Expression::And { expressions })
 }
 
+/// Only pass a path if there are items in it
+fn to_ndc_field_path(field_path: Vec<DataConnectorColumnName>) -> Option<Vec<String>> {
+    if field_path.is_empty() {
+        None
+    } else {
+        Some(field_path.into_iter().map(|s| s.0).collect())
+    }
+}
+
 /// Generate a binary comparison operator
 fn build_binary_comparison_expression(
-    operator: &str,
+    operator: &DataConnectorOperatorName,
     column: DataConnectorColumnName,
     value: &normalized_ast::Value<'_, GDS>,
+    field_path: Vec<DataConnectorColumnName>,
 ) -> ndc_models::Expression {
     ndc_models::Expression::BinaryComparisonOperator {
         column: ndc_models::ComparisonTarget::Column {
             name: column.0,
             path: Vec::new(),
+            field_path: to_ndc_field_path(field_path),
         },
-        operator: operator.to_string(),
+        operator: operator.0.clone(),
         value: ndc_models::ComparisonValue::Scalar {
             value: value.as_json(),
         },
@@ -291,12 +435,14 @@ fn build_binary_comparison_expression(
 fn build_is_null_expression(
     column: DataConnectorColumnName,
     value: &normalized_ast::Value<'_, GDS>,
+    field_path: Vec<DataConnectorColumnName>,
 ) -> Result<ndc_models::Expression, error::Error> {
     // Build an 'IsNull' unary comparison expression
     let unary_comparison_expression = ndc_models::Expression::UnaryComparisonOperator {
         column: ndc_models::ComparisonTarget::Column {
             name: column.0,
             path: Vec::new(),
+            field_path: to_ndc_field_path(field_path),
         },
         operator: ndc_models::UnaryComparisonOperator::IsNull,
     };

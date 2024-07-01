@@ -821,6 +821,15 @@
                             "type": "named",
                             "name": "varchar"
                           }
+                        },
+                        "arguments": {
+                          "hash": {
+                            "description": "Hash a string",
+                            "type": {
+                              "type": "named",
+                              "name": "varchar"
+                            }
+                          }
                         }
                       }
                     }
@@ -1846,12 +1855,16 @@
                 ]
               },
               "capabilities": {
-                "version": "0.1.0",
+                "version": "0.1.3",
                 "capabilities": {
                   "query": {
                     "aggregates": {},
                     "explain": {},
-                    "variables": {}
+                    "variables": {},
+                    "nested_fields": {
+                      "filter_by": {},
+                      "order_by": {}
+                    }
                   },
                   "mutation": {},
                   "relationships": {
@@ -2457,7 +2470,13 @@
               },
               {
                 "name": "Name",
-                "type": "varchar"
+                "type": "varchar",
+                "arguments": [
+                  {
+                    "name": "hash",
+                    "argumentType": "varchar"
+                  }
+                ]
               }
             ],
             "dataConnectorTypeMapping": [
@@ -2472,7 +2491,10 @@
                   },
                   "Name": {
                     "column": {
-                      "name": "Name"
+                      "name": "Name",
+                      "argumentMapping": {
+                        "hash": "hash"
+                      }
                     }
                   }
                 }

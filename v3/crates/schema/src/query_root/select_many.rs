@@ -8,12 +8,13 @@ use lang_graphql::schema as gql_schema;
 use std::collections::BTreeMap;
 
 use crate::mk_deprecation_status;
+use crate::model_arguments::add_model_arguments_field;
+use crate::model_filter_input::{
+    add_limit_input_field, add_offset_input_field, add_order_by_input_field, add_where_input_field,
+};
 use crate::{
-    model_arguments,
-    model_filter::get_where_expression_input_field,
-    model_order_by::get_order_by_expression_input_field,
     permissions,
-    types::{self, output_type::get_custom_output_type, Annotation, ModelInputAnnotation},
+    types::{self, output_type::get_custom_output_type, Annotation},
     GDS,
 };
 use metadata_resolve;
@@ -27,66 +28,10 @@ pub(crate) fn generate_select_many_arguments(
 {
     let mut arguments = BTreeMap::new();
 
-    // insert limit argument
-    if let Some(limit_field) = &model.model.graphql_api.limit_field {
-        let limit_argument = generate_int_input_argument(
-            limit_field.field_name.as_str(),
-            Annotation::Input(types::InputAnnotation::Model(
-                ModelInputAnnotation::ModelLimitArgument,
-            )),
-        )?;
-        arguments.insert(
-            limit_argument.name.clone(),
-            builder.allow_all_namespaced(limit_argument, None),
-        );
-    }
-
-    // insert offset argument
-    if let Some(offset_field) = &model.model.graphql_api.offset_field {
-        let offset_argument = generate_int_input_argument(
-            offset_field.field_name.as_str(),
-            Annotation::Input(types::InputAnnotation::Model(
-                ModelInputAnnotation::ModelOffsetArgument,
-            )),
-        )?;
-
-        arguments.insert(
-            offset_argument.name.clone(),
-            builder.allow_all_namespaced(offset_argument, None),
-        );
-    }
-
-    // generate and insert order_by argument
-    if let Some(order_by_expression_info) = &model.model.graphql_api.order_by_expression {
-        let order_by_argument = {
-            get_order_by_expression_input_field(
-                builder,
-                model.model.name.clone(),
-                order_by_expression_info,
-            )
-        };
-
-        arguments.insert(
-            order_by_argument.name.clone(),
-            builder.allow_all_namespaced(order_by_argument, None),
-        );
-    }
-
-    // generate and insert where argument
-    if let Some(object_boolean_expression_type) = &model.model.filter_expression_type {
-        if let Some(boolean_expression) = &object_boolean_expression_type.graphql {
-            let where_argument = get_where_expression_input_field(
-                builder,
-                object_boolean_expression_type.name.clone(),
-                boolean_expression,
-            );
-
-            arguments.insert(
-                where_argument.name.clone(),
-                builder.allow_all_namespaced(where_argument, None),
-            );
-        }
-    }
+    add_limit_input_field(&mut arguments, builder, model)?;
+    add_offset_input_field(&mut arguments, builder, model)?;
+    add_order_by_input_field(&mut arguments, builder, model);
+    add_where_input_field(&mut arguments, builder, model);
 
     Ok(arguments)
 }
@@ -108,30 +53,14 @@ pub(crate) fn select_many_field(
     let query_root_field = select_many.query_root_field.clone();
     let mut arguments = generate_select_many_arguments(builder, model)?;
 
-    // Generate the `args` input object and add the model
-    // arguments within it.
-    if !model.model.arguments.is_empty() {
-        let model_arguments_input =
-            model_arguments::get_model_arguments_input_field(builder, model)?;
-
-        let name = model_arguments_input.name.clone();
-
-        let model_arguments = builder.conditional_namespaced(
-            model_arguments_input,
-            permissions::get_select_permissions_namespace_annotations(
-                model,
-                &gds.metadata.object_types,
-            )?,
-        );
-
-        if arguments.insert(name.clone(), model_arguments).is_some() {
-            return Err(crate::Error::GraphQlArgumentConflict {
-                argument_name: name,
-                field_name: query_root_field,
-                type_name: parent_type.clone(),
-            });
-        }
-    }
+    add_model_arguments_field(
+        &mut arguments,
+        gds,
+        builder,
+        model,
+        &select_many.query_root_field,
+        parent_type,
+    )?;
 
     let field_type = ast::TypeContainer::list_null(ast::TypeContainer::named_non_null(
         get_custom_output_type(gds, builder, &model.model.data_type)?,
@@ -159,20 +88,4 @@ pub(crate) fn select_many_field(
         )?,
     );
     Ok((query_root_field, field))
-}
-
-///  Generates the input field for the arguments which are of type int.
-pub(crate) fn generate_int_input_argument(
-    name: &str,
-    annotation: Annotation,
-) -> Result<gql_schema::InputField<GDS>, crate::Error> {
-    let input_field_name = metadata_resolve::mk_name(name)?;
-    Ok(gql_schema::InputField::new(
-        input_field_name,
-        None,
-        annotation,
-        ast::TypeContainer::named_null(gql_schema::RegisteredTypeName::int()),
-        None,
-        gql_schema::DeprecationStatus::NotDeprecated,
-    ))
 }

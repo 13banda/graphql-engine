@@ -150,7 +150,7 @@ fn parse_block_string(bytes: &[u8]) -> Result<(String, Consumed, usize), (Error,
                 i += 2;
                 cur_line = Line::new(i);
             }
-            [b'\n', ..] | [b'\r', ..] => {
+            [b'\n' | b'\r', ..] => {
                 cur_line.end = i;
                 lines.push(cur_line);
                 consumed.count_line_break();
@@ -267,8 +267,7 @@ fn parse_single_line_string(bytes: &[u8]) -> Result<(String, Consumed, usize), (
                             let c = std::char::from_u32(code_point).ok_or_else(|| {
                                 (
                                     Error::InvalidUnicodeEscapeSequence(format!(
-                                        "0x{:X} is not a valid code point",
-                                        code_point
+                                        "0x{code_point:X} is not a valid code point"
                                     )),
                                     Consumed::no_line_break(chars),
                                 )

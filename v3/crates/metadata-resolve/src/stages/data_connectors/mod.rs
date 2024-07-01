@@ -1,17 +1,19 @@
+use crate::types::configuration::Configuration;
 use crate::types::error::Error;
 use crate::types::subgraph::Qualified;
 
 mod types;
 use std::collections::BTreeMap;
 pub use types::{
-    ComparisonOperators, DataConnectorContext, DataConnectorLink, DataConnectorSchema,
-    DataConnectors,
+    ArgumentPreset, CommandsResponseConfig, DataConnectorCapabilities, DataConnectorContext,
+    DataConnectorLink, DataConnectorSchema, DataConnectors,
 };
 
 /// Resolve data connectors.
-pub fn resolve(
-    metadata_accessor: &open_dds::accessor::MetadataAccessor,
-) -> Result<types::DataConnectors, Error> {
+pub fn resolve<'a>(
+    metadata_accessor: &'a open_dds::accessor::MetadataAccessor,
+    configuration: &Configuration,
+) -> Result<types::DataConnectors<'a>, Error> {
     let mut data_connectors = BTreeMap::new();
     for open_dds::accessor::QualifiedObject {
         subgraph,
@@ -24,7 +26,11 @@ pub fn resolve(
         if data_connectors
             .insert(
                 qualified_data_connector_name.clone(),
-                types::DataConnectorContext::new(data_connector)?,
+                types::DataConnectorContext::new(
+                    data_connector,
+                    &qualified_data_connector_name,
+                    &configuration.unstable_features,
+                )?,
             )
             .is_some()
         {

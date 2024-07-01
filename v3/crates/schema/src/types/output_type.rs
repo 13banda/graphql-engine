@@ -6,6 +6,7 @@ use open_dds::{
     relationships,
     types::{CustomTypeName, InbuiltType},
 };
+use relationship::ModelAggregateRelationshipAnnotation;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use self::relationship::{
@@ -14,8 +15,10 @@ use self::relationship::{
 use super::inbuilt_type::base_type_container_for_inbuilt_type;
 use super::{Annotation, PossibleApolloFederationTypes, TypeId};
 use crate::commands::generate_command_argument;
+use crate::field_arguments::generate_field_argument;
+use crate::query_root::select_aggregate;
 use crate::query_root::select_many::generate_select_many_arguments;
-use crate::{mk_deprecation_status, permissions};
+use crate::{aggregates, mk_deprecation_status, permissions};
 use crate::{Role, GDS};
 use metadata_resolve::{self, mk_name};
 use metadata_resolve::{get_type_representation, TypeRepresentation};
@@ -113,6 +116,7 @@ pub fn get_custom_output_type(
         &gds.metadata.object_types,
         &gds.metadata.scalar_types,
         &gds.metadata.object_boolean_expression_types,
+        &gds.metadata.boolean_expression_types,
     )
     .map_err(|_| crate::Error::InternalTypeNotFound {
         type_name: gds_type.clone(),
@@ -142,7 +146,11 @@ pub fn get_custom_output_type(
                     .clone(),
             }))
         }
-        TypeRepresentation::BooleanExpression(_) => Err(Error::BooleanExpressionUsedAsOutputType),
+        TypeRepresentation::BooleanExpression(_)
+        | TypeRepresentation::BooleanExpressionObject(_)
+        | TypeRepresentation::BooleanExpressionScalar(_) => {
+            Err(Error::BooleanExpressionUsedAsOutputType)
+        }
     }
 }
 
@@ -159,14 +167,16 @@ pub(crate) fn get_type_kind(
                     &gds.metadata.object_types,
                     &gds.metadata.scalar_types,
                     &gds.metadata.object_boolean_expression_types,
+                    &gds.metadata.boolean_expression_types,
                 )
                 .map_err(|_| Error::InternalTypeNotFound {
                     type_name: type_name.to_owned(),
                 })? {
                     TypeRepresentation::Scalar(_) => Ok(super::TypeKind::Scalar),
-                    TypeRepresentation::Object(_) | TypeRepresentation::BooleanExpression(_) => {
-                        Ok(super::TypeKind::Object)
-                    }
+                    TypeRepresentation::Object(_)
+                    | TypeRepresentation::BooleanExpressionObject(_)
+                    | TypeRepresentation::BooleanExpressionScalar(_)
+                    | TypeRepresentation::BooleanExpression(_) => Ok(super::TypeKind::Object),
                 }
             }
         },
@@ -184,6 +194,7 @@ fn object_type_fields(
         Qualified<CustomTypeName>,
         metadata_resolve::ObjectTypeWithRelationships,
     >,
+    parent_graphql_type_name: &ast::TypeName,
 ) -> Result<BTreeMap<ast::Name, gql_schema::Namespaced<GDS, gql_schema::Field<GDS>>>, Error> {
     let mut graphql_fields = object_type_representation
         .object_type
@@ -191,6 +202,25 @@ fn object_type_fields(
         .iter()
         .map(|(field_name, field_definition)| -> Result<_, Error> {
             let graphql_field_name = mk_name(field_name.0.as_str())?;
+            let field_arguments = field_definition
+                .field_arguments
+                .iter()
+                .map(|(argument_name, argument_type)| {
+                    generate_field_argument(gds, builder, argument_name, argument_type)
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            let field_argument_types =
+                field_definition
+                    .field_arguments
+                    .iter()
+                    .map(|(argument_name, argument_type)| {
+                        let name = ast::Name::new(argument_name.0.as_str())?;
+                        Ok((name, argument_type.argument_type.clone()))
+                    })
+                    .collect::<Result<
+                        BTreeMap<lang_graphql::ast::common::Name, QualifiedTypeReference>,
+                        Error,
+                    >>()?;
             let field = gql_schema::Field::<GDS>::new(
                 graphql_field_name.clone(),
                 field_definition.description.clone(),
@@ -198,9 +228,11 @@ fn object_type_fields(
                     name: field_name.clone(),
                     field_type: field_definition.field_type.clone(),
                     field_base_type_kind: get_type_kind(gds, &field_definition.field_type)?,
+                    parent_type: type_name.to_owned(),
+                    argument_types: field_argument_types,
                 }),
                 get_output_type(gds, builder, &field_definition.field_type)?,
-                BTreeMap::new(),
+                field_arguments,
                 mk_deprecation_status(&field_definition.deprecated),
             );
             // if output permissions are defined for this type, we conditionally
@@ -217,157 +249,305 @@ fn object_type_fields(
             Ok((graphql_field_name, namespaced_field))
         })
         .collect::<Result<BTreeMap<_, _>, _>>()?;
-    for (relationship_field_name, relationship) in &object_type_representation.relationships {
-        let deprecation_status = mk_deprecation_status(&relationship.deprecated);
 
+    add_relationship_fields(
+        &mut graphql_fields,
+        builder,
+        gds,
+        type_name,
+        object_type_representation,
+        object_types,
+        parent_graphql_type_name,
+    )?;
+
+    Ok(graphql_fields)
+}
+
+/// Add the relationship fields to the `graphql_fields` map
+fn add_relationship_fields(
+    graphql_fields: &mut BTreeMap<ast::Name, gql_schema::Namespaced<GDS, gql_schema::Field<GDS>>>,
+    builder: &mut gql_schema::Builder<GDS>,
+    gds: &GDS,
+    type_name: &Qualified<CustomTypeName>,
+    object_type_representation: &metadata_resolve::ObjectTypeWithRelationships,
+    object_types: &BTreeMap<
+        Qualified<CustomTypeName>,
+        metadata_resolve::ObjectTypeWithRelationships,
+    >,
+    parent_graphql_type_name: &ast::TypeName,
+) -> Result<(), Error> {
+    for (relationship_field_name, relationship) in &object_type_representation.relationship_fields {
         let relationship_field = match &relationship.target {
-            metadata_resolve::RelationshipTarget::Command {
-                command_name,
-                target_type,
-                mappings,
-            } => {
-                let relationship_output_type = get_output_type(gds, builder, target_type)?;
-
-                let command = gds.metadata.commands.get(command_name).ok_or_else(|| {
-                    Error::InternalCommandNotFound {
-                        command_name: command_name.clone(),
-                    }
-                })?;
-
-                let mut arguments_with_mapping = HashSet::new();
-                for argument_mapping in mappings {
-                    arguments_with_mapping.insert(&argument_mapping.argument_name);
-                }
-
-                // generate argument fields for the command arguments which are not mapped to
-                // any type fields, so that they can be exposed in the relationship field schema
-                let mut arguments = BTreeMap::new();
-                for (argument_name, argument_type) in &command.command.arguments {
-                    if !arguments_with_mapping.contains(argument_name) {
-                        let (field_name, input_field) = generate_command_argument(
-                            gds,
-                            builder,
-                            command,
-                            argument_name,
-                            argument_type,
-                        )?;
-                        arguments.insert(field_name, input_field);
-                    }
-                }
-
-                builder.conditional_namespaced(
-                    gql_schema::Field::<GDS>::new(
-                        relationship_field_name.clone(),
-                        relationship.description.clone(),
-                        Annotation::Output(super::OutputAnnotation::RelationshipToCommand(
-                            CommandRelationshipAnnotation {
-                                source_type: relationship.source.clone(),
-                                relationship_name: relationship.name.clone(),
-                                command_name: command_name.clone(),
-                                target_source: CommandTargetSource::new(command, relationship)?,
-                                target_type: target_type.clone(),
-                                target_base_type_kind: get_type_kind(gds, target_type)?,
-                                mappings: mappings.clone(),
-                            },
-                        )),
-                        relationship_output_type,
-                        arguments,
-                        deprecation_status,
-                    ),
-                    permissions::get_command_relationship_namespace_annotations(
-                        command,
-                        object_type_representation,
-                        mappings,
-                        object_types,
-                    )?,
-                )
+            metadata_resolve::RelationshipTarget::Command(command_relationship_target) => {
+                command_relationship_field(
+                    command_relationship_target,
+                    builder,
+                    gds,
+                    relationship_field_name,
+                    relationship,
+                    object_type_representation,
+                    object_types,
+                )?
             }
-            metadata_resolve::RelationshipTarget::Model {
-                model_name,
-                relationship_type,
-                target_typename,
-                mappings,
-            } => {
-                let relationship_base_output_type =
-                    get_custom_output_type(gds, builder, target_typename)?;
-
-                let relationship_output_type = match relationship_type {
-                    relationships::RelationshipType::Array => {
-                        let non_nullable_relationship_base_type =
-                            ast::TypeContainer::named_non_null(relationship_base_output_type);
-                        ast::TypeContainer::list_null(non_nullable_relationship_base_type)
-                    }
-                    relationships::RelationshipType::Object => {
-                        ast::TypeContainer::named_null(relationship_base_output_type)
-                    }
-                };
-
-                let model = gds.metadata.models.get(model_name).ok_or_else(|| {
-                    Error::InternalModelNotFound {
-                        model_name: model_name.clone(),
-                    }
-                })?;
-
-                if !model.model.arguments.is_empty() {
-                    return Err(Error::InternalUnsupported {
-                        summary: "Relationships to models with arguments aren't supported".into(),
-                    });
-                }
-
-                let arguments = match relationship_type {
-                    relationships::RelationshipType::Array => {
-                        generate_select_many_arguments(builder, model)?
-                    }
-                    relationships::RelationshipType::Object => BTreeMap::new(),
-                };
-
-                let target_object_type_representation =
-                    get_object_type_representation(gds, &model.model.data_type)?;
-
-                builder.conditional_namespaced(
-                    gql_schema::Field::<GDS>::new(
-                        relationship_field_name.clone(),
-                        relationship.description.clone(),
-                        Annotation::Output(super::OutputAnnotation::RelationshipToModel(
-                            ModelRelationshipAnnotation {
-                                source_type: relationship.source.clone(),
-                                relationship_name: relationship.name.clone(),
-                                model_name: model_name.clone(),
-                                target_source: metadata_resolve::ModelTargetSource::new(
-                                    model,
-                                    relationship,
-                                )?,
-                                target_type: target_typename.clone(),
-                                relationship_type: relationship_type.clone(),
-                                mappings: mappings.clone(),
-                            },
-                        )),
-                        relationship_output_type,
-                        arguments,
-                        deprecation_status,
-                    ),
-                    permissions::get_model_relationship_namespace_annotations(
-                        model,
-                        object_type_representation,
-                        target_object_type_representation,
-                        mappings,
-                        object_types,
-                    )?,
-                )
+            metadata_resolve::RelationshipTarget::Model(model_relationship_target) => {
+                model_relationship_field(
+                    model_relationship_target,
+                    builder,
+                    gds,
+                    relationship_field_name,
+                    relationship,
+                    object_type_representation,
+                    object_types,
+                )?
             }
+            metadata_resolve::RelationshipTarget::ModelAggregate(
+                model_aggregate_relationship_target,
+            ) => model_aggregate_relationship_field(
+                model_aggregate_relationship_target,
+                builder,
+                gds,
+                relationship_field_name,
+                relationship,
+                object_type_representation,
+                object_types,
+                parent_graphql_type_name,
+            )?,
         };
         if graphql_fields
             .insert(relationship_field_name.clone(), relationship_field)
             .is_some()
         {
             return Err(Error::RelationshipFieldNameConflict {
-                relationship_name: relationship.name.clone(),
+                relationship_name: relationship.relationship_name.clone(),
                 field_name: relationship_field_name.clone(),
                 type_name: type_name.clone(),
             });
         }
     }
-    Ok(graphql_fields)
+
+    Ok(())
+}
+
+/// Create a command relationship field
+fn command_relationship_field(
+    command_relationship_target: &metadata_resolve::CommandRelationshipTarget,
+    builder: &mut gql_schema::Builder<GDS>,
+    gds: &GDS,
+    relationship_field_name: &ast::Name,
+    relationship: &metadata_resolve::RelationshipField,
+    object_type_representation: &metadata_resolve::ObjectTypeWithRelationships,
+    object_types: &BTreeMap<
+        Qualified<CustomTypeName>,
+        metadata_resolve::ObjectTypeWithRelationships,
+    >,
+) -> Result<gql_schema::Namespaced<GDS, gql_schema::Field<GDS>>, Error> {
+    let relationship_output_type =
+        get_output_type(gds, builder, &command_relationship_target.target_type)?;
+    let command = gds
+        .metadata
+        .commands
+        .get(&command_relationship_target.command_name)
+        .ok_or_else(|| Error::InternalCommandNotFound {
+            command_name: command_relationship_target.command_name.clone(),
+        })?;
+
+    let arguments_with_mapping = command_relationship_target
+        .mappings
+        .iter()
+        .map(|mapping| &mapping.argument_name)
+        .collect::<HashSet<_>>();
+    let arguments = command
+        .command
+        .arguments
+        .iter()
+        .filter(|(argument_name, _argument_type)| !arguments_with_mapping.contains(argument_name))
+        .map(|(argument_name, argument_type)| {
+            generate_command_argument(gds, builder, command, argument_name, argument_type)
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+
+    let field = builder.conditional_namespaced(
+        gql_schema::Field::<GDS>::new(
+            relationship_field_name.clone(),
+            relationship.description.clone(),
+            Annotation::Output(super::OutputAnnotation::RelationshipToCommand(
+                CommandRelationshipAnnotation {
+                    source_type: relationship.source.clone(),
+                    relationship_name: relationship.relationship_name.clone(),
+                    command_name: command_relationship_target.command_name.clone(),
+                    target_source: CommandTargetSource::new(command, relationship)?,
+                    target_type: command_relationship_target.target_type.clone(),
+                    target_base_type_kind: get_type_kind(
+                        gds,
+                        &command_relationship_target.target_type,
+                    )?,
+                    mappings: command_relationship_target.mappings.clone(),
+                },
+            )),
+            relationship_output_type,
+            arguments,
+            mk_deprecation_status(&relationship.deprecated),
+        ),
+        permissions::get_command_relationship_namespace_annotations(
+            command,
+            object_type_representation,
+            &command_relationship_target.mappings,
+            object_types,
+        )?,
+    );
+    Ok(field)
+}
+
+/// Create a model relationship field
+fn model_relationship_field(
+    model_relationship_target: &metadata_resolve::ModelRelationshipTarget,
+    builder: &mut gql_schema::Builder<GDS>,
+    gds: &GDS,
+    relationship_field_name: &ast::Name,
+    relationship: &metadata_resolve::RelationshipField,
+    object_type_representation: &metadata_resolve::ObjectTypeWithRelationships,
+    object_types: &BTreeMap<
+        Qualified<CustomTypeName>,
+        metadata_resolve::ObjectTypeWithRelationships,
+    >,
+) -> Result<gql_schema::Namespaced<GDS, gql_schema::Field<GDS>>, Error> {
+    let relationship_base_output_type =
+        get_custom_output_type(gds, builder, &model_relationship_target.target_typename)?;
+    let relationship_output_type = match model_relationship_target.relationship_type {
+        relationships::RelationshipType::Array => {
+            let non_nullable_relationship_base_type =
+                ast::TypeContainer::named_non_null(relationship_base_output_type);
+            ast::TypeContainer::list_null(non_nullable_relationship_base_type)
+        }
+        relationships::RelationshipType::Object => {
+            ast::TypeContainer::named_null(relationship_base_output_type)
+        }
+    };
+
+    let model = gds
+        .metadata
+        .models
+        .get(&model_relationship_target.model_name)
+        .ok_or_else(|| Error::InternalModelNotFound {
+            model_name: model_relationship_target.model_name.clone(),
+        })?;
+    if !model.model.arguments.is_empty() {
+        return Err(Error::InternalUnsupported {
+            summary: "Relationships to models with arguments aren't supported".into(),
+        });
+    }
+
+    let arguments = match model_relationship_target.relationship_type {
+        relationships::RelationshipType::Array => generate_select_many_arguments(builder, model)?,
+        relationships::RelationshipType::Object => BTreeMap::new(),
+    };
+
+    let target_object_type_representation =
+        get_object_type_representation(gds, &model.model.data_type)?;
+
+    let field = builder.conditional_namespaced(
+        gql_schema::Field::<GDS>::new(
+            relationship_field_name.clone(),
+            relationship.description.clone(),
+            Annotation::Output(super::OutputAnnotation::RelationshipToModel(
+                ModelRelationshipAnnotation {
+                    source_type: relationship.source.clone(),
+                    relationship_name: relationship.relationship_name.clone(),
+                    model_name: model_relationship_target.model_name.clone(),
+                    target_source: metadata_resolve::ModelTargetSource::new(model, relationship)?,
+                    target_type: model_relationship_target.target_typename.clone(),
+                    relationship_type: model_relationship_target.relationship_type.clone(),
+                    mappings: model_relationship_target.mappings.clone(),
+                },
+            )),
+            relationship_output_type,
+            arguments,
+            mk_deprecation_status(&relationship.deprecated),
+        ),
+        permissions::get_model_relationship_namespace_annotations(
+            model,
+            object_type_representation,
+            target_object_type_representation,
+            &model_relationship_target.mappings,
+            object_types,
+        )?,
+    );
+    Ok(field)
+}
+
+/// Create a model relationship field
+fn model_aggregate_relationship_field(
+    model_aggregate_relationship_target: &metadata_resolve::ModelAggregateRelationshipTarget,
+    builder: &mut gql_schema::Builder<GDS>,
+    gds: &GDS,
+    relationship_field_name: &ast::Name,
+    relationship: &metadata_resolve::RelationshipField,
+    object_type_representation: &metadata_resolve::ObjectTypeWithRelationships,
+    object_types: &BTreeMap<
+        Qualified<CustomTypeName>,
+        metadata_resolve::ObjectTypeWithRelationships,
+    >,
+    parent_graphql_type_name: &ast::TypeName,
+) -> Result<gql_schema::Namespaced<GDS, gql_schema::Field<GDS>>, Error> {
+    let aggregate_expression_name = &model_aggregate_relationship_target.aggregate_expression;
+    let aggregate_expression = gds
+        .metadata
+        .aggregate_expressions
+        .get(aggregate_expression_name)
+        .ok_or_else(|| Error::InternalAggregateExpressionNotFound {
+            aggregate_expression: aggregate_expression_name.clone(),
+        })?;
+
+    let model = gds
+        .metadata
+        .models
+        .get(&model_aggregate_relationship_target.model_name)
+        .ok_or_else(|| Error::InternalModelNotFound {
+            model_name: model_aggregate_relationship_target.model_name.clone(),
+        })?;
+
+    let aggregate_select_output_type =
+        aggregates::get_aggregate_select_output_type(builder, aggregate_expression)?;
+
+    let arguments = select_aggregate::generate_select_aggregate_arguments(
+        gds,
+        builder,
+        model,
+        &model_aggregate_relationship_target.filter_input_field_name,
+        relationship_field_name,
+        parent_graphql_type_name,
+    )?;
+
+    let target_object_type_representation =
+        get_object_type_representation(gds, &model.model.data_type)?;
+
+    let field = builder.conditional_namespaced(
+        gql_schema::Field::<GDS>::new(
+            relationship_field_name.clone(),
+            relationship.description.clone(),
+            Annotation::Output(super::OutputAnnotation::RelationshipToModelAggregate(
+                ModelAggregateRelationshipAnnotation {
+                    source_type: relationship.source.clone(),
+                    relationship_name: relationship.relationship_name.clone(),
+                    model_name: model_aggregate_relationship_target.model_name.clone(),
+                    target_source: metadata_resolve::ModelTargetSource::new(model, relationship)?,
+                    target_type: model_aggregate_relationship_target.target_typename.clone(),
+                    mappings: model_aggregate_relationship_target.mappings.clone(),
+                },
+            )),
+            ast::TypeContainer::named_non_null(aggregate_select_output_type),
+            arguments,
+            mk_deprecation_status(&relationship.deprecated),
+        ),
+        permissions::get_model_relationship_namespace_annotations(
+            model,
+            object_type_representation,
+            target_object_type_representation,
+            &model_aggregate_relationship_target.mappings,
+            object_types,
+        )?,
+    );
+    Ok(field)
 }
 
 fn generate_apollo_federation_directives(
@@ -378,7 +558,7 @@ fn generate_apollo_federation_directives(
         let fields = key
             .fields
             .iter()
-            .map(|f| f.0 .0.clone())
+            .map(|f| f.0.to_string())
             .collect::<Vec<_>>()
             .join(" ");
         let key_directive = gql_schema::Directive {
@@ -419,6 +599,7 @@ pub fn output_type_schema(
         type_name,
         object_type_representation,
         &gds.metadata.object_types,
+        &graphql_type_name,
     )?;
     let directives = match &object_type_representation
         .object_type
@@ -454,7 +635,7 @@ pub fn output_type_schema(
                 global_id_fields: object_type_representation
                     .object_type
                     .global_id_fields
-                    .to_vec(),
+                    .clone(),
             }),
             get_output_type(gds, builder, &ID_TYPE_REFERENCE)?,
             BTreeMap::new(),

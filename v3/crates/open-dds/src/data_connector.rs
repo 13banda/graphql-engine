@@ -1,10 +1,14 @@
 use ndc_models;
+use ndc_models_v01;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 mod v1;
 
-pub use v1::{DataConnectorLinkV1, DataConnectorUrlV1 as DataConnectorUrl, ReadWriteUrls};
+pub use v1::{
+    ArgumentPreset, ArgumentPresetValue, DataConnectorLinkV1,
+    DataConnectorUrlV1 as DataConnectorUrl, HttpHeadersPreset, ReadWriteUrls, ResponseHeaders,
+};
 
 use crate::{identifier::Identifier, impl_OpenDd_default_for};
 
@@ -136,9 +140,10 @@ impl DataConnectorLink {
                         "procedures": []
                     },
                     "capabilities": {
-                        "version": "0.1.0",
+                        "version": "0.1.3",
                         "capabilities": {
                             "query": {
+                                "nested_fields": {},
                                 "variables": {}
                             },
                             "mutation": {}
@@ -159,13 +164,25 @@ impl DataConnectorLink {
 fn ndc_capabilities_response_v01_schema_reference(
     _gen: &mut schemars::gen::SchemaGenerator,
 ) -> schemars::schema::Schema {
-    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.2/ndc-models/tests/json_schema/capabilities_response.jsonschema".into())
+    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.4/ndc-models/tests/json_schema/capabilities_response.jsonschema".into())
 }
 
 fn ndc_schema_response_v01_schema_reference(
     _gen: &mut schemars::gen::SchemaGenerator,
 ) -> schemars::schema::Schema {
-    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.2/ndc-models/tests/json_schema/schema_response.jsonschema".into())
+    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.4/ndc-models/tests/json_schema/schema_response.jsonschema".into())
+}
+
+fn ndc_capabilities_response_v02_schema_reference(
+    _gen: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/main/ndc-models/tests/json_schema/capabilities_response.jsonschema".into())
+}
+
+fn ndc_schema_response_v02_schema_reference(
+    _gen: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/main/ndc-models/tests/json_schema/schema_response.jsonschema".into())
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
@@ -179,6 +196,9 @@ pub enum VersionedSchemaAndCapabilities {
     #[serde(rename = "v0.1")]
     #[opendd(rename = "v0.1")]
     V01(SchemaAndCapabilitiesV01),
+    #[serde(rename = "v0.2")]
+    #[opendd(rename = "v0.2", hidden)]
+    V02(SchemaAndCapabilitiesV02),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -187,13 +207,27 @@ pub enum VersionedSchemaAndCapabilities {
 #[schemars(title = "SchemaAndCapabilitiesV01")]
 pub struct SchemaAndCapabilitiesV01 {
     #[schemars(schema_with = "ndc_schema_response_v01_schema_reference")]
-    pub schema: ndc_models::SchemaResponse,
+    pub schema: ndc_models_v01::SchemaResponse,
     #[schemars(schema_with = "ndc_capabilities_response_v01_schema_reference")]
-    pub capabilities: ndc_models::CapabilitiesResponse,
+    pub capabilities: ndc_models_v01::CapabilitiesResponse,
 }
 
 // Derive OpenDd for `SchemaAdnCapabilitiesV01` by serde Deserialize and schemars JsonSchema implementations.
 impl_OpenDd_default_for!(SchemaAndCapabilitiesV01);
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "SchemaAndCapabilitiesV01")]
+pub struct SchemaAndCapabilitiesV02 {
+    #[schemars(schema_with = "ndc_schema_response_v02_schema_reference")]
+    pub schema: ndc_models::SchemaResponse,
+    #[schemars(schema_with = "ndc_capabilities_response_v02_schema_reference")]
+    pub capabilities: ndc_models::CapabilitiesResponse,
+}
+
+// Derive OpenDd for `SchemaAdnCapabilitiesV02` by serde Deserialize and schemars JsonSchema implementations.
+impl_OpenDd_default_for!(SchemaAndCapabilitiesV02);
 
 #[cfg(test)]
 mod tests {
@@ -220,9 +254,11 @@ mod tests {
                     "schema": {
                         "version": "v0.1",
                         "capabilities": {
-                            "version": "1",
+                            "version": "0.1.3",
                             "capabilities": {
-                                "query": {},
+                                "query": {
+                                    "nested_fields": {}
+                                },
                                 "mutation": {}
                             }
                         },
@@ -255,9 +291,11 @@ mod tests {
                 "schema": {
                     "version": "v0.1",
                     "capabilities": {
-                        "version": "1",
+                        "version": "0.1.3",
                         "capabilities": {
-                            "query": {},
+                            "query": {
+                              "nested_fields": {}
+                            },
                             "mutation": {}
                         }
                     },

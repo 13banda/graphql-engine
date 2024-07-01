@@ -77,11 +77,7 @@ pub fn test_execution_expectation_legacy(
             metadata
         );
 
-        let metadata_resolve_flags = metadata_resolve::MetadataResolveFlagsInternal {
-            enable_boolean_expression_types: true,
-        };
-
-        let gds = GDS::new(metadata, &metadata_resolve_flags)?;
+        let gds = GDS::new(metadata, test_metadata_resolve_configuration())?;
         let schema = GDS::build_schema(&gds)?;
 
         // Ensure schema is serialized successfully.
@@ -89,6 +85,7 @@ pub fn test_execution_expectation_legacy(
 
         let query = fs::read_to_string(request_path)?;
 
+        let request_headers = reqwest::header::HeaderMap::new();
         let session = {
             let session_vars_path = &test_path.join("session_variables.json");
             let session_variables: HashMap<SessionVariable, SessionVariableValue> =
@@ -104,8 +101,16 @@ pub fn test_execution_expectation_legacy(
 
         // Execute the test
 
-        let response =
-            execute_query(&test_ctx.http_context, &schema, &session, raw_request, None).await;
+        let response = execute_query(
+            execute::ExposeInternalErrors::Expose,
+            &test_ctx.http_context,
+            &schema,
+            &session,
+            &request_headers,
+            raw_request,
+            None,
+        )
+        .await;
 
         let mut expected = test_ctx.mint.new_goldenfile_with_differ(
             response_path,
@@ -115,11 +120,15 @@ pub fn test_execution_expectation_legacy(
                 let json2: serde_json::Value =
                     serde_json::from_reader(File::open(file2).unwrap()).unwrap();
                 if json1 != json2 {
-                    text_diff(file1, file2)
+                    text_diff(file1, file2);
                 }
             }),
         )?;
-        write!(expected, "{}", serde_json::to_string_pretty(&response.0)?)?;
+        write!(
+            expected,
+            "{}",
+            serde_json::to_string_pretty(&response.inner())?
+        )?;
         Ok(())
     })
 }
@@ -154,7 +163,8 @@ pub(crate) fn test_introspection_expectation(
             metadata
         );
 
-        let gds = GDS::new_with_default_flags(metadata)?;
+        let gds = GDS::new(metadata, test_metadata_resolve_configuration())?;
+
         let schema = GDS::build_schema(&gds)?;
 
         // Verify successful serialization and deserialization of the schema.
@@ -174,6 +184,7 @@ pub(crate) fn test_introspection_expectation(
 
         let query = fs::read_to_string(request_path)?;
 
+        let request_headers = reqwest::header::HeaderMap::new();
         let session_vars_path = &test_path.join("session_variables.json");
         let sessions: Vec<HashMap<SessionVariable, SessionVariableValue>> =
             json::from_str(fs::read_to_string(session_vars_path)?.as_ref())?;
@@ -197,14 +208,16 @@ pub(crate) fn test_introspection_expectation(
         let mut responses = Vec::new();
         for session in &sessions {
             let response = execute_query(
+                execute::ExposeInternalErrors::Expose,
                 &test_ctx.http_context,
                 &schema,
                 session,
+                &request_headers,
                 raw_request.clone(),
                 None,
             )
             .await;
-            responses.push(response.0);
+            responses.push(response.inner());
         }
 
         let mut expected = test_ctx.mint.new_goldenfile_with_differ(
@@ -215,7 +228,7 @@ pub(crate) fn test_introspection_expectation(
                 let json2: serde_json::Value =
                     serde_json::from_reader(File::open(file2).unwrap()).unwrap();
                 if json1 != json2 {
-                    text_diff(file1, file2)
+                    text_diff(file1, file2);
                 }
             }),
         )?;
@@ -234,10 +247,11 @@ pub fn test_execution_expectation(
         let mut test_ctx = setup(&root_test_dir);
         let test_path = root_test_dir.join(test_path_string);
 
+        let metadata_path = test_path.join("metadata.json");
         let request_path = test_path.join("request.gql");
         let variables_path = test_path.join("variables.json");
         let response_path = test_path_string.to_string() + "/expected.json";
-        let metadata_path = test_path.join("metadata.json");
+        let response_headers_path = test_path.join("expected_headers.json");
 
         let metadata_json_value = merge_with_common_metadata(
             &metadata_path,
@@ -254,12 +268,7 @@ pub fn test_execution_expectation(
             metadata
         );
 
-        // This is where we'll want to enable pre-release features in tests
-        let metadata_resolve_flags = metadata_resolve::MetadataResolveFlagsInternal {
-            enable_boolean_expression_types: true,
-        };
-
-        let gds = GDS::new(metadata, &metadata_resolve_flags)?;
+        let gds = GDS::new(metadata, test_metadata_resolve_configuration())?;
         let schema = GDS::build_schema(&gds)?;
 
         // Verify successful serialization and deserialization of the schema.
@@ -289,6 +298,7 @@ pub fn test_execution_expectation(
                 Err(_) => None,
             };
 
+        let request_headers = reqwest::header::HeaderMap::new();
         let session_vars_path = &test_path.join("session_variables.json");
         let sessions: Vec<HashMap<SessionVariable, SessionVariableValue>> =
             json::from_str(fs::read_to_string(session_vars_path)?.as_ref())?;
@@ -302,6 +312,14 @@ pub fn test_execution_expectation(
             "Found less than 2 roles in test scenario"
         );
 
+        // expected response headers are a `Vec<String>`; one set for each
+        // session/role.
+        let expected_headers: Option<Vec<Vec<String>>> =
+            match fs::read_to_string(response_headers_path) {
+                Ok(response_headers_str) => Some(json::from_str(&response_headers_str)?),
+                Err(_) => None,
+            };
+
         // Execute the test
         let mut responses = Vec::new();
 
@@ -314,14 +332,16 @@ pub fn test_execution_expectation(
                 };
                 for session in &sessions {
                     let response = execute_query(
+                        execute::ExposeInternalErrors::Expose,
                         &test_ctx.http_context,
                         &schema,
                         session,
+                        &request_headers,
                         raw_request.clone(),
                         None,
                     )
                     .await;
-                    responses.push(response.0);
+                    responses.push(response.inner());
                 }
             }
             Some(vars) => {
@@ -332,18 +352,33 @@ pub fn test_execution_expectation(
                         variables: Some(variables),
                     };
                     let response = execute_query(
+                        execute::ExposeInternalErrors::Expose,
                         &test_ctx.http_context,
                         &schema,
                         session,
+                        &request_headers,
                         raw_request.clone(),
                         None,
                     )
                     .await;
-                    responses.push(response.0);
+                    responses.push(response.inner());
                 }
             }
         }
 
+        // assert response headers matches
+        if let Some(expected_headers) = expected_headers {
+            for (response, expected_response_headers) in responses.iter().zip(expected_headers) {
+                for header_name in &expected_response_headers {
+                    assert!(
+                        response.headers.contains_key(header_name),
+                        "Header {header_name:} not found in response headers."
+                    );
+                }
+            }
+        }
+
+        // assert response body matches
         let mut expected = test_ctx.mint.new_goldenfile_with_differ(
             response_path,
             Box::new(|file1, file2| {
@@ -352,7 +387,7 @@ pub fn test_execution_expectation(
                 let json2: serde_json::Value =
                     serde_json::from_reader(File::open(file2).unwrap()).unwrap();
                 if json1 != json2 {
-                    text_diff(file1, file2)
+                    text_diff(file1, file2);
                 }
             }),
         )?;
@@ -403,6 +438,7 @@ pub fn test_execute_explain(
         let gds = GDS::new_with_default_flags(open_dds::traits::OpenDd::deserialize(metadata)?)?;
 
         let schema = GDS::build_schema(&gds)?;
+        let request_headers = reqwest::header::HeaderMap::new();
         let session = {
             let session_variables_raw = r#"{
                 "x-hasura-role": "admin"
@@ -417,8 +453,15 @@ pub fn test_execute_explain(
             query,
             variables: None,
         };
-        let raw_response =
-            execute::execute_explain(&test_ctx.http_context, &schema, &session, raw_request).await;
+        let raw_response = execute::execute_explain(
+            execute::ExposeInternalErrors::Expose,
+            &test_ctx.http_context,
+            &schema,
+            &session,
+            &request_headers,
+            raw_request,
+        )
+        .await;
 
         let response = execute::redact_ndc_explain(raw_response);
 
@@ -430,11 +473,22 @@ pub fn test_execute_explain(
                 let json2: serde_json::Value =
                     serde_json::from_reader(File::open(file2).unwrap()).unwrap();
                 if json1 != json2 {
-                    text_diff(file1, file2)
+                    text_diff(file1, file2);
                 }
             }),
         )?;
         write!(expected, "{}", serde_json::to_string_pretty(&response)?)?;
         Ok(())
     })
+}
+
+// This is where we'll want to enable pre-release features in tests
+fn test_metadata_resolve_configuration() -> metadata_resolve::configuration::Configuration {
+    metadata_resolve::configuration::Configuration {
+        allow_unknown_subgraphs: false,
+        unstable_features: metadata_resolve::configuration::UnstableFeatures {
+            enable_order_by_expressions: false,
+            enable_ndc_v02_support: true,
+        },
+    }
 }

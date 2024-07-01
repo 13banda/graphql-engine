@@ -1,7 +1,9 @@
 use gql::ast::common as ast;
 use lang_graphql as gql;
 use open_dds::{
+    aggregates::AggregationFunctionName,
     arguments::ArgumentName,
+    data_connector::{DataConnectorColumnName, DataConnectorName},
     relationships::RelationshipName,
     session_variables::SessionVariable,
     types::{CustomTypeName, FieldName},
@@ -11,9 +13,10 @@ use thiserror::Error;
 use tracing_util::{ErrorVisibility, TraceableError};
 use transitive::Transitive;
 
-use metadata_resolve::Qualified;
+use metadata_resolve::{Qualified, QualifiedTypeName};
 use schema::{Annotation, NamespaceAnnotation};
 
+#[allow(clippy::duplicated_attributes)] // suppress spurious warnings from Clippy
 #[derive(Error, Debug, Transitive)]
 #[transitive(from(json::Error, InternalError))]
 #[transitive(from(gql::normalized_ast::Error, InternalError))]
@@ -40,6 +43,12 @@ pub enum Error {
 
     #[error("order_by expects a list of input objects with exactly one key-value pair per input object. Please split the input object with multiple key-value pairs into a list of single key-value pair objects.")]
     OrderByObjectShouldExactlyHaveOneKeyValuePair,
+
+    #[error("missing non-nullable argument {argument_name:} for field {field_name:}")]
+    MissingNonNullableArgument {
+        argument_name: String,
+        field_name: String,
+    },
 
     #[error("internal: {0}")]
     Internal(#[from] InternalError),
@@ -74,6 +83,7 @@ impl TraceableError for Error {
     }
 }
 
+#[allow(clippy::duplicated_attributes)] // suppress spurious warnings from Clippy
 #[derive(Error, Debug, Transitive)]
 #[transitive(from(json::Error, InternalEngineError))]
 #[transitive(from(gql::normalized_ast::Error, InternalEngineError))]
@@ -149,6 +159,28 @@ pub enum InternalDeveloperError {
         argument_name: ArgumentName,
     },
 
+    #[error("The value expression could not be converted to header value. Error: ")]
+    UnableToConvertValueExpressionToHeaderValue,
+
+    #[error("The aggregation function {aggregation_function} operating over the {aggregate_operand_type} type is missing a data connector mapping for {data_connector_name}")]
+    DataConnectorAggregationFunctionNotFound {
+        aggregate_operand_type: QualifiedTypeName,
+        aggregation_function: AggregationFunctionName,
+        data_connector_name: Qualified<DataConnectorName>,
+    },
+
+    #[error("A field ({field_name}) with an AggregatableField annotation was found on a scalar-typed ({aggregate_operand_type}) operand's selection set")]
+    AggregatableFieldFoundOnScalarTypedOperand {
+        field_name: FieldName,
+        aggregate_operand_type: QualifiedTypeName,
+    },
+
+    #[error("The aggregation function {aggregation_function} was used on the model object type and not on a model field. Aggregation functions operate on columns, not rows")]
+    ColumnAggregationFunctionUsedOnModelObjectType {
+        aggregate_operand_type: QualifiedTypeName,
+        aggregation_function: AggregationFunctionName,
+    },
+
     // we'll be adding them shortly, and not advertising the feature until they are complete
     // however temporarily emitting the error allows merging the work in chunks
     #[error("boolean expressions not implemented")]
@@ -162,6 +194,9 @@ pub enum InternalEngineError {
 
     #[error("error from normalized AST: {0}")]
     IRConversionError(#[from] gql::normalized_ast::Error),
+
+    #[error("internal error: {0}")]
+    OperatorMappingError(#[from] OperatorMappingError),
 
     #[error("unexpected annotation: {annotation}")]
     UnexpectedAnnotation { annotation: Annotation },
@@ -185,4 +220,13 @@ pub enum InternalEngineError {
 
     #[error("internal error: {description}")]
     InternalGeneric { description: String },
+}
+
+#[derive(Error, Debug)]
+pub enum OperatorMappingError {
+    #[error("could not find operator mapping for column {column_name:} in data connector {data_connector_name}")]
+    MissingEntryForDataConnector {
+        column_name: DataConnectorColumnName,
+        data_connector_name: Qualified<DataConnectorName>,
+    },
 }

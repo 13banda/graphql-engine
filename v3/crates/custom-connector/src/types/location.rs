@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use ndc_models;
 
+use crate::arguments::argument_string;
+
 pub(crate) fn definition() -> ndc_models::ObjectType {
     ndc_models::ObjectType {
         description: Some("A location".into()),
@@ -13,6 +15,7 @@ pub(crate) fn definition() -> ndc_models::ObjectType {
                     r#type: ndc_models::Type::Named {
                         name: "String".into(),
                     },
+                    arguments: argument_string(),
                 },
             ),
             (
@@ -22,6 +25,7 @@ pub(crate) fn definition() -> ndc_models::ObjectType {
                     r#type: ndc_models::Type::Named {
                         name: "String".into(),
                     },
+                    arguments: argument_string(),
                 },
             ),
             (
@@ -33,6 +37,7 @@ pub(crate) fn definition() -> ndc_models::ObjectType {
                             name: "String".into(),
                         }),
                     },
+                    arguments: BTreeMap::new(),
                 },
             ),
         ]),

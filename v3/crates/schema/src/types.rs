@@ -10,11 +10,11 @@ use std::{
 };
 
 use open_dds::{
+    aggregates,
     arguments::ArgumentName,
     commands,
-    data_connector::DataConnectorColumnName,
-    models,
-    types::{self},
+    data_connector::{DataConnectorColumnName, DataConnectorName, DataConnectorOperatorName},
+    models, types,
 };
 
 use metadata_resolve::{
@@ -74,6 +74,7 @@ pub struct EntityFieldTypeNameMapping {
 pub enum RootFieldKind {
     SelectOne,
     SelectMany,
+    SelectAggregate,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -104,6 +105,7 @@ pub struct CommandSourceDetail {
     )]
     pub type_mappings: BTreeMap<Qualified<types::CustomTypeName>, TypeMapping>,
     pub argument_mappings: BTreeMap<ArgumentName, ConnectorArgumentName>,
+    pub ndc_type_opendd_type_same: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Display)]
@@ -168,6 +170,10 @@ pub enum OutputAnnotation {
         name: types::FieldName,
         field_type: QualifiedTypeReference,
         field_base_type_kind: TypeKind,
+        /// The parent type is required to report field usage while analyzing query usage.
+        /// Field usage is reported with the name of object type where the field is defined.
+        parent_type: Qualified<types::CustomTypeName>,
+        argument_types: BTreeMap<ast::Name, QualifiedTypeReference>,
     },
     GlobalIDField {
         /// The `global_id_fields` are required to calculate the
@@ -181,11 +187,13 @@ pub enum OutputAnnotation {
         global_id_fields: Vec<types::FieldName>,
     },
     RelationshipToModel(output_type::relationship::ModelRelationshipAnnotation),
+    RelationshipToModelAggregate(output_type::relationship::ModelAggregateRelationshipAnnotation),
     RelationshipToCommand(output_type::relationship::CommandRelationshipAnnotation),
     RelayNodeInterfaceID {
         typename_mappings: HashMap<ast::TypeName, Vec<types::FieldName>>,
     },
     SDL,
+    Aggregate(crate::aggregates::AggregateOutputAnnotation),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Display)]
@@ -197,11 +205,19 @@ pub enum ModelInputAnnotation {
         ndc_table_argument: Option<ConnectorArgumentName>,
     },
     ComparisonOperation {
-        operator: String,
+        #[serde(
+            serialize_with = "serialize_non_string_key_btreemap",
+            deserialize_with = "deserialize_non_string_key_btreemap"
+        )]
+        operator_mapping: BTreeMap<Qualified<DataConnectorName>, DataConnectorOperatorName>,
     },
     IsNullOperation,
     ModelOrderByExpression,
     ModelOrderByArgument {
+        field_name: types::FieldName,
+        /// The parent type is required to report field usage while analyzing query usage.
+        /// Field usage is reported with the name of object type where the field is defined.
+        parent_type: Qualified<types::CustomTypeName>,
         ndc_column: DataConnectorColumnName,
     },
     ModelOrderByRelationshipArgument(OrderByRelationshipAnnotation),
@@ -215,6 +231,7 @@ pub enum ModelInputAnnotation {
         // Optional because we allow building schema without specifying a data source
         ndc_column: Option<NdcColumnForComparison>,
     },
+    ModelFilterInputArgument,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Display)]
@@ -243,6 +260,7 @@ pub enum InputAnnotation {
     InputObjectField {
         field_name: types::FieldName,
         field_type: QualifiedTypeReference,
+        parent_type: Qualified<types::CustomTypeName>,
     },
     BooleanExpression(BooleanExpressionAnnotation),
     CommandArgument {
@@ -251,6 +269,7 @@ pub enum InputAnnotation {
     },
     Relay(RelayInputAnnotation),
     ApolloFederationRepresentationsInput(ApolloFederationInputAnnotation),
+    FieldArgument,
 }
 
 /// Contains the different possible entities that can be used to generate
@@ -306,6 +325,16 @@ pub enum NamespaceAnnotation {
         filter: metadata_resolve::FilterPermission,
         argument_presets: ArgumentPresets,
     },
+    /// Field presets for an input field.
+    ///
+    /// These presets are available in the model permissions context and are injected
+    /// while building the input object value during IR generation. Only the normalized
+    /// AST is used to analyze query usage, and additional context is not available.
+    /// Therefore, the field presets are annotated to track their usage.
+    InputFieldPresets {
+        presets_fields: Vec<types::FieldName>,
+        type_name: Qualified<types::CustomTypeName>,
+    },
     /// The `NodeFieldTypeMappings` contains a Hashmap of typename to the filter permission.
     /// While executing the `node` field, the `id` field is supposed to be decoded and after
     /// decoding, a typename will be obtained. We need to use that typename to look up the
@@ -355,15 +384,26 @@ pub enum TypeId {
         graphql_type_name: ast::TypeName,
     },
     ScalarTypeComparisonExpression {
-        scalar_type_name: String,
         graphql_type_name: ast::TypeName,
         operators: Vec<(ast::Name, QualifiedTypeReference)>,
-        is_null_operator_name: ast::Name,
+        operator_mapping: BTreeMap<
+            Qualified<DataConnectorName>,
+            BTreeMap<types::OperatorName, DataConnectorOperatorName>,
+        >,
+        is_null_operator_name: Option<ast::Name>,
     },
     OrderByEnumType {
         graphql_type_name: ast::TypeName,
     },
     ApolloFederationType(PossibleApolloFederationTypes),
+    AggregateSelectOutputType {
+        aggregate_expression_name: Qualified<aggregates::AggregateExpressionName>,
+        graphql_type_name: ast::TypeName,
+    },
+    ModelFilterInputType {
+        model_name: Qualified<models::ModelName>,
+        graphql_type_name: ast::TypeName,
+    },
 }
 
 #[derive(Serialize, Clone, Debug, Hash, PartialEq, Eq)]
@@ -404,6 +444,12 @@ impl TypeId {
                 graphql_type_name, ..
             }
             | TypeId::OrderByEnumType {
+                graphql_type_name, ..
+            }
+            | TypeId::AggregateSelectOutputType {
+                graphql_type_name, ..
+            }
+            | TypeId::ModelFilterInputType {
                 graphql_type_name, ..
             } => graphql_type_name.clone(),
             TypeId::NodeRoot => ast::TypeName(mk_name!("Node")),

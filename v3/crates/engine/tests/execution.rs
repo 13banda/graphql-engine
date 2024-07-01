@@ -28,15 +28,6 @@ fn test_model_select_one_filter() -> anyhow::Result<()> {
     common::test_execution_expectation_legacy(test_path_string, &[common_metadata_path_string])
 }
 
-/// This test is only really to check that we obey the feature flags in tests and that this is
-/// allowed
-#[test]
-fn test_model_select_one_filter_new_boolean_expression() -> anyhow::Result<()> {
-    let test_path_string = "execute/models/select_one/simple_select/filter_new_boolean_expression";
-    let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
-    common::test_execution_expectation_legacy(test_path_string, &[common_metadata_path_string])
-}
-
 #[test]
 fn test_model_select_one_custom_scalar() -> anyhow::Result<()> {
     let test_path_string = "execute/models/select_one/custom_scalar";
@@ -93,6 +84,20 @@ fn test_model_select_many_empty_select() -> anyhow::Result<()> {
     common::test_execution_expectation_legacy(test_path_string, &[common_metadata_path_string])
 }
 
+#[test]
+fn test_model_select_many_field_arguments() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/field_arguments";
+    let common_metadata_path_string = "execute/common_metadata/custom_connector_schema.json";
+    common::test_execution_expectation(test_path_string, &[common_metadata_path_string])
+}
+
+#[test]
+fn test_model_select_many_multiple_field_arguments() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/field_arguments/multiple_arguments";
+    let common_metadata_path_string = "execute/common_metadata/custom_connector_schema.json";
+    common::test_execution_expectation(test_path_string, &[common_metadata_path_string])
+}
+
 // Nested selection tests
 #[test]
 fn test_model_select_many_nested_select() -> anyhow::Result<()> {
@@ -108,6 +113,14 @@ fn test_model_select_many_nested_select() -> anyhow::Result<()> {
 fn test_model_select_many_nested_select_no_explicit_type_mapping() -> anyhow::Result<()> {
     let test_path_string = "execute/models/select_many/nested_select/no_explicit_type_mapping";
     let common_metadata_path_string = "execute/common_metadata/custom_connector_schema.json";
+    common::test_execution_expectation_legacy(test_path_string, &[common_metadata_path_string])
+}
+
+// nested selection tests, using Postgres
+#[test]
+fn test_model_select_many_nested_select_postgres() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/nested_select/postgres";
+    let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
     common::test_execution_expectation_legacy(test_path_string, &[common_metadata_path_string])
 }
 
@@ -225,11 +238,39 @@ fn test_model_select_many_shared_boolean_expression() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_model_select_many_where_is_null() -> anyhow::Result<()> {
-    let test_path_string = "execute/models/select_many/where/is_null";
+fn test_model_select_many_boolean_expression_type() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/where/boolean_expression_type";
+    let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
+    common::test_execution_expectation(test_path_string, &[common_metadata_path_string])
+}
+
+#[test]
+fn test_model_select_many_where_nested_select() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/where/nested_select";
+    let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
+    common::test_execution_expectation(test_path_string, &[common_metadata_path_string])
+}
+
+// is_null tests
+
+// old boolean expressions
+#[test]
+fn test_model_select_many_where_is_null_object_boolean_expression_type() -> anyhow::Result<()> {
+    let test_path_string =
+        "execute/models/select_many/where/is_null/object_boolean_expression_type";
     let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
     common::test_execution_expectation_legacy(test_path_string, &[common_metadata_path_string])
 }
+
+// new boolean expressions
+#[test]
+fn test_model_select_many_where_is_null_boolean_expression_type() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/where/is_null/boolean_expression_type";
+    let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
+    common::test_execution_expectation_legacy(test_path_string, &[common_metadata_path_string])
+}
+
+// end of is_null tests
 
 #[test]
 fn test_model_select_many_where_filter() -> anyhow::Result<()> {
@@ -289,15 +330,85 @@ fn test_model_select_many_where_ndc_operators() -> anyhow::Result<()> {
 }
 
 // Relationships in boolean expressions
+
+// Older style: using `ObjectBooleanExpressionType` and `DataConnectorScalarType`
+
+// What is being tested:
+// 1. Array relationships in boolean expressions (Simple, Nested array relationships). We also test multi column boolean expressions
+
+#[test]
+fn test_model_select_many_where_object_boolean_array_relationship_simple() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/where/relationships/object_boolean_expression_type/array/simple";
+    let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
+    let boolean_exp_rel_metadata_path_string =
+        "execute/models/select_many/where/relationships/object_boolean_expression_type/common_metadata.json";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            common_metadata_path_string,
+            boolean_exp_rel_metadata_path_string,
+        ],
+    )
+}
+
+#[test]
+fn test_model_select_many_where_object_boolean_array_relationship_nested() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/where/relationships/object_boolean_expression_type/array/nested";
+    let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
+    let boolean_exp_rel_metadata_path_string =
+        "execute/models/select_many/where/relationships/object_boolean_expression_type/common_metadata.json";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            common_metadata_path_string,
+            boolean_exp_rel_metadata_path_string,
+        ],
+    )
+}
+
+// Object relationships in boolean expressions (Simple, Nested object relationships). We also test multi column boolean expressions
+#[test]
+fn test_model_select_many_where_object_boolean_object_relationship_simple() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/where/relationships/object_boolean_expression_type/object/simple";
+    let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
+    let boolean_exp_rel_metadata_path_string =
+        "execute/models/select_many/where/relationships/object_boolean_expression_type/common_metadata.json";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            common_metadata_path_string,
+            boolean_exp_rel_metadata_path_string,
+        ],
+    )
+}
+
+#[test]
+fn test_model_select_many_where_object_boolean_object_relationship_nested() -> anyhow::Result<()> {
+    let test_path_string = "execute/models/select_many/where/relationships/object_boolean_expression_type/object/nested";
+    let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
+    let boolean_exp_rel_metadata_path_string =
+        "execute/models/select_many/where/relationships/object_boolean_expression_type/common_metadata.json";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            common_metadata_path_string,
+            boolean_exp_rel_metadata_path_string,
+        ],
+    )
+}
+
+// Newer style: using `BooleanExpressionType`
+
 // What is being tested:
 // 1. Array relationships in boolean expressions (Simple, Nested array relationships). We also test multi column boolean expressions
 
 #[test]
 fn test_model_select_many_where_array_relationship_simple() -> anyhow::Result<()> {
-    let test_path_string = "execute/models/select_many/where/relationships/array/simple";
+    let test_path_string =
+        "execute/models/select_many/where/relationships/boolean_expression_type/array/simple";
     let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
     let boolean_exp_rel_metadata_path_string =
-        "execute/models/select_many/where/relationships/common_metadata.json";
+        "execute/models/select_many/where/relationships/boolean_expression_type/common_metadata.json";
     common::test_execution_expectation(
         test_path_string,
         &[
@@ -309,10 +420,11 @@ fn test_model_select_many_where_array_relationship_simple() -> anyhow::Result<()
 
 #[test]
 fn test_model_select_many_where_array_relationship_nested() -> anyhow::Result<()> {
-    let test_path_string = "execute/models/select_many/where/relationships/array/nested";
+    let test_path_string =
+        "execute/models/select_many/where/relationships/boolean_expression_type/array/nested";
     let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
     let boolean_exp_rel_metadata_path_string =
-        "execute/models/select_many/where/relationships/common_metadata.json";
+        "execute/models/select_many/where/relationships/boolean_expression_type/common_metadata.json";
     common::test_execution_expectation(
         test_path_string,
         &[
@@ -325,10 +437,11 @@ fn test_model_select_many_where_array_relationship_nested() -> anyhow::Result<()
 // Object relationships in boolean expressions (Simple, Nested object relationships). We also test multi column boolean expressions
 #[test]
 fn test_model_select_many_where_object_relationship_simple() -> anyhow::Result<()> {
-    let test_path_string = "execute/models/select_many/where/relationships/object/simple";
+    let test_path_string =
+        "execute/models/select_many/where/relationships/boolean_expression_type/object/simple";
     let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
     let boolean_exp_rel_metadata_path_string =
-        "execute/models/select_many/where/relationships/common_metadata.json";
+        "execute/models/select_many/where/relationships/boolean_expression_type/common_metadata.json";
     common::test_execution_expectation(
         test_path_string,
         &[
@@ -340,10 +453,11 @@ fn test_model_select_many_where_object_relationship_simple() -> anyhow::Result<(
 
 #[test]
 fn test_model_select_many_where_object_relationship_nested() -> anyhow::Result<()> {
-    let test_path_string = "execute/models/select_many/where/relationships/object/nested";
+    let test_path_string =
+        "execute/models/select_many/where/relationships/boolean_expression_type/object/nested";
     let common_metadata_path_string = "execute/common_metadata/postgres_connector_schema.json";
     let boolean_exp_rel_metadata_path_string =
-        "execute/models/select_many/where/relationships/common_metadata.json";
+        "execute/models/select_many/where/relationships/boolean_expression_type/common_metadata.json";
     common::test_execution_expectation(
         test_path_string,
         &[
@@ -764,6 +878,21 @@ fn test_command_procedures_object_array_output_type_output_permissions() -> anyh
     )
 }
 
+// Test a mutation command with an input object type as an argument
+#[test]
+fn test_command_procedures_input_object_type() -> anyhow::Result<()> {
+    let test_path_string = "execute/commands/procedures/object_input_type";
+    let common_metadata_path_string = "execute/common_metadata/custom_connector_schema.json";
+    let common_command_metadata_path_string = "execute/common_metadata/command_metadata.json";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            common_metadata_path_string,
+            common_command_metadata_path_string,
+        ],
+    )
+}
+
 // Tests a mutation command with multiple arguments:
 // arguments: 2 arguments (taken as id and new name for an actor and returns the updated commandActor row )
 // output: object (commandActor) output type
@@ -804,9 +933,29 @@ fn test_command_argument_presets() -> anyhow::Result<()> {
 // arguments: 1 boolean expression as a preset
 // output: object (commandActor) output type
 // permission: different permissions and preset arguments for roles: admin, user_1, user_2
+
+// old `object_boolean_expression_type`
 #[test]
-fn test_boolean_expression_command_argument_presets() -> anyhow::Result<()> {
-    let test_path_string = "execute/commands/functions/boolean_expression_command_argument";
+fn test_boolean_expression_command_argument_presets_object_boolean_expression_type(
+) -> anyhow::Result<()> {
+    let test_path_string = "execute/commands/functions/boolean_expression_command_argument/object_boolean_expression_type";
+    let common_metadata_path_string = "execute/common_metadata/custom_connector_schema.json";
+    let common_command_metadata_path_string = "execute/common_metadata/command_metadata.json";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            common_metadata_path_string,
+            common_command_metadata_path_string,
+        ],
+    )
+}
+
+// new `boolean_expression_type`
+#[test]
+fn test_boolean_expression_command_argument_presets_boolean_expression_type() -> anyhow::Result<()>
+{
+    let test_path_string =
+        "execute/commands/functions/boolean_expression_command_argument/boolean_expression_type";
     let common_metadata_path_string = "execute/common_metadata/custom_connector_schema.json";
     let common_command_metadata_path_string = "execute/common_metadata/command_metadata.json";
     common::test_execution_expectation(
@@ -1073,5 +1222,102 @@ fn test_apollo_federation_entities() -> anyhow::Result<()> {
     common::test_execution_expectation_legacy(
         test_path_string,
         &[common_metadata_path_string, common_apollo_metadata],
+    )
+}
+
+#[test]
+fn test_aggregates_root_field_simple_select() -> anyhow::Result<()> {
+    let test_path_string = "execute/aggregates/root_field/simple_select";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            "execute/aggregates/common_metadata/postgres_connector_schema.json",
+            "execute/aggregates/common_metadata/pg_types.json",
+            "execute/aggregates/common_metadata/supergraph.json",
+        ],
+    )
+}
+
+#[test]
+fn test_aggregates_root_field_filtering() -> anyhow::Result<()> {
+    let test_path_string = "execute/aggregates/root_field/filtering";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            "execute/aggregates/common_metadata/postgres_connector_schema.json",
+            "execute/aggregates/common_metadata/pg_types.json",
+            "execute/aggregates/common_metadata/supergraph.json",
+        ],
+    )
+}
+
+#[test]
+fn test_aggregates_root_field_nested_object() -> anyhow::Result<()> {
+    let test_path_string = "execute/aggregates/root_field/nested_object";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            "execute/aggregates/common_metadata/custom_connector_schema.json",
+            "execute/aggregates/common_metadata/custom_connector_types.json",
+            "execute/aggregates/common_metadata/supergraph.json",
+        ],
+    )
+}
+
+#[test]
+fn test_aggregates_relationship_field_simple_select() -> anyhow::Result<()> {
+    let test_path_string = "execute/aggregates/relationship_field/simple_select";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            "execute/aggregates/common_metadata/postgres_connector_schema.json",
+            "execute/aggregates/common_metadata/pg_types.json",
+            "execute/aggregates/common_metadata/supergraph.json",
+        ],
+    )
+}
+
+#[test]
+fn test_aggregates_relationship_field_filtering() -> anyhow::Result<()> {
+    let test_path_string = "execute/aggregates/relationship_field/filtering";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            "execute/aggregates/common_metadata/postgres_connector_schema.json",
+            "execute/aggregates/common_metadata/pg_types.json",
+            "execute/aggregates/common_metadata/supergraph.json",
+        ],
+    )
+}
+
+// Tests of NDC header forwarding
+
+// Tests a mutation command "login", with NDC forward headers configuration.
+#[test]
+fn test_command_mutation_forwarded_headers() -> anyhow::Result<()> {
+    let test_path_string = "execute/commands/procedures/forward_headers";
+    let common_metadata_path_string = "execute/common_metadata/custom_connector_schema.json";
+    let common_command_metadata_path_string = "execute/common_metadata/command_metadata.json";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            common_metadata_path_string,
+            common_command_metadata_path_string,
+        ],
+    )
+}
+
+// Tests a mutation command "login", with NDC forward headers configuration.
+#[test]
+fn test_command_query_forwarded_headers() -> anyhow::Result<()> {
+    let test_path_string = "execute/commands/functions/forward_headers";
+    let common_metadata_path_string = "execute/common_metadata/custom_connector_schema.json";
+    let common_command_metadata_path_string = "execute/common_metadata/command_metadata.json";
+    common::test_execution_expectation(
+        test_path_string,
+        &[
+            common_metadata_path_string,
+            common_command_metadata_path_string,
+        ],
     )
 }
