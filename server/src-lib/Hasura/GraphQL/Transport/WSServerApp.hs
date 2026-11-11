@@ -46,8 +46,10 @@ import Hasura.Server.Types (MonadGetPolicies (..))
 import Hasura.Services.Network
 import Hasura.Tracing qualified as Tracing
 import Network.WebSockets qualified as WS
+import Refined (Positive, Refined)
 import System.Metrics.Gauge qualified as EKG.Gauge
 
+-- | This is called for each client websocket connection
 createWSServerApp ::
   ( MonadIO m,
     MonadFail m, -- only due to https://gitlab.haskell.org/ghc/ghc/-/issues/15681
@@ -69,12 +71,13 @@ createWSServerApp ::
   HashSet (L.EngineLogType L.Hasura) ->
   WSServerEnv impl ->
   WSConnectionInitTimeout ->
+  Refined Positive Int ->
   Maybe (CredentialCache AgentLicenseKey) ->
   -- | aka generalized 'WS.ServerApp'
   WS.HasuraServerApp m
-createWSServerApp enabledLogTypes serverEnv connInitTimeout licenseKeyCache = \ !ipAddress !pendingConn -> do
+createWSServerApp enabledLogTypes serverEnv connInitTimeout wsQueueSize licenseKeyCache = \ !ipAddress !pendingConn -> do
   let getMetricsConfig = scMetricsConfig <$> getSchemaCache (_wseAppStateRef serverEnv)
-  WS.createServerApp getMetricsConfig connInitTimeout (_wseServer serverEnv) prometheusMetrics handlers ipAddress pendingConn
+  WS.createServerApp getMetricsConfig connInitTimeout wsQueueSize (_wseServer serverEnv) prometheusMetrics handlers ipAddress pendingConn
   where
     handlers =
       WS.WSHandlers
@@ -98,9 +101,11 @@ createWSServerApp enabledLogTypes serverEnv connInitTimeout licenseKeyCache = \ 
 
     onMessageHandler conn bs sp = do
       headerPrecedence <- liftIO $ acHeaderPrecedence <$> getAppContext (_wseAppStateRef serverEnv)
+      redactActionHandlerLogs <- liftIO $ acRedactActionHandlerLogs <$> getAppContext (_wseAppStateRef serverEnv)
+      traceQueryStatus <- liftIO $ acTraceQueryStatus <$> getAppContext (_wseAppStateRef serverEnv)
       responseErrorsConfig <- liftIO $ acResponseInternalErrorsConfig <$> getAppContext (_wseAppStateRef serverEnv)
       mask_
-        $ onMessage enabledLogTypes getAuthMode serverEnv conn bs (wsActions sp) licenseKeyCache responseErrorsConfig headerPrecedence
+        $ onMessage enabledLogTypes getAuthMode serverEnv conn bs (wsActions sp) licenseKeyCache responseErrorsConfig headerPrecedence redactActionHandlerLogs traceQueryStatus
 
     onCloseHandler conn = mask_ do
       granularPrometheusMetricsState <- runGetPrometheusMetricsGranularity
@@ -141,6 +146,7 @@ createWSServerEnv appStateRef = do
       appEnvServerMetrics
       appEnvPrometheusMetrics
       appEnvTraceSamplingPolicy
+      appEnvLoggingSettings
 
 mkWSActions :: L.Logger L.Hasura -> WSSubProtocol -> WS.WSActions WSConnData
 mkWSActions logger subProtocol =
@@ -154,7 +160,7 @@ mkWSActions logger subProtocol =
     fmtErrorMessage
   where
     mkPostExecErrMessageAction wsConn opId execErr =
-      sendMsg wsConn $ case subProtocol of
+      sendControlMsg wsConn $ case subProtocol of
         Apollo -> SMData $ DataMsg opId $ throwError execErr
         GraphQLWS -> SMErr $ ErrorMsg opId $ encodeGQExecError execErr
 
@@ -163,7 +169,7 @@ mkWSActions logger subProtocol =
         Apollo ->
           case mErrMsg of
             WS.ConnInitFailed -> sendCloseWithMsg logger wsConn (WS.mkWSServerErrorCode subProtocol mErrMsg err) (Just $ SMConnErr err) Nothing
-            WS.ClientMessageParseFailed -> sendMsg wsConn $ SMConnErr err
+            WS.ClientMessageParseFailed -> sendControlMsg wsConn $ SMConnErr err
         GraphQLWS -> sendCloseWithMsg logger wsConn (WS.mkWSServerErrorCode subProtocol mErrMsg err) Nothing Nothing
 
     mkConnectionCloseAction wsConn opId errMsg =
@@ -174,7 +180,7 @@ mkWSActions logger subProtocol =
       Apollo -> SMData
       GraphQLWS -> SMNext
 
-    keepAliveAction wsConn = sendMsg wsConn
+    keepAliveAction wsConn = sendKeepAliveMsg wsConn
       $ case subProtocol of
         Apollo -> SMConnKeepAlive
         GraphQLWS -> SMPing . Just $ keepAliveMessage

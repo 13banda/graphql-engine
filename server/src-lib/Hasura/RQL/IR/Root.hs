@@ -9,14 +9,15 @@ module Hasura.RQL.IR.Root
     QueryRootField,
     MutationRootField,
     SubscriptionRootField,
+    RFRawPayload (..),
     QueryDBRoot (..),
     MutationDBRoot (..),
     RemoteRelationshipField (..),
   )
 where
 
-import Data.Aeson.Ordered qualified as JO
 import Data.Kind (Type)
+import Hasura.EncJSON
 import Hasura.Prelude
 import Hasura.QueryTags.Types qualified as RQL
 import Hasura.RQL.IR.Action
@@ -34,6 +35,10 @@ import Hasura.SQL.AnyBackend qualified as AB
 
 data SourceConfigWith (db :: BackendType -> Type) (b :: BackendType)
   = SourceConfigWith (RQL.SourceConfig b) (Maybe RQL.QueryTagsConfig) (db b)
+
+deriving instance
+  (Show (db b), Show (RQL.SourceConfig b)) =>
+  Show (SourceConfigWith db b)
 
 data RootField (db :: BackendType -> Type) remote action raw where
   RFDB ::
@@ -71,6 +76,13 @@ data ActionMutation (r :: Type)
 -- @QueryDBRoot@ and @MutationDBRoot@.
 newtype QueryDBRoot r v b = QDBR (QueryDB b r (v b))
 
+deriving stock instance
+  ( RQL.Backend b,
+    Show r,
+    Show (v b)
+  ) =>
+  Show (QueryDBRoot r v b)
+
 newtype MutationDBRoot r v b = MDBR (MutationDB b r (v b))
 
 -- | IR of a remote relationship. A remote relationship currently can be to
@@ -91,23 +103,33 @@ type QueryActionRoot v =
 type MutationActionRoot v =
   ActionMutation (RemoteRelationshipField v)
 
+-- | Discriminated introspection response: distinguishes schema introspection
+-- (which may be blocked per-role in Pro) from typename/placeholder responses
+-- (which are always allowed). This avoids decoding EncJSON just to check the
+-- response type.
+data RFRawPayload
+  = -- | Full schema introspection (__schema, __type, Apollo _service)
+    SchemaIntrospection {irEncJSON :: !EncJSON}
+  | -- | Typename or placeholder response (__typename, no-queries placeholder)
+    TypenameResult {irEncJSON :: !EncJSON}
+
 type QueryRootField v =
   RootField
     (QueryDBRoot (RemoteRelationshipField v) v)
     (RemoteSchemaRootField (RemoteRelationshipField v) RQL.RemoteSchemaVariable)
     (QueryActionRoot v)
-    JO.Value
+    RFRawPayload
 
 type MutationRootField v =
   RootField
     (MutationDBRoot (RemoteRelationshipField v) v)
     (RemoteSchemaRootField (RemoteRelationshipField v) RQL.RemoteSchemaVariable)
     (MutationActionRoot v)
-    JO.Value
+    RFRawPayload
 
 type SubscriptionRootField v =
   RootField
     (QueryDBRoot (RemoteRelationshipField v) v)
     (RemoteSchemaRootField (RemoteRelationshipField v) RQL.RemoteSchemaVariable)
     (QueryActionRoot v)
-    JO.Value
+    RFRawPayload

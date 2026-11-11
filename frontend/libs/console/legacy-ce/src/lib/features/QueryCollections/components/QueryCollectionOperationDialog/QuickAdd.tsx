@@ -1,9 +1,9 @@
-import React, { useEffect } from 'react';
-import { Button } from '../../../../new-components/Button';
-import { DropdownMenu } from '../../../../new-components/DropdownMenu';
-import { FaChevronDown } from 'react-icons/fa';
+import React from 'react';
+import { Flex } from '@radix-ui/themes';
+import { DropdownButton, DropdownMenu, Text } from '@hasura/shared/ui';
 import { parseQueryString } from './utils';
-import { getLSItem, LS_KEYS } from '../../../../utils/localStorage';
+import { getLSItem } from '@hasura/shared/utils';
+import { LS_KEYS } from '@hasura/shared/types';
 
 interface Operation {
   name: string;
@@ -113,53 +113,41 @@ interface QuickAddProps {
 export const QuickAdd = (props: QuickAddProps) => {
   const { onAdd } = props;
 
-  const [graphiqlQueries, setGraphiqlQueries] = React.useState<Operation[]>([]);
-
-  useEffect(() => {
+  const [graphiqlQueries] = React.useState<Operation[]>(() => {
     const graphiQlLocalStorage = getLSItem(LS_KEYS.graphiqlQuery);
     if (graphiQlLocalStorage) {
       try {
-        setGraphiqlQueries(parseQueryString(graphiQlLocalStorage));
+        return parseQueryString(graphiQlLocalStorage);
       } catch (error) {
         console.error(error);
       }
     }
-  }, []);
+    return [];
+  });
 
   return (
-    <div className="flex justify-end">
-      <DropdownMenu
-        options={{
-          content: {
-            className: 'z-[101]',
-          },
-        }}
-        zIndex="z-[102]"
-        items={[
-          [...quickOperations, ...graphiqlQueries].map(operation => (
-            <div
+    <Flex justify="end">
+      <DropdownButton
+        mode="default"
+        size="sm"
+        items={[...quickOperations, ...graphiqlQueries].map((operation) => {
+          return (
+            <DropdownMenu.Item
               key={operation.name}
-              onClick={() => onAdd(operation)}
-              className="cursor-pointer mx-1 px-xs py-xs rounded hover:bg-gray-100"
+              onSelect={() => onAdd(operation)}
             >
-              <p className="mb-0 font-semibold whitespace-nowrap">
-                {operation.name}
-              </p>
-              <p className="mb-0">{operation.query?.slice(0, 40)}...</p>
-            </div>
-          )),
-        ]}
+              <div>
+                <Text as="p" weight="medium" wrap="nowrap">
+                  {operation.name}
+                </Text>
+                <Text as="p">{operation.query?.slice(0, 40)}...</Text>
+              </div>
+            </DropdownMenu.Item>
+          );
+        })}
       >
-        <Button
-          iconPosition="end"
-          size="sm"
-          icon={
-            <FaChevronDown className="transition-transform group-radix-state-open:rotate-180 w-3 h-3" />
-          }
-        >
-          <span className="font-bold">Quick Add</span>
-        </Button>
-      </DropdownMenu>
-    </div>
+        Quick Add
+      </DropdownButton>
+    </Flex>
   );
 };

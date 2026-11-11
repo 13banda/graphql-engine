@@ -1,7 +1,6 @@
 import React from 'react';
-import { StoryObj, Meta } from '@storybook/react';
-import { within } from '@storybook/testing-library';
-import { expect } from '@storybook/jest';
+import { StoryObj, Meta } from '@storybook/react-webpack5';
+import { expect, within } from 'storybook/test';
 import { NeonBanner } from './NeonBanner';
 
 export default {
@@ -9,37 +8,15 @@ export default {
   component: NeonBanner,
 } as Meta<typeof NeonBanner>;
 
-export const Base: StoryObj = {
-  render: () => (
-    <NeonBanner
-      onClickConnect={() => window.alert('clicked connect button')}
-      status={{ status: 'default' }}
-      buttonText="Create a Neon Database"
-      setStepperIndex={() => {}}
-    />
-  ),
-
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    // Expect element renders successfully
-    expect(canvas.getByText('Create a Neon Database')).toBeVisible();
-    expect(
-      canvas.getByTestId('onboarding-wizard-neon-connect-db-button')
-    ).toBeVisible();
-    expect(
-      canvas.getByTestId('onboarding-wizard-neon-connect-db-button')
-    ).not.toBeDisabled();
-  },
-};
-
 export const Creating: StoryObj = {
   render: () => (
     <NeonBanner
       onClickConnect={() => window.alert('clicked connect button')}
       status={{ status: 'loading' }}
       buttonText="Creating Neon Database"
-      setStepperIndex={() => {}}
+      setStepperIndex={() => {
+        /* noop */
+      }}
     />
   ),
 
@@ -47,13 +24,13 @@ export const Creating: StoryObj = {
     const canvas = within(canvasElement);
 
     // Expect element renders successfully
-    expect(canvas.getByText('Creating Neon Database')).toBeVisible();
+    await expect(canvas.getByText('Creating Neon Database')).toBeVisible();
     // Expect button disabled state to be as expected
-    expect(
-      canvas.getByTestId('onboarding-wizard-neon-connect-db-button')
+    await expect(
+      canvas.getByTestId('onboarding-wizard-neon-connect-db-button'),
     ).toBeVisible();
-    expect(
-      canvas.getByTestId('onboarding-wizard-neon-connect-db-button')
+    await expect(
+      canvas.getByTestId('onboarding-wizard-neon-connect-db-button'),
     ).toBeDisabled();
   },
 };
@@ -69,7 +46,9 @@ export const Error: StoryObj = {
       }}
       buttonText="Try Again"
       icon="refresh"
-      setStepperIndex={() => {}}
+      setStepperIndex={() => {
+        /* noop */
+      }}
     />
   ),
 
@@ -77,22 +56,22 @@ export const Error: StoryObj = {
     const canvas = within(canvasElement);
 
     // Expect element renders successfully
-    expect(canvas.getByText('Try Again')).toBeVisible();
-    expect(canvas.getByText('Try Again')).not.toBeDisabled();
+    await expect(canvas.getByText('Try Again')).toBeVisible();
+    await expect(canvas.getByText('Try Again')).not.toBeDisabled();
 
     // Expect element rend
-    expect(
-      canvas.getByText('Your Neon Database connection failed')
+    await expect(
+      canvas.getByText('Your Neon Database connection failed'),
     ).toBeVisible();
-    expect(
-      canvas.getByText('You have exceeded the free project limit on Neon.')
+    await expect(
+      canvas.getByText('You have exceeded the free project limit on Neon.'),
     ).toBeVisible();
 
-    expect(
-      canvas.getByTestId('onboarding-wizard-neon-connect-db-button')
+    await expect(
+      canvas.getByTestId('onboarding-wizard-neon-connect-db-button'),
     ).toBeVisible();
-    expect(
-      canvas.getByTestId('onboarding-wizard-neon-connect-db-button')
+    await expect(
+      canvas.getByTestId('onboarding-wizard-neon-connect-db-button'),
     ).not.toBeDisabled();
   },
 };

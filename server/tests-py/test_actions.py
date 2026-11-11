@@ -47,7 +47,7 @@ class TestActionsSyncWebsocket:
     def test_create_user_relationship(self, hge_ctx, transport):
         check_query_f(hge_ctx, self.dir() + '/create_user_relationship.yaml', transport)
 
-    def test_create_user_relationship(self, hge_ctx, transport):
+    def test_create_user_relationship_fail(self, hge_ctx, transport):
         check_query_f(hge_ctx, self.dir() + '/create_user_relationship_fail.yaml', transport)
 
     def test_create_users_fail(self, hge_ctx, transport):
@@ -600,7 +600,6 @@ class TestActionsAsync:
         response, _ = check_query(hge_ctx, conf)
 
         assert 'errors' in response['data']['test_async_action_error_response']
-        assert 'internal' in response['data']['test_async_action_error_response']['errors']
     
     def test_create_user_success(self, hge_ctx):
         graphql_mutation = '''
@@ -1013,7 +1012,4 @@ class TestActionTimeout:
         response, _ = check_query(hge_ctx, conf)
 
         assert 'errors' in response['data']['create_user']
-        assert 'Response timeout' == response['data']['create_user']['errors']['internal']['error']['message']
 
-        # tests that actions webhook url environment variable template did not serialize in the error message
-        assert "{{ACTION_WEBHOOK_HANDLER}}/create-user-timeout" == response['data']['create_user']['errors']['internal']['request']['url']

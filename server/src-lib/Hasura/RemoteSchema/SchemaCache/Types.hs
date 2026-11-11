@@ -59,15 +59,15 @@ import Data.Monoid
 import Data.Text qualified as T
 import Data.Text.Extended
 import Data.URL.Template (printTemplate)
+import Hasura.Authentication.Role (RoleName)
+import Hasura.Authentication.Session (SessionVariable)
 import Hasura.Base.Error
 import Hasura.GraphQL.Parser.Variable
 import Hasura.GraphQL.Schema.Typename
 import Hasura.Prelude
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Headers (HeaderConf (..))
-import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.RemoteSchema.Metadata
-import Hasura.Session (SessionVariable)
 import Language.GraphQL.Draft.Syntax qualified as G
 import Network.URI.Extended qualified as N
 import Witherable (Filterable (..))
@@ -214,7 +214,7 @@ validateRemoteSchemaDef ::
   Env.Environment ->
   RemoteSchemaDef ->
   m ValidatedRemoteSchemaDef
-validateRemoteSchemaDef name env (RemoteSchemaDef mUrl mUrlEnv hdrC fwdHdrs mTimeout customization) = do
+validateRemoteSchemaDef name env (RemoteSchemaDef mUrl mUrlEnv hdrC _introspectionHdrC fwdHdrs mTimeout customization) = do
   validateRemoteSchemaCustomization customization
   case (mUrl, mUrlEnv) of
     -- case 1: URL is supplied as a template
@@ -413,7 +413,7 @@ $(J.deriveJSON hasuraJSON ''ValidatedRemoteSchemaDef)
 $(J.deriveJSON hasuraJSON ''RemoteSchemaCustomizer)
 $(J.deriveJSON hasuraJSON ''RemoteSchemaInfo)
 
-instance (J.ToJSON remoteFieldInfo) => J.ToJSON (RemoteSchemaCtxG remoteFieldInfo) where
+instance J.ToJSON (RemoteSchemaCtxG remoteFieldInfo) where
   toJSON RemoteSchemaCtx {..} =
     J.object
       $ [ "name" J..= _rscName,

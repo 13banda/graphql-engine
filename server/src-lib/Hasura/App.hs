@@ -78,6 +78,7 @@ import Data.ByteString.Lazy.Char8 qualified as BLC
 import Data.Environment qualified as Env
 import Data.FileEmbed (makeRelativeToProject)
 import Data.HashMap.Strict qualified as HashMap
+import Data.Set qualified as Set
 import Data.Set.NonEmpty qualified as NE
 import Data.Text qualified as T
 import Data.Time.Clock (UTCTime)
@@ -87,6 +88,8 @@ import Database.PG.Query qualified as PG
 import Database.PG.Query qualified as Q
 import GHC.AssertNF.CPP
 import Hasura.App.State
+import Hasura.Authentication.Role (adminRoleName)
+import Hasura.Authentication.User (ExtraUserInfo (..), UserInfo (..))
 import Hasura.Backends.MSSQL.Connection
 import Hasura.Backends.Postgres.Connection
 import Hasura.Base.Error
@@ -105,6 +108,7 @@ import Hasura.GraphQL.Execute.Action.Subscription
 import Hasura.GraphQL.Execute.Subscription.Poll qualified as ES
 import Hasura.GraphQL.Execute.Subscription.State qualified as ES
 import Hasura.GraphQL.Logging (MonadExecutionLog (..), MonadQueryLog (..))
+import Hasura.GraphQL.Logging.QueryLog (maskQueryLog)
 import Hasura.GraphQL.Transport.HTTP
   ( CacheResult (..),
     MonadExecuteQuery (..),
@@ -115,6 +119,7 @@ import Hasura.GraphQL.Transport.WebSocket.Server qualified as WS
 import Hasura.GraphQL.Transport.WebSocket.Types (WSServerEnv (..))
 import Hasura.Logging
 import Hasura.Metadata.Class
+import Hasura.NativeQuery.Validation (DisableNativeQueryValidation)
 import Hasura.PingSources
 import Hasura.Prelude
 import Hasura.QueryTags
@@ -124,13 +129,13 @@ import Hasura.RQL.DDL.Schema.Cache.Common
 import Hasura.RQL.DDL.Schema.Cache.Config
 import Hasura.RQL.DDL.Schema.Catalog
 import Hasura.RQL.DDL.SchemaRegistry qualified as SchemaRegistry
+import Hasura.RQL.IR.Root (irEncJSON)
 import Hasura.RQL.Types.Allowlist
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Metadata
 import Hasura.RQL.Types.ResizePool
-import Hasura.RQL.Types.Roles (adminRoleName)
 import Hasura.RQL.Types.SchemaCache
 import Hasura.RQL.Types.SchemaCache.Build
 import Hasura.RQL.Types.Source
@@ -150,13 +155,13 @@ import Hasura.Server.Prometheus
     decWarpThreads,
     incWarpThreads,
   )
+import Hasura.Server.RemoteSchemaHealing (startRemoteSchemaHealingThread)
 import Hasura.Server.ResourceChecker (getServerResources)
 import Hasura.Server.SchemaUpdate
 import Hasura.Server.Telemetry
 import Hasura.Server.Types
 import Hasura.Server.Version
 import Hasura.Services
-import Hasura.Session
 import Hasura.ShutdownLatch
 import Hasura.Tracing
 import Network.HTTP.Client qualified as HTTP
@@ -386,7 +391,6 @@ data AppInit = AppInit
 -- NOTE: this is invoked in pro, but only for OSS mode (no license key)
 initialiseAppEnv ::
   (C.ForkableMonadIO m) =>
-  Env.Environment ->
   BasicConnectionInfo ->
   ServeOptions Hasura ->
   Maybe ES.SubscriptionPostPollHook ->
@@ -394,17 +398,35 @@ initialiseAppEnv ::
   PrometheusMetrics ->
   SamplingPolicy ->
   ManagedT m (AppInit, AppEnv)
-initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liveQueryHook serverMetrics prometheusMetrics traceSamplingPolicy = do
+initialiseAppEnv BasicConnectionInfo {..} serveOptions@ServeOptions {..} liveQueryHook serverMetrics prometheusMetrics traceSamplingPolicy = do
+  when (soDisableAdminSecret && isNothing soAuthHook && null soJwtSecret && isNothing soUnAuthRole)
+    $ throwErrExit InvalidEnvironmentVariableOptionsError
+    $ "Fatal Error: requires either HASURA_GRAPHQL_AUTH_HOOK, HASURA_GRAPHQL_JWT_SECRET, or HASURA_GRAPHQL_UNAUTHORIZED_ROLE when the admin secret is disabled"
+
   loggers@(Loggers _loggerCtx logger pgLogger) <- mkLoggers soEnabledLogTypes soLogLevel
 
   -- SIDE EFFECT: print a warning if no admin secret is set.
-  when (null soAdminSecret)
+  when (not soDisableAdminSecret && null soAdminSecret)
     $ unLogger
       logger
       StartupLog
         { slLogLevel = LevelWarn,
           slKind = "no_admin_secret",
           slInfo = J.toJSON ("WARNING: No admin secret provided" :: Text)
+        }
+
+  -- SIDE EFFECT: print an info if admin secret is disabled.
+  when (soDisableAdminSecret && (isConsoleEnabled soConsoleStatus || METADATA `elem` soEnabledAPIs))
+    $ unLogger
+      logger
+      StartupLog
+        { slLogLevel = LevelInfo,
+          slKind = "admin_secret_disabled",
+          slInfo =
+            J.toJSON
+              ( "The admin secret is disabled. Console and CLI will not functional because they require the admin-secret authentication. You can disable the console and metadata APIs by setting HASURA_GRAPHQL_ENABLE_CONSOLE=false and HASURA_GRAPHQL_ENABLED_APIS=graphql." ::
+                  Text
+              )
         }
 
   -- SIDE EFFECT: log all server options.
@@ -476,8 +498,18 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
           appEnvMetadataVersionRef = metaVersionRef,
           appEnvInstanceId = instanceId,
           appEnvEnableMaintenanceMode = soEnableMaintenanceMode,
-          appEnvLoggingSettings = LoggingSettings soEnabledLogTypes soEnableMetadataQueryLogging,
+          appEnvLoggingSettings =
+            LoggingSettings
+              soEnabledLogTypes
+              soEnableMetadataQueryLogging
+              soHttpLogQueryOnlyOnError
+              soLogMaskedVariables
+              soTriggersErrorLogLevelStatus
+              soRedactEventTriggerLogs
+              soRedactScheduledTriggerLogs
+              soRedactActionHandlerLogs,
           appEnvEventingMode = soEventingMode,
+          appEnvEventProcessingMode = soEventProcessingMode,
           appEnvEnableReadOnlyMode = soReadOnlyMode,
           appEnvServerMetrics = serverMetrics,
           appEnvShutdownLatch = latch,
@@ -490,18 +522,21 @@ initialiseAppEnv env BasicConnectionInfo {..} serveOptions@ServeOptions {..} liv
           appEnvTxIso = soTxIso,
           appEnvConsoleAssetsDir = soConsoleAssetsDir,
           appEnvConsoleSentryDsn = soConsoleSentryDsn,
+          appEnvDisableAdminSecret = soDisableAdminSecret,
           appEnvConnectionOptions = soConnectionOptions,
           appEnvWebSocketKeepAlive = soWebSocketKeepAlive,
           appEnvWebSocketConnectionInitTimeout = soWebSocketConnectionInitTimeout,
+          appEnvWebSocketQueueSize = soWebSocketQueueSize,
           appEnvGracefulShutdownTimeout = soGracefulShutdownTimeout,
-          appEnvCheckFeatureFlag = ceCheckFeatureFlag env,
           appEnvSchemaPollInterval = soSchemaPollInterval,
           appEnvLicenseKeyCache = Nothing,
           appEnvMaxTotalHeaderLength = soMaxTotalHeaderLength,
-          appEnvTriggersErrorLogLevelStatus = soTriggersErrorLogLevelStatus,
           appEnvAsyncActionsFetchBatchSize = soAsyncActionsFetchBatchSize,
           appEnvPersistedQueries = soPersistedQueries,
-          appEnvPersistedQueriesTtl = soPersistedQueriesTtl
+          appEnvPersistedQueriesTtl = soPersistedQueriesTtl,
+          appEnvPreserve401Errors = soPreserve401Errors,
+          appServerTimeout = soServerTimeout,
+          appEnvRemoteSchemaHealingInterval = soRemoteSchemaHealingInterval
         }
     )
 
@@ -528,7 +563,6 @@ initialiseAppContext env serveOptions AppInit {..} = do
         ( buildRebuildableAppContext
             (logger, appEnvManager)
             serveOptions
-            appEnvCheckFeatureFlag
             env
         )
   !rebuildableAppCtx <- onLeft rebuildableAppCtxE $ \e -> throwErrExit InvalidEnvironmentVariableOptionsError $ T.unpack $ qeError e
@@ -538,6 +572,7 @@ initialiseAppContext env serveOptions AppInit {..} = do
   -- Create the schema cache
   rebuildableSchemaCache <-
     buildFirstSchemaCache
+      (soDisableNativeQueryValidation serveOptions)
       env
       logger
       (mkPgSourceResolver pgLogger)
@@ -601,6 +636,7 @@ migrateCatalogAndFetchMetadata
 -- and avoid a breaking change.
 buildFirstSchemaCache ::
   (MonadIO m) =>
+  DisableNativeQueryValidation ->
   Env.Environment ->
   Logger Hasura ->
   SourceResolver ('Postgres 'Vanilla) ->
@@ -612,6 +648,7 @@ buildFirstSchemaCache ::
   Maybe SchemaRegistry.SchemaRegistryContext ->
   m RebuildableSchemaCache
 buildFirstSchemaCache
+  disableNativeQueryValidation
   env
   logger
   pgSourceResolver
@@ -625,7 +662,7 @@ buildFirstSchemaCache
     result <-
       runExceptT
         $ runCacheBuild cacheBuildParams
-        $ buildRebuildableSchemaCache logger env metadataWithVersion cacheDynamicConfig mSchemaRegistryContext
+        $ buildRebuildableSchemaCache logger env disableNativeQueryValidation metadataWithVersion cacheDynamicConfig mSchemaRegistryContext
     result `onLeft` \err -> do
       -- TODO: we used to bundle the first schema cache build with the catalog
       -- migration, using the same error handler for both, meaning that an
@@ -683,18 +720,14 @@ runAppM c (AppM a) = ignoreTraceT $ runReaderT a c
 instance HasAppEnv AppM where
   askAppEnv = ask
 
-instance HasFeatureFlagChecker AppM where
-  checkFlag f = AppM do
-    CheckFeatureFlag {runCheckFeatureFlag} <- asks appEnvCheckFeatureFlag
-    liftIO $ runCheckFeatureFlag f
-
 instance HasCacheStaticConfig AppM where
   askCacheStaticConfig = buildCacheStaticConfig <$> askAppEnv
 
 instance MonadTrace AppM where
   newTraceWith c p n (AppM a) = AppM $ newTraceWith c p n a
-  newSpanWith i n (AppM a) = AppM $ newSpanWith i n a
+  newSpanWith i n k (AppM a) = AppM $ newSpanWith i n k a
   attachMetadata = AppM . attachMetadata
+  setSpanStatus = AppM . setSpanStatus
 
 instance MonadTraceContext AppM where
   currentContext = AppM currentContext
@@ -713,7 +746,7 @@ instance HttpLog AppM where
 
   buildExtraHttpLogMetadata _ _ = ()
 
-  logHttpError logger loggingSettings userInfoM reqId waiReq req qErr qTime cType headers _ _ =
+  logHttpError logger loggingSettings userInfoM reqId waiReq req qErr qTime cType headers _ _ _ =
     unLoggerTracing logger
       $ mkHttpLog
       $ mkHttpErrorLogContext userInfoM loggingSettings reqId waiReq req qErr qTime cType headers
@@ -727,7 +760,7 @@ instance MonadExecuteQuery AppM where
   cacheLookup _ _ _ _ _ _ = pure $ Right ([], ResponseUncached Nothing)
 
 instance UserAuthentication AppM where
-  resolveUserInfo logger manager headers authMode reqs =
+  resolveUserInfo logger manager headers authMode reqs = do
     runExceptT $ do
       (a, b, c) <- getUserInfoWithExpTime logger manager headers authMode reqs
       pure $ (a, b, c, ExtraUserInfo Nothing)
@@ -753,8 +786,8 @@ instance MonadMetadataApiAuthorization AppM where
 
 instance ConsoleRenderer AppM where
   type ConsoleType AppM = CEConsoleType
-  renderConsole path authMode enableTelemetry consoleAssetsDir consoleSentryDsn consoleType =
-    return $ mkConsoleHTML path authMode enableTelemetry consoleAssetsDir consoleSentryDsn consoleType
+  renderConsole path authMode enableTelemetry consoleAssetsDir consoleSentryDsn disableAdminSecret consoleType =
+    return $ mkConsoleHTML path authMode enableTelemetry consoleAssetsDir consoleSentryDsn disableAdminSecret consoleType
 
 instance MonadVersionAPIWithExtraData AppM where
   -- we always default to CE as the `server_type` in this codebase
@@ -766,8 +799,8 @@ instance MonadGQLExecutionCheck AppM where
     checkQueryInAllowlist enableAL AllowlistModeGlobalOnly userInfo req sc
     return req
 
-  executeIntrospection _ introspectionQuery _ =
-    pure $ Right $ ExecStepRaw introspectionQuery
+  executeIntrospection _ introspectionResult _ =
+    pure $ Right $ ExecStepRaw (irEncJSON introspectionResult)
 
   checkGQLBatchedReqs _ _ _ _ = runExceptT $ pure ()
 
@@ -782,7 +815,9 @@ instance MonadGQLApiHandler AppM where
       EqrAPQReq _ -> throw400 NotSupported "PersistedQueryNotSupported"
 
 instance MonadQueryLog AppM where
-  logQueryLog logger = unLoggerTracing logger
+  logQueryLog logger ql = do
+    maskedKeys <- asks (_lsLogMaskedVariables . appEnvLoggingSettings)
+    unLoggerTracing logger (maskQueryLog maskedKeys ql)
 
 instance MonadExecutionLog AppM where
   logExecutionLog logger = unLoggerTracing logger
@@ -838,8 +873,8 @@ instance MonadMetadataStorage AppM where
   unlockScheduledEvents a b = runInSeparateTx $ unlockScheduledEventsTx a b
   unlockAllLockedScheduledEvents = runInSeparateTx unlockAllLockedScheduledEventsTx
   clearFutureCronEvents = runInSeparateTx . dropFutureCronEventsTx
-  getOneOffScheduledEvents a b c = runInSeparateTx $ getOneOffScheduledEventsTx a b c
-  getCronEvents a b c d = runInSeparateTx $ getCronEventsTx a b c d
+  getOneOffScheduledEvents a b c d = runInSeparateTx $ getOneOffScheduledEventsTx a b c d
+  getCronEvents a b c d e = runInSeparateTx $ getCronEventsTx a b c d e
   getScheduledEventInvocations a = runInSeparateTx $ getScheduledEventInvocationsTx a
   deleteScheduledEvent a b = runInSeparateTx $ deleteScheduledEventTx a b
 
@@ -883,10 +918,16 @@ updateJwkCtxThread ::
   HTTP.Manager ->
   Logger Hasura ->
   m Void
-updateJwkCtxThread getAppCtx httpManager logger = forever $ do
-  authMode <- liftIO $ acAuthMode <$> getAppCtx
-  updateJwkCtx authMode httpManager logger
-  liftIO $ sleep $ seconds 1
+updateJwkCtxThread getAppCtx httpManager logger = do
+  let sleepSeconds = 60
+  forever $ do
+    authMode <- liftIO $ acAuthMode <$> getAppCtx
+    updateJwkCtx
+      (ContextAdvice $ "retrying again after " <> tshow sleepSeconds <> " seconds")
+      authMode
+      httpManager
+      logger
+    liftIO $ sleep $ seconds sleepSeconds
 
 -- | Event triggers live in the user's DB and other events
 --  (cron, one-off and async actions)
@@ -976,6 +1017,7 @@ runHGEServer setupHook appStateRef initTime startupStatusHook consoleType ekgSto
           . Warp.setServerName ""
           . setForkIOWithMetrics
           . Warp.setMaxTotalHeaderLength appEnvMaxTotalHeaderLength
+          . Warp.setTimeout (unrefine appServerTimeout)
           $ Warp.defaultSettings
 
       setForkIOWithMetrics :: Warp.Settings -> Warp.Settings
@@ -1080,7 +1122,9 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
   -- Log Warning if deprecated environment variables are used
   sources <- scSources <$> liftIO (getSchemaCache appStateRef)
   -- TODO: naveen: send IO to logDeprecatedEnvVars
-  AppContext {..} <- liftIO $ getAppContext appStateRef
+  -- NOTE!: make sure not to close over any other fields here in the forked
+  -- thread bodies below, or risk retaining memory:
+  AppContext {acEnvironment} <- liftIO $ getAppContext appStateRef
   liftIO $ logDeprecatedEnvVars logger acEnvironment sources
 
   -- log inconsistent schema objects
@@ -1094,8 +1138,12 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
   -- Start a background thread for processing schema sync event present in the '_sscSyncEventRef'
   _ <- startSchemaSyncProcessorThread appStateRef newLogTVar
 
-  case appEnvEventingMode of
-    EventingEnabled -> do
+  -- Start a background thread to retry introspecting inconsistent remote schemas
+  -- See Note [Remote schema healing]
+  startRemoteSchemaHealingThread appStateRef
+
+  case (appEnvEventingMode, appEnvEventProcessingMode) of
+    (EventingEnabled, EventProcessingEnabled) -> do
       lift $ unLoggerTracing logger $ mkGenericLog @Text LevelInfo "server" "Starting in eventing enabled mode"
 
       startEventTriggerPollerThread logger appEnvLockedEventsCtx
@@ -1113,7 +1161,12 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
           $ runCronEventsGenerator logger fetchedCronTriggerStatsLogger (getSchemaCache appStateRef)
 
       startScheduledEventsPollerThread logger appEnvLockedEventsCtx
-    EventingDisabled ->
+    -- Eventing is enabled (so source catalogs are still set up) but event
+    -- processing is disabled: don't start any of the pollers, so no event
+    -- triggers, cron triggers, scheduled events or async actions are delivered.
+    (EventingEnabled, EventProcessingDisabled) ->
+      lift $ unLoggerTracing logger $ mkGenericLog @Text LevelInfo "server" "Starting with event processing disabled: source catalogs will be set up but no events will be delivered"
+    (EventingDisabled, _) ->
       lift $ unLoggerTracing logger $ mkGenericLog @Text LevelInfo "server" "Starting in eventing disabled mode"
 
   -- start a background thread to check for updates
@@ -1277,19 +1330,25 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
 
     startEventTriggerPollerThread logger lockedEventsCtx = do
       AppEnv {..} <- lift askAppEnv
-      schemaCache <- liftIO $ getSchemaCache appStateRef
-      let allSources = HashMap.elems $ scSources schemaCache
       activeEventProcessingThreads <- liftIO $ newTVarIO 0
       appCtx <- liftIO $ getAppContext appStateRef
       let fetchInterval = _eeCtxFetchInterval $ acEventEngineCtx appCtx
           fetchBatchSize = _eeCtxFetchSize $ acEventEngineCtx appCtx
       unless (unrefine fetchBatchSize == 0 || fetchInterval == 0) $ do
         -- Initialise the event processing thread
-        let eventsGracefulShutdownAction =
+        let eventsGracefulShutdownAction = do
+              -- Re-fetch the current sources here, rather than closing over
+              -- the schema cache that was live when this thread started:
+              -- this action is only ever invoked (much later) at actual
+              -- server shutdown, so using a boot-time snapshot would both
+              -- use a stale source list and -- since it's captured in this
+              -- long-lived thread's shutdown handler -- pin that whole
+              -- schema cache generation alive for the life of the process.
+              allSources <- HashMap.elems . scSources <$> getSchemaCache appStateRef
               waitForProcessingAction
                 logger
                 "event_triggers"
-                (length <$> readTVarIO (leEvents lockedEventsCtx))
+                (sum . fmap Set.size <$> readTVarIO (leEvents lockedEventsCtx))
                 (EventTriggerShutdownAction (shutdownEventTriggerEvents allSources logger lockedEventsCtx))
                 (unrefine appEnvGracefulShutdownTimeout)
 
@@ -1316,7 +1375,8 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
             appEnvServerMetrics
             (pmEventTriggerMetrics appEnvPrometheusMetrics)
             appEnvEnableMaintenanceMode
-            appEnvTriggersErrorLogLevelStatus
+            (_lsTriggersErrorLogLevelStatus appEnvLoggingSettings)
+            (_lsRedactEventTriggerLogs appEnvLoggingSettings)
 
     startAsyncActionsPollerThread logger lockedEventsCtx actionSubState = do
       AppEnv {..} <- lift askAppEnv
@@ -1346,7 +1406,9 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
           (leActionEvents lockedEventsCtx)
           Nothing
           appEnvAsyncActionsFetchBatchSize
+          HideInternalErrors
           (acHeaderPrecedence <$> getAppContext appStateRef)
+          (_lsRedactActionHandlerLogs appEnvLoggingSettings)
 
       -- start a background thread to handle async action live queries
       void
@@ -1394,7 +1456,8 @@ mkHGEServer setupHook appStateRef consoleType ekgStore = do
             (pmScheduledTriggerMetrics appEnvPrometheusMetrics)
             (getSchemaCache appStateRef)
             lockedEventsCtx
-            appEnvTriggersErrorLogLevelStatus
+            (_lsTriggersErrorLogLevelStatus appEnvLoggingSettings)
+            (_lsRedactScheduledTriggerLogs appEnvLoggingSettings)
 
 runInSeparateTx ::
   PG.TxE QErr a ->
@@ -1466,14 +1529,16 @@ mkConsoleHTML ::
   TelemetryStatus ->
   Maybe Text ->
   Maybe Text ->
+  Bool ->
   CEConsoleType ->
   Either String Text
-mkConsoleHTML path authMode enableTelemetry consoleAssetsDir consoleSentryDsn ceConsoleType =
+mkConsoleHTML path authMode enableTelemetry consoleAssetsDir consoleSentryDsn disableAdminSecret ceConsoleType =
   renderHtmlTemplate consoleTmplt
     $
     -- variables required to render the template
     J.object
       [ "isAdminSecretSet" J..= isAdminSecretSet authMode,
+        "isAdminSecretDisabled" J..= boolToText disableAdminSecret,
         "consolePath" J..= consolePath,
         "enableTelemetry" J..= boolToText (isTelemetryEnabled enableTelemetry),
         "cdnAssets" J..= boolToText (isNothing consoleAssetsDir),
@@ -1500,7 +1565,7 @@ mkPgSourceResolver :: PG.PGLogger -> SourceResolver ('Postgres 'Vanilla)
 mkPgSourceResolver pgLogger env sourceName config = runExceptT do
   let PostgresSourceConnInfo urlConf poolSettings allowPrepare isoLevel _ = pccConnectionInfo config
   -- If the user does not provide values for the pool settings, then use the default values
-  let (maxConns, idleTimeout, retries) = getDefaultPGPoolSettingIfNotExists poolSettings defaultPostgresPoolSettings
+  let (maxConns, idleTimeout, retries, connLifetime) = getDefaultPGPoolSettingIfNotExists poolSettings defaultPostgresPoolSettings
   connDetails <- resolveUrlConf env urlConf
   let connInfo = PG.ConnInfo retries connDetails
       connParams =
@@ -1508,7 +1573,7 @@ mkPgSourceResolver pgLogger env sourceName config = runExceptT do
           { PG.cpIdleTime = idleTimeout,
             PG.cpConns = maxConns,
             PG.cpAllowPrepare = allowPrepare,
-            PG.cpMbLifetime = ppsConnectionLifetime =<< poolSettings,
+            PG.cpMbLifetime = connLifetime,
             PG.cpTimeout = ppsPoolTimeout =<< poolSettings
           }
   let context = J.object [("source" J..= sourceName)]

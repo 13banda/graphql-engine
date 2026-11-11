@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use ndc_models;
 
 use crate::{
+    arguments::check_all_arguments_used,
     query::Result,
     state::{AppState, Row},
 };
@@ -13,17 +14,25 @@ pub(crate) fn collection_info() -> ndc_models::CollectionInfo {
         description: Some("A collection of institutions".into()),
         collection_type: "institution".into(),
         arguments: BTreeMap::new(),
-        foreign_keys: BTreeMap::new(),
         uniqueness_constraints: BTreeMap::from_iter([(
             "InstitutionByID".into(),
             ndc_models::UniquenessConstraint {
                 unique_columns: vec!["id".into()],
             },
         )]),
+        relational_mutations: Some(ndc_models::RelationalMutationInfo {
+            insertable: true,
+            updatable: true,
+            deletable: true,
+        }),
     }
 }
 
-pub(crate) fn rows(state: &AppState) -> Result<Vec<Row>> {
+pub(crate) fn rows(
+    arguments: &BTreeMap<ndc_models::ArgumentName, serde_json::Value>,
+    state: &AppState,
+) -> Result<Vec<Row>> {
+    check_all_arguments_used(arguments)?;
     Ok(state.institutions.values().cloned().collect())
 }
 
@@ -48,7 +57,7 @@ pub struct Staff<'a> {
 pub(crate) fn filter_by_institution_object_input<'a>(
     state: &'a AppState,
     institution_query: Institution<'a>,
-) -> impl std::iter::Iterator<Item = Result<&'a BTreeMap<String, serde_json::Value>>> {
+) -> impl std::iter::Iterator<Item = Result<&'a Row>> {
     state
         .institutions
         .values()
@@ -74,56 +83,51 @@ fn check_institution_query<'a>(
     institution_data: &'a Institution<'a>,
 ) -> bool {
     // check name
-    if let Some(query_name) = institution_query.name {
-        if let Some(data_name) = institution_data.name {
-            if data_name == query_name {
-                return true;
-            }
-        }
-    };
+    if let Some(query_name) = institution_query.name
+        && let Some(data_name) = institution_data.name
+        && data_name == query_name
+    {
+        return true;
+    }
 
     // check location
-    if let Some(query_location) = &institution_query.location {
-        if let Some(data_location) = &institution_data.location {
-            // location -> city
-            if let Some(query_city) = query_location.city {
-                if let Some(data_city) = data_location.city {
-                    if data_city == query_city {
+    if let Some(query_location) = &institution_query.location
+        && let Some(data_location) = &institution_data.location
+    {
+        // location -> city
+        if let Some(query_city) = query_location.city
+            && let Some(data_city) = data_location.city
+            && data_city == query_city
+        {
+            return true;
+        }
+        // location -> country
+        if let Some(query_country) = query_location.country
+            && let Some(data_country) = data_location.country
+            && data_country == query_country
+        {
+            return true;
+        }
+        // location -> campuses
+        if let Some(query_campuses) = &query_location.campuses
+            && let Some(data_campuses) = &data_location.campuses
+        {
+            for query_campus in query_campuses {
+                for data_campus in data_campuses {
+                    if query_campus == data_campus {
                         return true;
-                    }
-                }
-            }
-            // location -> country
-            if let Some(query_country) = query_location.country {
-                if let Some(data_country) = data_location.country {
-                    if data_country == query_country {
-                        return true;
-                    }
-                }
-            }
-            // location -> campuses
-            if let Some(query_campuses) = &query_location.campuses {
-                if let Some(data_campuses) = &data_location.campuses {
-                    for query_campus in query_campuses {
-                        for data_campus in data_campuses {
-                            if query_campus == data_campus {
-                                return true;
-                            }
-                        }
                     }
                 }
             }
         }
-    };
+    }
 
     // TODO: implement filters for the other fields
 
     false
 }
 
-pub fn parse_institution(
-    institution: &BTreeMap<String, serde_json::Value>,
-) -> Result<Institution<'_>> {
+pub fn parse_institution(institution: &Row) -> Result<Institution<'_>> {
     let name = institution.get("name").and_then(|name| name.as_str());
 
     let staff = institution
@@ -163,7 +167,7 @@ pub fn parse_institution_query(
     })
 }
 
-fn parse_location(location: &serde_json::Value) -> Option<Location> {
+fn parse_location(location: &serde_json::Value) -> Option<Location<'_>> {
     if *location == serde_json::Value::Null {
         return None;
     }
@@ -187,7 +191,7 @@ fn parse_location(location: &serde_json::Value) -> Option<Location> {
     }
 }
 
-fn parse_staff_members(value: &serde_json::Value) -> Option<Vec<Staff>> {
+fn parse_staff_members(value: &serde_json::Value) -> Option<Vec<Staff<'_>>> {
     if *value == serde_json::Value::Null {
         None
     } else {
@@ -213,7 +217,7 @@ fn parse_departments(value: &serde_json::Value) -> Option<Vec<&str>> {
     }
 }
 
-fn parse_staff_member(staff: &serde_json::Value) -> Option<Staff> {
+fn parse_staff_member(staff: &serde_json::Value) -> Option<Staff<'_>> {
     if *staff == serde_json::Value::Null {
         return None;
     }

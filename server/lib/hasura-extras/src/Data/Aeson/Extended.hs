@@ -51,7 +51,7 @@ class FromJSONWithContext ctx a | a -> ctx where
 -- @
 -- object $ ["foo" .= 0] <> catMaybes [ "bar" .=? Nothing, "baz" .=? 2 ]
 -- @
-(.=?) :: (ToJSON v, KeyValue kv) => Key -> Maybe v -> Maybe kv
+(.=?) :: (ToJSON v, KeyValue e kv) => Key -> Maybe v -> Maybe kv
 (.=?) k = fmap (k .=)
 {-# INLINE (.=?) #-}
 
@@ -62,5 +62,10 @@ mapWithJSONPath :: (a -> Parser b) -> [a] -> Parser [b]
 mapWithJSONPath parser xs =
   traverse (\(idx, item) -> parser item <?> Index idx) $ zip [0 ..] xs
 
+-- | WARNING: 'encodeToTextBuilder' renders numbers with a non-negative exponent
+-- in full, so @1e1000000000@ becomes a billion-character string. Current callers
+-- only encode strings; if you pass untrusted numbers, use
+-- @toStrict . encodeToLazyText@ instead, which falls back to exponent notation
+-- for exponents > 1024.
 encodeToStrictText :: (ToJSON a) => a -> Text
 encodeToStrictText = toStrict . toLazyText . encodeToTextBuilder

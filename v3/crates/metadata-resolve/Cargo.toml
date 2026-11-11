@@ -7,27 +7,40 @@ license.workspace = true
 [lib]
 bench = false
 
-[dependencies]
-hasura-authn-core = { path = "../auth/hasura-authn-core" }
-lang-graphql = { path = "../lang-graphql" }
-open-dds = { path = "../open-dds" }
+[[bench]]
+name = "metadata_resolve"
+harness = false
 
-derive_more = "0.99.17"
-indexmap = { version = "2", features = ["serde"] }
-lazy_static = "1.4.0"
-ndc-models = { git = "https://github.com/hasura/ndc-spec.git", tag = "v0.1.2" }
-nonempty = "0.10"
-ref-cast = "1.0"
-reqwest = { version = "0.11", features = ["json", "multipart"] }
-serde = "1.0.202"
-serde_json = "1.0.116"
-thiserror = "1.0"
-url = "2.4.1"
+[dependencies]
+error-context = { path = "../utils/error-context" }
+graphql-types = { path = "../graphql/graphql-types" }
+jsonpath = { path = "../utils/jsonpath" }
+json-annotation-parse = { path = "../utils/json-annotation-parse/" }
+open-dds = { path = "../open-dds" }
+serde-ext = { path = "../utils/serde-ext" }
+
+ariadne = { workspace = true }
+derive_more = { workspace = true }
+indexmap = { workspace = true }
+ndc-models = { workspace = true }
+ndc-models-v01 = { workspace = true }
+nonempty = { workspace = true }
+partition_eithers = { workspace = true }
+ref-cast = { workspace = true }
+http = { workspace = true }
+semver = { workspace = true }
+schemars = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_with = { workspace = true }
+strum = { workspace = true }
+strum_macros = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
 
 [dev-dependencies]
-test-each = "*"
-anyhow = "*"
-similar-asserts = "*"
+insta = { workspace = true }
+criterion = { workspace = true }
 
 [lints]
 workspace = true

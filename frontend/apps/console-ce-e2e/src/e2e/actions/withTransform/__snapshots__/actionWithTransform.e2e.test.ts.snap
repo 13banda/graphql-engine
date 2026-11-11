@@ -7,10 +7,8 @@ exports[`Actions with Transform > When the users create, and delete a Action wit
         "input_objects": [],
         "objects": [
           {
-            "description": null,
             "fields": [
               {
-                "description": null,
                 "name": "accessToken",
                 "type": "String!"
               }
@@ -28,12 +26,10 @@ exports[`Actions with Transform > When the users create, and delete a Action wit
         "definition": {
           "arguments": [
             {
-              "description": null,
               "name": "username",
               "type": "String!"
             },
             {
-              "description": null,
               "name": "password",
               "type": "String!"
             }
@@ -89,6 +85,22 @@ exports[`Actions with Transform > When the users create, and delete a Action wit
       }
     ],
     "handler": "https://hasura-actions-demo.glitch.me",
+    "ignored_client_headers": [
+      "Content-Length",
+      "Content-MD5",
+      "User-Agent",
+      "Host",
+      "Origin",
+      "Referer",
+      "Accept",
+      "Accept-Encoding",
+      "Accept-Language",
+      "Accept-Datetime",
+      "Cache-Control",
+      "Connection",
+      "DNT",
+      "Content-Type"
+    ],
     "kind": "synchronous",
     "output_type": "LoginResponse",
     "request_transform": {

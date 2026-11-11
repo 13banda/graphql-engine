@@ -1,49 +1,28 @@
-use std::fmt::Display;
+use clap::Parser;
+use engine::{
+    StartupError, VERSION, get_base_routes, get_cors_layer, get_jsonapi_route, get_metadata_routes,
+    internal_flags::{UnstableFeature, resolve_unstable_features},
+};
+use engine_types::ExposeInternalErrors;
+use serde::Serialize;
 use std::net;
 use std::path::PathBuf;
-use std::sync::Arc;
+use tower_http::compression::CompressionLayer;
+use tracing_util::{SpanVisibility, add_event_on_active_span, set_attribute_on_active_span};
 
-use axum::{
-    body::HttpBody,
-    extract::{DefaultBodyLimit, State},
-    http::{HeaderMap, Request},
-    middleware::Next,
-    response::{Html, IntoResponse},
-    routing::{get, post},
-    Extension, Json, Router,
-};
-use clap::Parser;
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
-use tracing_util::{
-    add_event_on_active_span, set_status_on_current_span, ErrorVisibility, SpanVisibility,
-    TraceableError, TraceableHttpResponse,
-};
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use base64::engine::Engine;
-use engine::authentication::{AuthConfig, AuthConfig::V1 as V1AuthConfig, AuthModeConfig};
-use engine::internal_flags::{resolve_unstable_features, UnstableFeature};
-use engine::VERSION;
-use execute::HttpContext;
-use hasura_authn_core::Session;
-use hasura_authn_jwt::auth as jwt_auth;
-use hasura_authn_jwt::jwt;
-use hasura_authn_webhook::webhook;
-use lang_graphql as gql;
-use schema::GDS;
-use std::hash;
-use std::hash::{Hash, Hasher};
+static MB: usize = 1_048_576;
 
-mod cors;
-
+static DEFAULT_OTEL_SERVICE_NAME: &str = "ddn-engine";
 const DEFAULT_PORT: u16 = 3000;
 
-const MB: usize = 1_048_576;
-
-#[derive(Parser)]
+#[allow(clippy::struct_excessive_bools)] // booleans are pretty useful here
+#[derive(Parser, Serialize)]
 #[command(version = VERSION)]
 struct ServerOptions {
-    /// The path to the metadata file, used to construct the schema.g
+    /// The path to the OpenDD metadata file, used to construct the schema.
     #[arg(long, value_name = "PATH", env = "METADATA_PATH")]
     metadata_path: PathBuf,
     /// An introspection metadata file, served over `/metadata` if provided.
@@ -82,31 +61,65 @@ struct ServerOptions {
         value_delimiter = ','
     )]
     unstable_features: Vec<UnstableFeature>,
-}
 
-struct EngineState {
-    http_context: HttpContext,
-    schema: gql::schema::Schema<GDS>,
-    auth_config: AuthConfig,
+    /// Whether internal errors should be shown or censored.
+    /// It is recommended to only show errors while developing since internal errors may contain
+    /// sensitve information.
+    #[arg(long, env = "EXPOSE_INTERNAL_ERRORS")]
+    expose_internal_errors: bool,
+
+    /// Log traces to stdout.
+    #[arg(long, env = "EXPORT_TRACES_STDOUT")]
+    export_traces_stdout: bool,
+
+    /// Service name output in OpenTelemetry traces
+    #[arg(long, env = "OTEL_SERVICE_NAME")]
+    otel_service_name: Option<String>,
+
+    /// The name of the header used to specify the auth mode when using alternative Auth Modes.
+    /// Defaults to "X-Hasura-Auth-Mode" if not specified.
+    #[arg(long, env = "AUTH_MODE_HEADER", default_value = "X-Hasura-Auth-Mode")]
+    auth_mode_header: String,
+
+    /// Maximum size of response for NDC responses in bytes
+    #[arg(long, value_name = "NDC_RESPONSE_SIZE_LIMIT in bytes", env = "NDC_RESPONSE_SIZE_LIMIT", default_value_t = 30 * MB)]
+    ndc_response_size_limit: usize,
+
+    /// Maximum size of request body in bytes
+    #[arg(long, value_name = "REQUEST_BODY_LIMIT in bytes", env = "REQUEST_BODY_LIMIT", default_value_t = 10 * MB)]
+    request_body_limit: usize,
 }
 
 #[tokio::main]
+#[allow(clippy::print_stdout)]
 async fn main() {
-    let server = ServerOptions::parse();
+    let server_options = ServerOptions::parse();
+    let export_traces_stdout = if server_options.export_traces_stdout {
+        tracing_util::ExportTracesStdout::Enable
+    } else {
+        tracing_util::ExportTracesStdout::Disable
+    };
 
-    let tracer = tracing_util::start_tracer(
-        server.otlp_endpoint.as_deref(),
-        "graphql-engine",
-        env!("CARGO_PKG_VERSION"),
+    let otel_service_name = match &server_options.otel_service_name {
+        Some(otel_service_name) => otel_service_name,
+        None => DEFAULT_OTEL_SERVICE_NAME,
+    };
+
+    tracing_util::initialize_tracing(
+        server_options.otlp_endpoint.as_deref(),
+        otel_service_name.to_string(),
+        Some(VERSION),
+        tracing_util::PropagateBaggage::Disable,
+        export_traces_stdout,
     )
     .unwrap();
 
-    if let Err(e) = tracer
+    if let Err(e) = tracing_util::global_tracer()
         .in_span_async(
             "app init",
             "App initialization",
             SpanVisibility::Internal,
-            || Box::pin(start_engine(&server)),
+            || Box::pin(start_engine(&server_options)),
         )
         .await
     {
@@ -116,439 +129,86 @@ async fn main() {
     tracing_util::shutdown_tracer();
 }
 
-// Connects a signal handler for the unix SIGTERM signal. (This is the standard signal that unix
-// systems send when pressing ctrl+c or running `kill`. It is distinct from the "force kill" signal
-// which is SIGKILL.) This function produces a future that resolves when a SIGTERM is received. We
-// pass the future to axum's `with_graceful_shutdown` method to instruct axum to start a graceful
-// shutdown when the signal is received.
-//
-// Listening for SIGTERM specifically avoids a 10-second delay when stopping the process.
-//
-// Also listens for tokio's cross-platform `ctrl_c` signal polyfill.
-//
-// copied from https://github.com/davidB/axum-tracing-opentelemetry/blob/main/examples/otlp/src/main.rs
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
-    }
-}
-
-#[derive(thiserror::Error, Debug)]
-enum StartupError {
-    #[error("could not read the auth config - {0}")]
-    ReadAuth(anyhow::Error),
-    #[error("could not read the schema - {0}")]
-    ReadSchema(anyhow::Error),
-}
-
-impl TraceableError for StartupError {
-    fn visibility(&self) -> tracing_util::ErrorVisibility {
-        ErrorVisibility::User
-    }
-}
-
-/// The main router for the engine.
-struct EngineRouter {
-    /// The base router for the engine.
-    /// Contains /, /graphql, /v1/explain and /health routes.
-    base_router: Router,
-    /// The metadata routes for the introspection metadata file.
-    /// Contains /metadata and /metadata-hash routes.
-    metadata_routes: Option<Router>,
-    /// The CORS layer for the engine.
-    cors_layer: Option<CorsLayer>,
-}
-
-impl EngineRouter {
-    fn new(state: Arc<EngineState>) -> Self {
-        let graphql_route = Router::new()
-            .route("/graphql", post(handle_request))
-            .layer(axum::middleware::from_fn(
-                hasura_authn_core::resolve_session,
-            ))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                authentication_middleware,
-            ))
-            .layer(axum::middleware::from_fn(
-                graphql_request_tracing_middleware,
-            ))
-            // *PLEASE DO NOT ADD ANY MIDDLEWARE
-            // BEFORE THE `graphql_request_tracing_middleware`*
-            // Refer to it for more details.
-            .layer(TraceLayer::new_for_http())
-            .with_state(state.clone());
-
-        let explain_route = Router::new()
-            .route("/v1/explain", post(handle_explain_request))
-            .layer(axum::middleware::from_fn(
-                hasura_authn_core::resolve_session,
-            ))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                authentication_middleware,
-            ))
-            .layer(axum::middleware::from_fn(
-                explain_request_tracing_middleware,
-            ))
-            // *PLEASE DO NOT ADD ANY MIDDLEWARE
-            // BEFORE THE `explain_request_tracing_middleware`*
-            // Refer to it for more details.
-            .layer(TraceLayer::new_for_http())
-            .with_state(state);
-
-        let health_route = Router::new().route("/health", get(handle_health));
-
-        let base_routes = Router::new()
-            // serve graphiql at root
-            .route("/", get(graphiql))
-            // The '/graphql' route
-            .merge(graphql_route)
-            // The '/v1/explain' route
-            .merge(explain_route)
-            // The '/health' route
-            .merge(health_route)
-            // Set request payload limit to 10 MB
-            .layer(DefaultBodyLimit::max(10 * MB));
-
-        Self {
-            base_router: base_routes,
-            metadata_routes: None,
-            cors_layer: None,
-        }
-    }
-
-    /// Serve the introspection metadata file and its hash at `/metadata` and `/metadata-hash` respectively.
-    /// This is a temporary workaround to enable the console to interact with an engine process running locally.
-    async fn add_metadata_routes(
-        &mut self,
-        introspection_metadata_path: &PathBuf,
-    ) -> Result<(), StartupError> {
-        let file_contents = tokio::fs::read_to_string(introspection_metadata_path)
-            .await
-            .map_err(|err| StartupError::ReadSchema(err.into()))?;
-        let mut hasher = hash::DefaultHasher::new();
-        file_contents.hash(&mut hasher);
-        let hash = hasher.finish();
-        let base64_hash = base64::engine::general_purpose::STANDARD.encode(hash.to_ne_bytes());
-        let metadata_routes = Router::new()
-            .route("/metadata", get(|| async { file_contents }))
-            .route("/metadata-hash", get(|| async { base64_hash }));
-        self.metadata_routes = Some(metadata_routes);
-        Ok(())
-    }
-
-    fn add_cors_layer(&mut self, allow_origin: &[String]) {
-        self.cors_layer = Some(cors::build_cors_layer(allow_origin));
-    }
-
-    fn into_make_service(self) -> axum::routing::IntoMakeService<Router> {
-        let mut app = self.base_router;
-        // Merge the metadata routes if they exist.
-        if let Some(metadata_routes) = self.metadata_routes {
-            app = app.merge(metadata_routes);
-        }
-        // Add the CORS layer if it exists.
-        if let Some(cors_layer) = self.cors_layer {
-            // It is important that this layer is added last, since it only affects
-            // the layers that precede it.
-            app = app.layer(cors_layer);
-        }
-        app.into_make_service()
-    }
-}
-
+#[allow(clippy::print_stdout)]
 async fn start_engine(server: &ServerOptions) -> Result<(), StartupError> {
-    let auth_config =
-        read_auth_config(&server.authn_config_path).map_err(StartupError::ReadAuth)?;
-
-    let metadata_resolve_flags = resolve_unstable_features(&server.unstable_features);
-
-    let schema = read_schema(&server.metadata_path, &metadata_resolve_flags)
-        .map_err(StartupError::ReadSchema)?;
-
-    let http_context = HttpContext {
-        client: reqwest::Client::new(),
-        ndc_response_size_limit: None,
+    let metadata_resolve_configuration = metadata_resolve::configuration::Configuration {
+        unstable_features: resolve_unstable_features(&server.unstable_features),
     };
-    let state = Arc::new(EngineState {
-        http_context,
-        schema,
-        auth_config,
-    });
 
-    let mut engine_router = EngineRouter::new(state);
+    let expose_internal_errors = if server.expose_internal_errors {
+        ExposeInternalErrors::Expose
+    } else {
+        ExposeInternalErrors::Censor
+    };
+
+    let raw_auth_config =
+        std::fs::read_to_string(&server.authn_config_path).expect("could not read auth config");
+    let opendd_metadata_json =
+        std::fs::read_to_string(&server.metadata_path).expect("could not read metadata");
+
+    let (resolved_metadata, auth_config) = engine::resolve_metadata(
+        &opendd_metadata_json,
+        &raw_auth_config,
+        &metadata_resolve_configuration,
+    )
+    .map_err(StartupError::ReadSchema)?;
+
+    let state = engine::build_state(
+        expose_internal_errors,
+        auth_config,
+        resolved_metadata,
+        server.auth_mode_header.clone(),
+        server.ndc_response_size_limit,
+    )
+    .map_err(StartupError::ReadSchema)?;
+
+    let mut app = get_base_routes(state.clone(), server.request_body_limit);
+
+    app = app.merge(get_jsonapi_route(state.clone()));
 
     // If `--introspection-metadata` is specified we also serve the file indicated on `/metadata`
     // and its hash on `/metadata-hash`.
     if let Some(path) = &server.introspection_metadata {
-        engine_router.add_metadata_routes(path).await?;
+        app = app.merge(get_metadata_routes(path).await?);
     }
 
     // If `--enable-cors` is specified, we add a CORS layer to the app.
     if server.enable_cors {
-        engine_router.add_cors_layer(&server.cors_allow_origin);
+        app = app.layer(get_cors_layer(&server.cors_allow_origin));
     }
+
+    // Add compression layer to support zstd and gzip response compression
+    // Use fastest compression level (1) based on experiments in crates/cloud/build-artifacts/src/encode.rs
+    // which showed level 1 provides good compression with minimal performance impact
+    // NOTE: Fastest can't be used here, see: https://github.com/tower-rs/tower-http/issues/590
+    app = app.layer(CompressionLayer::new().quality(tower_http::CompressionLevel::Precise(1)));
 
     let address = net::SocketAddr::new(server.host, server.port);
     let log = format!("starting server on {address}");
     println!("{log}");
     add_event_on_active_span(log);
 
+    set_attribute_on_active_span(
+        tracing_util::AttributeVisibility::Internal,
+        "server_options",
+        serde_json::to_string_pretty(server).unwrap_or_else(|err| err.to_string()),
+    );
+
     // run it with hyper on `addr`
-    axum::Server::bind(&address)
-        .serve(engine_router.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(axum_ext::shutdown_signal_with_handler(|| async move {
+        state
+            .graphql_websocket_server
+            .shutdown("Shutting server down")
+            .await;
+    }))
+    .await
+    .unwrap();
 
     Ok(())
-}
-
-/// Health check endpoint
-async fn handle_health() -> reqwest::StatusCode {
-    reqwest::StatusCode::OK
-}
-
-/// Middleware to start tracing of the `/graphql` request.
-/// This middleware must be active for the entire duration
-/// of the request i.e. this middleware should be the
-/// entry point and the exit point of the GraphQL request.
-async fn graphql_request_tracing_middleware<B: Send>(
-    request: Request<B>,
-    next: Next<B>,
-) -> axum::response::Response {
-    use tracing_util::*;
-    let tracer = global_tracer();
-    let path = "/graphql";
-    tracer
-        .in_span_async_with_parent_context(
-            path,
-            path,
-            SpanVisibility::User,
-            &request.headers().clone(),
-            || {
-                set_attribute_on_active_span(AttributeVisibility::Internal, "version", VERSION);
-                Box::pin(async move {
-                    let mut response = next.run(request).await;
-                    TraceContextResponsePropagator::new().inject_context(
-                        &Context::current(),
-                        &mut HeaderInjector(response.headers_mut()),
-                    );
-                    TraceableHttpResponse::new(response, path)
-                })
-            },
-        )
-        .await
-        .response
-}
-
-/// Middleware to start tracing of the `/v1/explain` request.
-/// This middleware must be active for the entire duration
-/// of the request i.e. this middleware should be the
-/// entry point and the exit point of the GraphQL request.
-async fn explain_request_tracing_middleware<B: Send>(
-    request: Request<B>,
-    next: Next<B>,
-) -> axum::response::Response {
-    let tracer = tracing_util::global_tracer();
-    let path = "/v1/explain";
-    tracer
-        .in_span_async_with_parent_context(
-            path,
-            path,
-            SpanVisibility::User,
-            &request.headers().clone(),
-            || {
-                Box::pin(async move {
-                    let response = next.run(request).await;
-                    TraceableHttpResponse::new(response, path)
-                })
-            },
-        )
-        .await
-        .response
-}
-
-#[derive(Debug, thiserror::Error)]
-enum AuthError {
-    #[error("JWT auth error: {0}")]
-    Jwt(#[from] jwt::Error),
-    #[error("Webhook auth error: {0}")]
-    Webhook(#[from] webhook::Error),
-}
-
-impl TraceableError for AuthError {
-    fn visibility(&self) -> tracing_util::ErrorVisibility {
-        match self {
-            AuthError::Jwt(e) => e.visibility(),
-            AuthError::Webhook(e) => e.visibility(),
-        }
-    }
-}
-
-impl IntoResponse for AuthError {
-    fn into_response(self) -> axum::response::Response {
-        match self {
-            AuthError::Jwt(e) => e.into_response(),
-            AuthError::Webhook(e) => e.into_response(),
-        }
-    }
-}
-
-/// This middleware authenticates the incoming GraphQL request according to the
-/// authentication configuration present in the `auth_config` of `EngineState`. The
-/// result of the authentication is `hasura-authn-core::Identity`, which is then
-/// made available to the GraphQL request handler.
-async fn authentication_middleware<'a, B>(
-    State(engine_state): State<Arc<EngineState>>,
-    headers_map: HeaderMap,
-    mut request: Request<B>,
-    next: Next<B>,
-) -> axum::response::Result<axum::response::Response>
-where
-    B: HttpBody,
-    B::Error: Display,
-{
-    let tracer = tracing_util::global_tracer();
-
-    let resolved_identity = tracer
-        .in_span_async(
-            "authentication_middleware",
-            "Authentication middleware",
-            SpanVisibility::Internal,
-            || {
-                Box::pin(async {
-                    match &engine_state.auth_config {
-                        V1AuthConfig(auth_config) => match &auth_config.mode {
-                            AuthModeConfig::Webhook(webhook_config) => {
-                                webhook::authenticate_request(
-                                    &engine_state.http_context.client,
-                                    webhook_config,
-                                    &headers_map,
-                                    auth_config.allow_role_emulation_by.as_ref(),
-                                )
-                                .await
-                                .map_err(AuthError::from)
-                            }
-                            AuthModeConfig::Jwt(jwt_secret_config) => {
-                                jwt_auth::authenticate_request(
-                                    &engine_state.http_context.client,
-                                    *jwt_secret_config.clone(),
-                                    auth_config.allow_role_emulation_by.as_ref(),
-                                    &headers_map,
-                                )
-                                .await
-                                .map_err(AuthError::from)
-                            }
-                        },
-                    }
-                })
-            },
-        )
-        .await?;
-
-    request.extensions_mut().insert(resolved_identity);
-    Ok(next.run(request).await)
-}
-
-async fn graphiql() -> Html<&'static str> {
-    Html(include_str!("index.html"))
-}
-
-async fn handle_request(
-    State(state): State<Arc<EngineState>>,
-    Extension(session): Extension<Session>,
-    Json(request): Json<gql::http::RawRequest>,
-) -> gql::http::Response {
-    let tracer = tracing_util::global_tracer();
-    let response = tracer
-        .in_span_async(
-            "handle_request",
-            "Handle request",
-            SpanVisibility::User,
-            || {
-                Box::pin(execute::execute_query(
-                    &state.http_context,
-                    &state.schema,
-                    &session,
-                    request,
-                    None,
-                ))
-            },
-        )
-        .await;
-
-    // Set the span as error if the response contains an error
-    // NOTE: Ideally, we should mark the root span as error in `graphql_request_tracing_middleware` function,
-    // the tracing middleware, where the span is initialized. It is possible by completing the implementation
-    // of `Traceable` trait for `AxumResponse` struct. The said struct just wraps the `axum::response::Response`.
-    // The only way to determine the error is to inspect the status code from the `Response` struct.
-    // In `/graphql` API, all responses are sent with `200` OK including errors, which leaves no way to deduce errors in the tracing middleware.
-    set_status_on_current_span(&response);
-    response.0
-}
-
-async fn handle_explain_request(
-    State(state): State<Arc<EngineState>>,
-    Extension(session): Extension<Session>,
-    Json(request): Json<gql::http::RawRequest>,
-) -> execute::ExplainResponse {
-    let tracer = tracing_util::global_tracer();
-    let response = tracer
-        .in_span_async(
-            "handle_explain_request",
-            "Handle explain request",
-            SpanVisibility::User,
-            || {
-                Box::pin(execute::execute_explain(
-                    &state.http_context,
-                    &state.schema,
-                    &session,
-                    request,
-                ))
-            },
-        )
-        .await;
-
-    // Set the span as error if the response contains an error
-    set_status_on_current_span(&response);
-    response
-}
-
-fn read_schema(
-    metadata_path: &PathBuf,
-    metadata_resolve_flags: &metadata_resolve::MetadataResolveFlagsInternal,
-) -> Result<gql::schema::Schema<GDS>, anyhow::Error> {
-    let raw_metadata = std::fs::read_to_string(metadata_path)?;
-    let metadata = open_dds::Metadata::from_json_str(&raw_metadata)?;
-    Ok(engine::build::build_schema(
-        metadata,
-        metadata_resolve_flags,
-    )?)
-}
-
-fn read_auth_config(path: &PathBuf) -> Result<AuthConfig, anyhow::Error> {
-    let raw_auth_config = std::fs::read_to_string(path)?;
-    Ok(open_dds::traits::OpenDd::deserialize(
-        serde_json::from_str(&raw_auth_config)?,
-    )?)
 }

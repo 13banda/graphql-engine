@@ -1,6 +1,6 @@
 import React from 'react';
-import { StoryObj, Meta } from '@storybook/react';
-import { ReactQueryDecorator } from '../../../../storybook/decorators/react-query';
+import { StoryObj, Meta } from '@storybook/react-webpack5';
+import { ReactQueryDecorator } from '@hasura/shared/testing';
 import { registerEETrialLicenseActiveMutation } from '../../mocks/registration.mock';
 
 import { FormWrapper } from './FormWrapper';
@@ -12,7 +12,14 @@ export default {
 } as Meta<typeof FormWrapper>;
 
 export const Default: StoryObj<typeof FormWrapper> = {
-  render: () => <FormWrapper onFormClose={() => {}} showBenefitsView />,
+  render: () => (
+    <FormWrapper
+      onFormClose={() => {
+        /* noop */
+      }}
+      showBenefitsView
+    />
+  ),
 
   name: '💠 Default',
 
@@ -22,7 +29,14 @@ export const Default: StoryObj<typeof FormWrapper> = {
 };
 
 export const LicenseExpired: StoryObj<typeof FormWrapper> = {
-  render: () => <FormWrapper onFormClose={() => {}} showBenefitsView />,
+  render: () => (
+    <FormWrapper
+      onFormClose={() => {
+        /* noop */
+      }}
+      showBenefitsView
+    />
+  ),
 
   name: '💠 License Expired',
 };

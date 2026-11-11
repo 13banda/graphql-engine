@@ -1,19 +1,27 @@
 import isEqual from 'lodash/isEqual';
-import { DataSource, exportMetadata } from '../../../DataSource';
-import type { TableColumn } from '../../../DataSource';
-
-import { useQuery } from 'react-query';
-import { useHttpClient } from '../../../Network';
-import { Metadata, Table } from '../../../hasura-metadata-types';
-import { keyToPermission, metadataPermissionKeys } from '../../utils';
-import { MetadataSelectors } from '../../../hasura-metadata-api';
+import { getDatabaseMethods } from '@hasura/metadata/data-source';
+import type { TableColumn } from '@hasura/metadata/data-source';
+import { useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import {
+  type Metadata,
+  type Table,
+  type DataQueryType,
+  type AccessType,
+  keyToPermission,
+} from '@hasura/shared/types';
+import { useMetadata } from '@hasura/metadata/api';
+import { useAuthFetchJson } from '@hasura/shared/hooks';
+import { useAppContext } from '@hasura/shared/context';
+import { MetadataSelectors } from '@hasura/metadata/helpers';
+import { isPermission } from '../../utils';
 
 export interface RolePermission {
   roleName: string;
   isNewRole: boolean;
   permissionTypes: {
-    permissionType: QueryType;
-    access: Access;
+    permissionType: DataQueryType;
+    access: AccessType;
   }[];
   bulkSelect: {
     isSelectable: boolean;
@@ -21,13 +29,15 @@ export interface RolePermission {
   };
 }
 
-type QueryType = 'insert' | 'select' | 'update' | 'delete';
-type Access = 'fullAccess' | 'partialAccess' | 'noAccess';
+const supportedQueries: DataQueryType[] = [
+  'insert',
+  'select',
+  'update',
+  'delete',
+];
 
-const supportedQueries: QueryType[] = ['insert', 'select', 'update', 'delete'];
-
-export const getAllowedFilterKeys = (
-  query: 'insert' | 'select' | 'update' | 'delete'
+const getAllowedFilterKeys = (
+  query: 'insert' | 'select' | 'update' | 'delete',
 ): ('check' | 'filter')[] => {
   switch (query) {
     case 'insert':
@@ -40,7 +50,7 @@ export const getAllowedFilterKeys = (
 };
 
 type GetAccessTypeArgs = {
-  QueryType: QueryType;
+  QueryType: DataQueryType;
   permission: any;
   // permission: Permission['permission'];
   tableColumns: TableColumn[];
@@ -50,7 +60,7 @@ const getAccessType = ({
   QueryType,
   permission,
   tableColumns,
-}: GetAccessTypeArgs): Access => {
+}: GetAccessTypeArgs): AccessType => {
   const filterKeys = getAllowedFilterKeys(QueryType);
   const checkColumns = QueryType !== 'delete';
   // const checkComputedFields = QueryType === 'select';
@@ -58,7 +68,7 @@ const getAccessType = ({
   // if any permissions are set for any of the filter keys then
   // the user only has partial access to that QueryType
   const hasRowPermissionsSet = !filterKeys.every(
-    key => JSON.stringify(permission[key]) === '{}'
+    (key) => JSON.stringify(permission[key]) === '{}',
   );
   if (hasRowPermissionsSet) {
     return 'partialAccess';
@@ -93,7 +103,7 @@ const getMetadataTable = ({
 }: GetMetadataTableArgs) => {
   // find current source
   const currentMetadataSource = metadata?.metadata?.sources?.find(
-    source => source.name === dataSourceName
+    (source) => source.name === dataSourceName,
   );
 
   if (!currentMetadataSource)
@@ -102,25 +112,18 @@ const getMetadataTable = ({
   const trackedTables = currentMetadataSource.tables;
 
   // find selected table
-  return trackedTables.find(trackedTable => isEqual(trackedTable.table, table));
+  return trackedTables.find((trackedTable) =>
+    isEqual(trackedTable.table, table),
+  );
 };
 
-type SupportedQueriesObject = Partial<Record<QueryType, Access>>;
+type SupportedQueriesObject = Partial<Record<DataQueryType, AccessType>>;
 
-const createSupportedQueryObject = (access: Access) =>
+const createSupportedQueryObject = (access: AccessType) =>
   supportedQueries.reduce<SupportedQueriesObject>((acc, supportedQuery) => {
     acc[supportedQuery] = access;
     return acc;
   }, {});
-
-const isPermission = (props: {
-  key: string;
-  value: any;
-}): props is {
-  key: (typeof metadataPermissionKeys)[number];
-  value: any[];
-  // value: Permission[];
-} => props.key in keyToPermission;
 
 type CreateRoleTableDataArgs = {
   metadataTable: any;
@@ -128,7 +131,10 @@ type CreateRoleTableDataArgs = {
   allRoles: string[];
 };
 
-type RoleToPermissionsMap = Record<string, Partial<Record<QueryType, Access>>>;
+type RoleToPermissionsMap = Record<
+  string,
+  Partial<Record<DataQueryType, AccessType>>
+>;
 
 const createRoleTableData = ({
   metadataTable,
@@ -139,14 +145,14 @@ const createRoleTableData = ({
   // create object with key of role
   // and value describing permissions attached to that role
   const roleToPermissionsMap = Object.entries(
-    metadataTable
+    metadataTable,
   ).reduce<RoleToPermissionsMap>((acc, [key, value]) => {
     const props = { key, value };
     // check if metadata key is related to permissions
     if (isPermission(props)) {
       const QueryType = keyToPermission[props.key];
 
-      props.value.forEach(permissionObject => {
+      props.value.forEach((permissionObject) => {
         if (!acc[permissionObject.role]) {
           // add all supported queries to the object
           acc[permissionObject.role] = createSupportedQueryObject('noAccess');
@@ -177,14 +183,14 @@ const createRoleTableData = ({
         },
       };
     },
-    {}
+    {},
   );
   // create the array that has the relevant information for each row of the table
   const permissions = Object.entries(allRolesToPermissionsMap).map(
     ([roleName, permission]) => {
       const permissionEntries = Object.entries(permission) as [
-        QueryType,
-        Access
+        DataQueryType,
+        AccessType,
       ][];
       const permissionTypes = permissionEntries.map(([key, value]) => ({
         permissionType: key,
@@ -202,7 +208,7 @@ const createRoleTableData = ({
           isDisabled: false,
         },
       };
-    }
+    },
   );
 
   // add admin row
@@ -212,9 +218,9 @@ const createRoleTableData = ({
       roleName: 'admin',
       isNewRole: false,
       permissionTypes: Object.entries(
-        createSupportedQueryObject('fullAccess')
+        createSupportedQueryObject('fullAccess'),
       ).map(([key, value]) => ({
-        permissionType: key as QueryType,
+        permissionType: key as DataQueryType,
         access: value,
       })),
       bulkSelect: {
@@ -227,9 +233,9 @@ const createRoleTableData = ({
       roleName: 'newRole',
       isNewRole: true,
       permissionTypes: Object.entries(
-        createSupportedQueryObject('noAccess')
+        createSupportedQueryObject('noAccess'),
       ).map(([key, value]) => ({
-        permissionType: key as QueryType,
+        permissionType: key as DataQueryType,
         access: value,
       })),
       bulkSelect: {
@@ -244,10 +250,10 @@ const createRoleTableData = ({
 
 type UseRolePermissionsArgs = {
   dataSourceName: string;
-  table: unknown;
+  table: Table;
 };
 
-export function permissionsTableKey({
+function permissionsTableKey({
   dataSourceName,
   table,
 }: {
@@ -261,41 +267,61 @@ export const useRolePermissions = ({
   dataSourceName,
   table,
 }: UseRolePermissionsArgs) => {
-  const httpClient = useHttpClient();
+  const { endpoints } = useAppContext();
+  const fetchJson = useAuthFetchJson();
+  // the permissions are read from the cached metadata, which every metadata
+  // migration invalidates, so they don't need a metadata fetch of their own
+  const { data: meta, isLoading: isLoadingMetadata } = useMetadata();
+  const sourceKind = meta?.metadata.sources.find(
+    (s) => s.name === dataSourceName,
+  )?.kind;
 
-  return useQuery<
-    { supportedQueries: QueryType[]; rolePermissions: RolePermission[] },
+  // only the table columns come from db introspection
+  const { data: tableColumns, isLoading: isLoadingColumns } = useQuery<
+    TableColumn[],
     Error
   >({
     queryKey: permissionsTableKey({
       dataSourceName,
       table,
     }),
-    queryFn: async () => {
-      const metadata = await exportMetadata({ httpClient });
-      // get table columns for metadata table from db introspection
-      const tableColumns = await DataSource(httpClient).getTableColumns({
-        dataSourceName,
+    queryFn: () => {
+      if (!sourceKind) {
+        throw new Error('Source not found');
+      }
+
+      return getDatabaseMethods(sourceKind).introspection.getTableColumnInfos({
+        dataSourceName: dataSourceName,
         table,
+        endpoints,
+        fetchJson,
       });
-      const roles = MetadataSelectors.getRoles(metadata);
-
-      // find the specific metadata table
-      const metadataTable = getMetadataTable({
-        metadata,
-        dataSourceName,
-        table,
-      });
-
-      // // extract the permissions data in the format required for the table
-      const rolePermissions = createRoleTableData({
-        metadataTable,
-        tableColumns,
-        allRoles: roles,
-      });
-
-      return { rolePermissions, supportedQueries };
     },
+    enabled: Boolean(sourceKind),
     refetchOnWindowFocus: false,
   });
+
+  const data = useMemo(() => {
+    if (!meta || !sourceKind || !tableColumns) return undefined;
+
+    const roles = MetadataSelectors.getRoles(meta.metadata);
+
+    // find the specific metadata table
+    const metadataTable = getMetadataTable({
+      metadata: meta,
+      dataSourceName,
+      table,
+    });
+
+    // extract the permissions data in the format required for the table
+    const rolePermissions = createRoleTableData({
+      metadataTable,
+      tableColumns,
+      allRoles: roles,
+    });
+
+    return { rolePermissions, supportedQueries };
+  }, [meta, sourceKind, tableColumns, dataSourceName, table]);
+
+  return { data, isLoading: isLoadingMetadata || isLoadingColumns };
 };

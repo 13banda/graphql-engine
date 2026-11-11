@@ -1,297 +1,176 @@
+mod error;
+mod predicate;
 mod types;
-use crate::helpers::typecheck;
+use crate::Conditions;
 use crate::stages::{
-    data_connector_scalar_types, data_connectors, models, object_boolean_expressions, object_types,
-    relationships, scalar_types,
+    boolean_expressions, data_connector_scalar_types, models_graphql, object_relationships,
+    scalar_types,
 };
+pub use error::{ModelPermissionError, NamedModelPermissionError};
 use indexmap::IndexMap;
+use open_dds::identifier::SubgraphName;
 use open_dds::{data_connector::DataConnectorName, models::ModelName, types::CustomTypeName};
 use std::collections::BTreeMap;
+use types::ModelPermissions;
 pub use types::{
-    FilterPermission, ModelPredicate, ModelTargetSource, ModelWithPermissions,
-    PredicateRelationshipInfo, SelectPermission,
+    FilterPermission, ModelAuthorizationRule, ModelPermissionIssue, ModelPermissionsOutput,
+    ModelPredicate, ModelTargetSource, ModelWithPermissions, PredicateRelationshipInfo,
+    RelationalDeletePermission, RelationalInsertPermission, RelationalOperation,
+    RelationalUpdatePermission, SelectPermission, UnaryComparisonOperator,
 };
+mod model_permission;
+pub(crate) use predicate::resolve_model_predicate_with_type;
 
-use crate::helpers::argument::{
-    resolve_model_predicate_with_type, resolve_value_expression_for_argument,
-};
-use crate::types::error::{Error, TypePredicateError};
+use crate::types::error::Error;
 
 use crate::types::subgraph::Qualified;
 
-use ndc_models;
-use open_dds::permissions::NullableModelPredicate;
-use open_dds::{
-    arguments::ArgumentName,
-    permissions::{ModelPermissionsV1, Role},
-    types::FieldName,
-};
+use super::data_connectors;
 
 /// resolve model permissions
 pub fn resolve(
     metadata_accessor: &open_dds::accessor::MetadataAccessor,
     data_connectors: &data_connectors::DataConnectors,
-
     data_connector_scalars: &BTreeMap<
         Qualified<DataConnectorName>,
-        data_connector_scalar_types::ScalarTypeWithRepresentationInfoMap,
+        data_connector_scalar_types::DataConnectorScalars,
     >,
-
-    object_types: &BTreeMap<Qualified<CustomTypeName>, relationships::ObjectTypeWithRelationships>,
-    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
-    models: &IndexMap<Qualified<ModelName>, models::Model>,
-    object_boolean_expression_types: &BTreeMap<
+    object_types: &BTreeMap<
         Qualified<CustomTypeName>,
-        object_boolean_expressions::ObjectBooleanExpressionType,
+        object_relationships::ObjectTypeWithRelationships,
     >,
-) -> Result<IndexMap<Qualified<ModelName>, ModelWithPermissions>, Error> {
-    let mut models_with_permissions: IndexMap<Qualified<ModelName>, ModelWithPermissions> = models
-        .iter()
-        .map(|(model_name, model)| {
-            (
-                model_name.clone(),
-                ModelWithPermissions {
-                    model: model.clone(),
-                    select_permissions: BTreeMap::new(),
-                },
-            )
-        })
+    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
+    models: IndexMap<Qualified<ModelName>, models_graphql::ModelWithGraphql>,
+    boolean_expression_types: &boolean_expressions::BooleanExpressionTypes,
+    conditions: &mut Conditions,
+) -> Result<ModelPermissionsOutput, Vec<Error>> {
+    let mut issues = Vec::new();
+
+    // First, resolve permissions while borrowing the original models map.
+    // We build a temporary map of just the permissions keyed by model name.
+    let mut resolved_permissions: IndexMap<Qualified<ModelName>, ModelPermissions> = models
+        .keys()
+        .map(|model_name| (model_name.clone(), ModelPermissions::new()))
         .collect();
+
+    let mut results = vec![];
 
     // Note: Model permissions's predicate can include the relationship field,
     // hence Model permissions should be resolved after the relationships of a
     // model is resolved.
     for open_dds::accessor::QualifiedObject {
+        path: _,
         subgraph,
         object: permissions,
     } in &metadata_accessor.model_permissions
     {
-        let model_name = Qualified::new(subgraph.to_string(), permissions.model_name.clone());
-        let model = models_with_permissions
-            .get_mut(&model_name)
-            .ok_or_else(|| Error::UnknownModelInModelSelectPermissions {
-                model_name: model_name.clone(),
-            })?;
-
-        if model.select_permissions.is_empty() {
-            let select_permissions = resolve_model_select_permissions(
-                &model.model,
-                subgraph,
-                permissions,
-                data_connectors,
-                data_connector_scalars,
-                object_types,
-                scalar_types,
-                models, // This is required to get the model for the relationship target
-                object_boolean_expression_types,
-            )?;
-
-            model.select_permissions = select_permissions;
-        } else {
-            return Err(Error::DuplicateModelSelectPermission {
-                model_name: model_name.clone(),
-            });
-        }
+        results.push(resolve_model_permissions(
+            metadata_accessor,
+            subgraph,
+            data_connectors,
+            data_connector_scalars,
+            object_types,
+            scalar_types,
+            &models,
+            boolean_expression_types,
+            permissions,
+            &mut resolved_permissions,
+            conditions,
+            &mut issues,
+        ));
     }
-    Ok(models_with_permissions)
+
+    // After permission resolution, consume models by moving fields into
+    // ModelWithPermissions (avoiding clones).
+    partition_eithers::collect_any_errors(results).map(|_| {
+        let models_with_permissions = models
+            .into_iter()
+            .map(|(model_name, model)| {
+                let permissions = resolved_permissions
+                    .swap_remove(&model_name)
+                    .unwrap_or_default();
+                (
+                    model_name,
+                    ModelWithPermissions {
+                        model: model.inner,
+                        arguments: model.arguments,
+                        filter_expression_type: model.filter_expression_type,
+                        graphql_api: model.graphql_api,
+                        permissions,
+                        description: model.description,
+                    },
+                )
+            })
+            .collect();
+        ModelPermissionsOutput {
+            permissions: models_with_permissions,
+            issues,
+        }
+    })
 }
 
-fn resolve_model_predicate_with_model(
-    model_predicate: &open_dds::permissions::ModelPredicate,
-    model: &models::Model,
-    subgraph: &str,
+fn resolve_model_permissions(
+    metadata_accessor: &open_dds::accessor::MetadataAccessor,
+    subgraph: &SubgraphName,
     data_connectors: &data_connectors::DataConnectors,
     data_connector_scalars: &BTreeMap<
         Qualified<DataConnectorName>,
-        data_connector_scalar_types::ScalarTypeWithRepresentationInfoMap,
+        data_connector_scalar_types::DataConnectorScalars,
     >,
-    fields: &IndexMap<FieldName, object_types::FieldDefinition>,
-    object_types: &BTreeMap<Qualified<CustomTypeName>, relationships::ObjectTypeWithRelationships>,
-    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
-    models: &IndexMap<Qualified<ModelName>, models::Model>,
-) -> Result<ModelPredicate, Error> {
-    let model_source = model
-        .source
-        .clone()
-        .ok_or(Error::ModelSourceRequiredForPredicate {
-            model_name: model.name.clone(),
-        })?;
-
-    let data_connector_name = &model_source.data_connector.name;
-
-    // get available scalars defined for this data connector
-    let scalars =
-        data_connector_scalars
-            .get(data_connector_name)
-            .ok_or(Error::TypePredicateError {
-                type_predicate_error: TypePredicateError::UnknownTypeDataConnector {
-                    type_name: model.data_type.clone(),
-                    data_connector: data_connector_name.clone(),
-                },
-            })?;
-
-    // get the type that the expression is based on
-    let object_type_representation =
-        object_types
-            .get(&model.data_type)
-            .ok_or(Error::UnknownType {
-                data_type: model.data_type.clone(),
-            })?;
-
-    // Get field mappings of model data type
-    let object_types::TypeMapping::Object { field_mappings, .. } = model_source
-        .type_mappings
-        .get(&model.data_type)
-        .ok_or(Error::TypeMappingRequired {
-            model_name: model.name.clone(),
-            type_name: model.data_type.clone(),
-            data_connector: model_source.data_connector.name.clone(),
-        })?;
-
-    resolve_model_predicate_with_type(
-        model_predicate,
-        &model.data_type,
-        object_type_representation,
-        field_mappings,
-        data_connector_name,
-        subgraph,
-        data_connectors,
-        scalars,
-        object_types,
-        scalar_types,
-        models,
-        fields,
-    )
-}
-
-// get the ndc_models::Type for an argument if it is available
-fn get_model_source_argument<'a>(
-    argument_name: &'a ArgumentName,
-    model: &'a models::Model,
-) -> Option<&'a ndc_models::Type> {
-    model
-        .source
-        .as_ref()
-        .and_then(|source| {
-            source
-                .argument_mappings
-                .get(argument_name)
-                .map(|connector_argument_name| source.source_arguments.get(connector_argument_name))
-        })
-        .flatten()
-}
-
-pub fn resolve_model_select_permissions(
-    model: &models::Model,
-    subgraph: &str,
-    model_permissions: &ModelPermissionsV1,
-    data_connectors: &data_connectors::DataConnectors,
-    data_connector_scalars: &BTreeMap<
-        Qualified<DataConnectorName>,
-        data_connector_scalar_types::ScalarTypeWithRepresentationInfoMap,
-    >,
-    object_types: &BTreeMap<Qualified<CustomTypeName>, relationships::ObjectTypeWithRelationships>,
-    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
-    models: &IndexMap<Qualified<ModelName>, models::Model>,
-    object_boolean_expression_types: &BTreeMap<
+    object_types: &BTreeMap<
         Qualified<CustomTypeName>,
-        object_boolean_expressions::ObjectBooleanExpressionType,
+        object_relationships::ObjectTypeWithRelationships,
     >,
-) -> Result<BTreeMap<Role, SelectPermission>, Error> {
-    let mut validated_permissions = BTreeMap::new();
-    for model_permission in &model_permissions.permissions {
-        if let Some(select) = &model_permission.select {
-            let resolved_predicate = match &select.filter {
-                NullableModelPredicate::NotNull(model_predicate) => {
-                    resolve_model_predicate_with_model(
-                        model_predicate,
-                        model,
-                        subgraph,
-                        data_connectors,
-                        data_connector_scalars,
-                        &model.type_fields,
-                        object_types,
-                        scalar_types,
-                        models,
-                    )
-                    .map(FilterPermission::Filter)?
-                }
-                NullableModelPredicate::Null(()) => FilterPermission::AllowAll,
-            };
+    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
+    models: &IndexMap<Qualified<ModelName>, models_graphql::ModelWithGraphql>,
+    boolean_expression_types: &boolean_expressions::BooleanExpressionTypes,
+    permissions: &open_dds::permissions::ModelPermissionsV2,
+    resolved_permissions: &mut IndexMap<Qualified<ModelName>, ModelPermissions>,
+    conditions: &mut Conditions,
+    issues: &mut Vec<ModelPermissionIssue>,
+) -> Result<(), Error> {
+    let model_name =
+        Qualified::new(subgraph.clone(), permissions.model_name.clone()).transpose_spanned();
 
-            let mut argument_presets = BTreeMap::new();
+    let input_model =
+        models
+            .get(&model_name.value)
+            .ok_or_else(|| Error::UnknownModelInModelPermissions {
+                model_name: model_name.clone(),
+            })?;
 
-            for argument_preset in &select.argument_presets {
-                if argument_presets.contains_key(&argument_preset.argument) {
-                    return Err(Error::DuplicateModelArgumentPreset {
-                        model_name: model.name.clone(),
-                        argument_name: argument_preset.argument.clone(),
-                    });
-                }
-
-                let source_argument_type =
-                    get_model_source_argument(&argument_preset.argument, model);
-
-                let data_connector_name = model
-                    .source
-                    .as_ref()
-                    .map(|source| &source.data_connector.name)
-                    .ok_or(Error::ModelSourceRequiredForPredicate {
-                        model_name: model.name.clone(),
-                    })?;
-
-                match model.arguments.get(&argument_preset.argument) {
-                    Some(argument) => {
-                        let value_expression = resolve_value_expression_for_argument(
-                            &argument_preset.argument,
-                            &argument_preset.value,
-                            &argument.argument_type,
-                            source_argument_type,
-                            data_connector_name,
-                            subgraph,
-                            object_types,
-                            scalar_types,
-                            object_boolean_expression_types,
-                            models,
-                            data_connectors,
-                            data_connector_scalars,
-                        )?;
-
-                        // additionally typecheck literals
-                        // we do this outside the argument resolve so that we can emit a model-specific error
-                        // on typechecking failure
-                        typecheck::typecheck_value_expression(
-                            &argument.argument_type,
-                            &argument_preset.value,
-                        )
-                        .map_err(|type_error| {
-                            Error::ModelArgumentPresetTypeError {
-                                model_name: model.name.clone(),
-                                argument_name: argument_preset.argument.clone(),
-                                type_error,
-                            }
-                        })?;
-
-                        argument_presets.insert(
-                            argument_preset.argument.clone(),
-                            (argument.argument_type.clone(), value_expression),
-                        );
-                    }
-                    None => {
-                        return Err(Error::ModelArgumentPresetMismatch {
-                            model_name: model.name.clone(),
-                            argument_name: argument_preset.argument.clone(),
-                        });
-                    }
-                }
-            }
-
-            let resolved_permission = SelectPermission {
-                filter: resolved_predicate.clone(),
-                argument_presets,
-            };
-            validated_permissions.insert(model_permission.role.clone(), resolved_permission);
+    let model_perms = resolved_permissions.get(&model_name.value).ok_or_else(|| {
+        Error::UnknownModelInModelPermissions {
+            model_name: model_name.clone(),
         }
+    })?;
+
+    if model_perms.is_empty() {
+        let boolean_expression = input_model
+            .filter_expression_type
+            .as_ref()
+            .map(derive_more::with_trait::AsRef::as_ref);
+
+        let new_permissions = model_permission::resolve_all_model_permissions(
+            &metadata_accessor.flags,
+            input_model,
+            permissions,
+            boolean_expression,
+            data_connectors,
+            data_connector_scalars,
+            object_types,
+            scalar_types,
+            models,
+            boolean_expression_types,
+            conditions,
+            issues,
+        )?;
+
+        *resolved_permissions.get_mut(&model_name.value).unwrap() = new_permissions;
+    } else {
+        return Err(Error::DuplicateModelPermissions {
+            model_name: model_name.clone(),
+        });
     }
-    Ok(validated_permissions)
+    Ok(())
 }

@@ -58,6 +58,7 @@ import Data.Text (unpack)
 import Data.Time.Clock qualified as Clock
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
+import Hasura.Authentication.Role (RoleName)
 import Hasura.Base.Error (QErr, showQErr)
 import Hasura.GraphQL.Execute.Subscription.Options
 import Hasura.GraphQL.Execute.Subscription.Plan
@@ -70,7 +71,6 @@ import Hasura.Logging qualified as L
 import Hasura.Prelude
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.Common (SourceName)
-import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.RQL.Types.Subscription (SubscriptionType)
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.Server.Types (RequestId)
@@ -119,7 +119,14 @@ data SubscriptionMetadata = SubscriptionMetadata
 
 data SubscriptionResponse = SubscriptionResponse
   { _lqrPayload :: !BS.ByteString,
-    _lqrExecutionTime :: !Clock.DiffTime
+    _lqrExecutionTime :: !Clock.DiffTime,
+    -- | For streaming subscriptions: the cursor value in effect just before
+    -- the poll that produced this batch -- i.e. what a client should use as
+    -- the cursor's @initial_value@ to resume from exactly this point if this
+    -- batch can't be delivered (see
+    -- 'Hasura.GraphQL.Transport.WebSocket.cancelOperationOnOvercapacity').
+    -- 'Nothing' for live queries, which have no cursor.
+    _lqrResumeCursor :: !(Maybe CursorVariableValues)
   }
 
 type SubscriptionGQResponse = GQResult SubscriptionResponse

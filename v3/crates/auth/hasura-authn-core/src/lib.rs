@@ -1,9 +1,13 @@
-use axum::middleware::Next;
-use axum::response::IntoResponse;
 use axum::Extension;
-use axum::{http::Request, http::StatusCode};
-use lang_graphql::http::Response;
+use axum::middleware::Next;
+use axum::{
+    extract::State,
+    http::StatusCode,
+    http::{HeaderMap, Request},
+};
+use axum_core::body::Body;
 use schemars::JsonSchema;
+use std::collections::{BTreeMap, btree_map};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -19,32 +23,119 @@ use std::{
 // Session variable and role are defined as part of OpenDD
 pub use open_dds::{
     permissions::Role,
-    session_variables::{SessionVariable, SESSION_VARIABLE_ROLE},
+    session_variables::{SESSION_VARIABLE_ROLE, SessionVariableName, SessionVariableReference},
 };
 
-// Value of a session variable
-// TODO: This need to change to serde_json::Value
-// TODO: Get rid of the pub access to inner value
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, JsonSchema)]
-pub struct SessionVariableValue(pub String);
+#[derive(
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    derive_more::with_trait::Display,
+)]
+/// Value of a session variable, used to capture session variable input from parsed sources (jwt, webhook, etc)
+/// and unparsed sources (http headers)
+pub enum SessionVariableValue {
+    /// An unparsed session variable value as a string. Might be a raw string, might be a number, might be json.
+    /// How we interpret it depends on what type we're trying to coerce to from the string
+    #[display("{_0}")]
+    Unparsed(String),
+    /// A parsed JSON session variable value. We know what the type is because we parsed it from JSON.
+    #[display("{_0}")]
+    Parsed(serde_json::Value),
+}
 
 impl SessionVariableValue {
     pub fn new(value: &str) -> Self {
-        SessionVariableValue(value.to_string())
+        SessionVariableValue::Unparsed(value.to_string())
+    }
+
+    /// Assert that a session variable represents a string, regardless of encoding
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            SessionVariableValue::Unparsed(s) => Some(s.as_str()),
+            SessionVariableValue::Parsed(value) => value.as_str(),
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            SessionVariableValue::Unparsed(s) => s.parse::<i64>().ok(),
+            SessionVariableValue::Parsed(value) => value.as_i64(),
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            SessionVariableValue::Unparsed(s) => s.parse::<f64>().ok(),
+            SessionVariableValue::Parsed(value) => value.as_f64(),
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            SessionVariableValue::Unparsed(s) => s.parse::<bool>().ok(),
+            SessionVariableValue::Parsed(value) => value.as_bool(),
+        }
+    }
+
+    pub fn as_value(&self) -> serde_json::Result<serde_json::Value> {
+        match self {
+            SessionVariableValue::Unparsed(s) => serde_json::from_str(s),
+            SessionVariableValue::Parsed(value) => Ok(value.clone()),
+        }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SessionVariables(HashMap<SessionVariable, SessionVariableValue>);
+impl From<JsonSessionVariableValue> for SessionVariableValue {
+    fn from(value: JsonSessionVariableValue) -> Self {
+        SessionVariableValue::Parsed(value.0)
+    }
+}
+
+/// JSON value of a session variable
+// This is used instead of SessionVariableValue when only JSON session variable values are accepted
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Clone, JsonSchema)]
+#[schemars(rename = "SessionVariableValue")] // Renamed to keep json schema compatibility
+pub struct JsonSessionVariableValue(pub serde_json::Value);
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SessionVariables(BTreeMap<SessionVariableName, SessionVariableValue>);
 
 impl SessionVariables {
-    pub fn get(&self, session_variable: &SessionVariable) -> Option<&SessionVariableValue> {
+    pub fn get(&self, session_variable: &SessionVariableName) -> Option<&SessionVariableValue> {
         self.0.get(session_variable)
+    }
+
+    pub fn iter(&self) -> btree_map::Iter<'_, SessionVariableName, SessionVariableValue> {
+        self.0.iter()
     }
 }
 
+impl IntoIterator for SessionVariables {
+    type Item = (SessionVariableName, SessionVariableValue);
+    type IntoIter = btree_map::IntoIter<SessionVariableName, SessionVariableValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a SessionVariables {
+    type Item = (
+        &'a open_dds::session_variables::SessionVariableName,
+        &'a SessionVariableValue,
+    );
+    type IntoIter =
+        btree_map::Iter<'a, open_dds::session_variables::SessionVariableName, SessionVariableValue>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
 // The privilege with which a request is executed
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     pub role: Role,
     pub variables: SessionVariables,
@@ -54,14 +145,14 @@ pub struct Session {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleAuthorization {
     pub role: Role,
-    pub session_variables: HashMap<SessionVariable, SessionVariableValue>,
+    pub session_variables: HashMap<SessionVariableName, SessionVariableValue>,
     pub allowed_session_variables_from_request: SessionVariableList,
 }
 
 impl RoleAuthorization {
     pub fn build_session(
         &self,
-        mut variables: HashMap<SessionVariable, SessionVariableValue>,
+        mut variables: BTreeMap<SessionVariableName, SessionVariableValue>,
     ) -> Session {
         let allowed_client_session_variables = match &self.allowed_session_variables_from_request {
             SessionVariableList::All => variables,
@@ -72,6 +163,12 @@ impl RoleAuthorization {
         };
         let mut session_variables = allowed_client_session_variables;
         session_variables.extend(self.session_variables.clone());
+
+        session_variables.insert(
+            SESSION_VARIABLE_ROLE,
+            SessionVariableValue::Parsed(serde_json::json!(self.role.to_string())),
+        );
+
         Session {
             role: self.role.clone(),
             variables: SessionVariables(session_variables),
@@ -85,7 +182,7 @@ pub enum SessionVariableList {
     // like * in Select * from ...
     All,
     // An explicit list
-    Some(HashSet<SessionVariable>),
+    Some(HashSet<SessionVariableName>),
 }
 
 // Privileges of the current user
@@ -107,7 +204,7 @@ impl Identity {
     pub fn get_role_authorization(
         &self,
         role: Option<&Role>,
-    ) -> Result<Cow<RoleAuthorization>, SessionError> {
+    ) -> Result<Cow<'_, RoleAuthorization>, SessionError> {
         match self {
             Identity::RoleEmulationEnabled(admin_role) => Ok(Cow::Owned(RoleAuthorization {
                 role: role.cloned().unwrap_or(admin_role.clone()),
@@ -135,6 +232,35 @@ impl Identity {
     }
 }
 
+/// Response from authentication containing the identity and optional baggage
+/// to be propagated in the OpenTelemetry context.
+///
+/// Baggage items returned from auth webhooks will be attached to the current
+/// context and automatically added as attributes to all subsequent spans
+/// via the `BaggageSpanProcessor`.
+#[derive(Clone, Debug)]
+pub struct AuthenticateResponse {
+    pub identity: Identity,
+    /// Baggage key-value pairs to be added to the OpenTelemetry context.
+    /// These will be propagated to downstream services and added as span attributes.
+    pub baggage: Vec<tracing_util::KeyValue>,
+}
+
+impl AuthenticateResponse {
+    /// Create a new AuthenticateResponse with the given identity and no baggage.
+    pub fn new(identity: Identity) -> Self {
+        Self {
+            identity,
+            baggage: Vec::new(),
+        }
+    }
+
+    /// Create a new AuthenticateResponse with the given identity and baggage.
+    pub fn with_baggage(identity: Identity, baggage: Vec<tracing_util::KeyValue>) -> Self {
+        Self { identity, baggage }
+    }
+}
+
 // Error when resolving a session
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -148,51 +274,71 @@ pub enum SessionError {
     InvalidHeaderValue { header_name: String, error: String },
 }
 
-impl IntoResponse for SessionError {
-    fn into_response(self) -> axum::response::Response {
+impl SessionError {
+    pub fn into_middleware_error(self) -> engine_types::MiddlewareError {
         let code = match self {
             SessionError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             SessionError::InternalRoleNotFound(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SessionError::InvalidHeaderValue { .. } => StatusCode::BAD_REQUEST,
         };
-        Response::error_message_with_status(code, self.to_string()).into_response()
+        let is_internal = match self {
+            SessionError::Unauthorized(_) | SessionError::InvalidHeaderValue { .. } => false,
+            SessionError::InternalRoleNotFound(_) => true,
+        };
+        engine_types::MiddlewareError {
+            status: code,
+            message: self.to_string(),
+            is_internal,
+        }
     }
 }
 
 // Using the x-hasura-* headers of the request and the identity set by the authn system,
 // this layer resolves a 'session' which is then used by the execution engine
-pub async fn resolve_session<'a, B>(
+pub async fn resolve_session(
+    State(state): State<engine_types::WithMiddlewareErrorConverter<()>>,
     Extension(identity): Extension<Identity>,
-    mut request: Request<B>,
-    next: Next<B>,
+    mut request: Request<Body>,
+    next: Next,
 ) -> axum::response::Result<axum::response::Response> {
-    let mut session_variables = HashMap::new();
+    let session = authorize_identity(&identity, request.headers())
+        .map_err(|session_err| state.handle_error(session_err.into_middleware_error()))?;
+    request.extensions_mut().insert(session);
+    let response = next.run(request).await;
+    Ok(response)
+}
+
+/// Authorize the authenticated identity based on the provided headers.
+pub fn authorize_identity(
+    identity: &Identity,
+    headers: &HeaderMap,
+) -> Result<Session, SessionError> {
+    let mut session_variables = BTreeMap::new();
     let mut role = None;
     // traverse through the headers and collect role and session variables
-    for (header_name, header_value) in request.headers() {
-        if let Ok(session_variable) = SessionVariable::from_str(header_name.as_str()) {
-            let variable_value = match header_value.to_str() {
-                Err(e) => Err(SessionError::InvalidHeaderValue {
-                    header_name: header_name.to_string(),
-                    error: e.to_string(),
-                })?,
-                Ok(h) => SessionVariableValue::new(h),
-            };
+    for (header_name, header_value) in headers {
+        let Ok(session_variable) = SessionVariableName::from_str(header_name.as_str());
+        let variable_value_str = match header_value.to_str() {
+            Err(e) => Err(SessionError::InvalidHeaderValue {
+                header_name: header_name.to_string(),
+                error: e.to_string(),
+            })?,
+            Ok(h) => h,
+        };
+        let variable_value = SessionVariableValue::Unparsed(variable_value_str.to_string());
 
-            if session_variable == SESSION_VARIABLE_ROLE.to_owned() {
-                role = Some(Role::new(&variable_value.0))
-            } else {
-                // TODO: Handle the duplicate case?
-                session_variables.insert(session_variable, variable_value);
-            }
+        if session_variable == SESSION_VARIABLE_ROLE {
+            role = Some(Role::new(variable_value_str));
+        } else {
+            // TODO: Handle the duplicate case?
+            session_variables.insert(session_variable, variable_value);
         }
     }
     let session = identity
         .get_role_authorization(role.as_ref())?
         .build_session(session_variables);
-    request.extensions_mut().insert(session);
-    let response = next.run(request).await;
-    Ok(response)
+
+    Ok(session)
 }
 
 #[cfg(test)]
@@ -203,21 +349,21 @@ mod tests {
 
     #[test]
     fn test_build_session_allow_all_session_variables() {
-        let mut client_session_variables = HashMap::new();
+        let mut client_session_variables = BTreeMap::new();
 
         let mut authenticated_session_variables = HashMap::new();
 
         authenticated_session_variables.insert(
-            SessionVariable::from_str("x-hasura-user-id").unwrap(),
+            SessionVariableName::from_str("x-hasura-user-id").unwrap(),
             SessionVariableValue::new("1"),
         );
 
         client_session_variables.insert(
-            SessionVariable::from_str("x-hasura-custom").unwrap(),
+            SessionVariableName::from_str("x-hasura-custom").unwrap(),
             SessionVariableValue::new("test"),
         );
         client_session_variables.insert(
-            SessionVariable::from_str("x-hasura-custom-claim").unwrap(),
+            SessionVariableName::from_str("x-hasura-custom-claim").unwrap(),
             SessionVariableValue::new("claim-value"),
         );
         let role_authorization = RoleAuthorization {
@@ -231,7 +377,12 @@ mod tests {
         let mut expected_session_variables = client_session_variables.clone();
 
         expected_session_variables.insert(
-            SessionVariable::from_str("x-hasura-user-id").unwrap(),
+            SessionVariableName::from_str("x-hasura-role").unwrap(),
+            SessionVariableValue::Parsed("test-role".into()),
+        );
+
+        expected_session_variables.insert(
+            SessionVariableName::from_str("x-hasura-user-id").unwrap(),
             SessionVariableValue::new("1"),
         );
         pa::assert_eq!(
@@ -245,28 +396,28 @@ mod tests {
 
     #[test]
     fn test_build_session_allow_specific_session_variables() {
-        let mut client_session_variables = HashMap::new();
+        let mut client_session_variables = BTreeMap::new();
 
         let mut authenticated_session_variables = HashMap::new();
 
         authenticated_session_variables.insert(
-            SessionVariable::from_str("x-hasura-user-id").unwrap(),
+            SessionVariableName::from_str("x-hasura-user-id").unwrap(),
             SessionVariableValue::new("1"),
         );
 
         client_session_variables.insert(
-            SessionVariable::from_str("x-hasura-custom").unwrap(),
+            SessionVariableName::from_str("x-hasura-custom").unwrap(),
             SessionVariableValue::new("test"),
         );
         client_session_variables.insert(
-            SessionVariable::from_str("x-hasura-custom-claim").unwrap(),
+            SessionVariableName::from_str("x-hasura-custom-claim").unwrap(),
             SessionVariableValue::new("claim-value"),
         );
         let mut allowed_sesion_variables_from_request = HashSet::new();
         allowed_sesion_variables_from_request
-            .insert(SessionVariable::from_str("x-hasura-custom").unwrap());
+            .insert(SessionVariableName::from_str("x-hasura-custom").unwrap());
         allowed_sesion_variables_from_request
-            .insert(SessionVariable::from_str("x-hasura-custom-author-id").unwrap());
+            .insert(SessionVariableName::from_str("x-hasura-custom-author-id").unwrap());
         let role_authorization = RoleAuthorization {
             role: Role::new("test-role"),
             session_variables: authenticated_session_variables,
@@ -279,12 +430,18 @@ mod tests {
 
         let mut expected_session_variables = client_session_variables;
         expected_session_variables
-            .remove(&SessionVariable::from_str("x-hasura-custom-claim").unwrap());
+            .remove(&SessionVariableName::from_str("x-hasura-custom-claim").unwrap());
 
         expected_session_variables.insert(
-            SessionVariable::from_str("x-hasura-user-id").unwrap(),
+            SessionVariableName::from_str("x-hasura-user-id").unwrap(),
             SessionVariableValue::new("1"),
         );
+
+        expected_session_variables.insert(
+            SessionVariableName::from_str("x-hasura-role").unwrap(),
+            SessionVariableValue::Parsed("test-role".into()),
+        );
+
         pa::assert_eq!(
             Session {
                 role: Role::new("test-role"),
@@ -296,21 +453,21 @@ mod tests {
 
     #[test]
     fn test_build_session_allow_no_session_variables() {
-        let mut client_session_variables = HashMap::new();
+        let mut client_session_variables = BTreeMap::new();
 
         let mut authenticated_session_variables = HashMap::new();
 
         authenticated_session_variables.insert(
-            SessionVariable::from_str("x-hasura-user-id").unwrap(),
+            SessionVariableName::from_str("x-hasura-user-id").unwrap(),
             SessionVariableValue::new("1"),
         );
 
         client_session_variables.insert(
-            SessionVariable::from_str("x-hasura-custom").unwrap(),
+            SessionVariableName::from_str("x-hasura-custom").unwrap(),
             SessionVariableValue::new("test"),
         );
         client_session_variables.insert(
-            SessionVariable::from_str("x-hasura-custom-claim").unwrap(),
+            SessionVariableName::from_str("x-hasura-custom-claim").unwrap(),
             SessionVariableValue::new("claim-value"),
         );
 
@@ -322,11 +479,16 @@ mod tests {
 
         let session = role_authorization.build_session(client_session_variables.clone());
 
-        let mut expected_session_variables = HashMap::new();
+        let mut expected_session_variables = BTreeMap::new();
 
         expected_session_variables.insert(
-            SessionVariable::from_str("x-hasura-user-id").unwrap(),
+            SessionVariableName::from_str("x-hasura-user-id").unwrap(),
             SessionVariableValue::new("1"),
+        );
+
+        expected_session_variables.insert(
+            SessionVariableName::from_str("x-hasura-role").unwrap(),
+            SessionVariableValue::Parsed("test-role".into()),
         );
 
         pa::assert_eq!(

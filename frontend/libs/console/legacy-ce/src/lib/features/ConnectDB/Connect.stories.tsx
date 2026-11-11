@@ -1,7 +1,7 @@
 import React from 'react';
-import { ReactQueryDecorator } from '../../storybook/decorators/react-query';
+import { ReactQueryDecorator } from '@hasura/shared/testing';
 
-import { StoryFn, Meta } from '@storybook/react';
+import { StoryFn, Meta } from '@storybook/react-webpack5';
 import { Connect } from './Connect';
 
 import { handlers } from './mocks/handlers.mock';
@@ -19,7 +19,9 @@ export const Primary: StoryFn<typeof Connect.CreateConnection> = () => (
   <Connect.CreateConnection
     name="new_connection"
     driver="postgres"
-    onDriverChange={() => {}}
+    onDriverChange={() => {
+      /* noop */
+    }}
   />
 );
 
@@ -29,6 +31,8 @@ export const WithExistingConfig: StoryFn<
   <Connect.CreateConnection
     name="default"
     driver="postgres"
-    onDriverChange={() => {}}
+    onDriverChange={() => {
+      /* noop */
+    }}
   />
 );

@@ -19,6 +19,7 @@ module Hasura.RQL.DDL.EventTrigger
     getSourceTableAndTriggers,
     getTriggerNames,
     getTriggersMap,
+    getTriggerTableMap,
     getTableNameFromTrigger,
     cetqSource,
     cetqName,
@@ -60,6 +61,7 @@ import Data.Sequence qualified as Seq
 import Data.Text qualified as T
 import Data.Text.Extended
 import Data.URL.Template (printTemplate, renderTemplate)
+import Hasura.Authentication.User (UserInfoM (..))
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.Eventing.Backend
@@ -81,7 +83,6 @@ import Hasura.RQL.Types.SchemaCache.Build
 import Hasura.RQL.Types.SchemaCacheTypes
 import Hasura.RQL.Types.Source
 import Hasura.SQL.AnyBackend qualified as AB
-import Hasura.Session
 import Hasura.Table.Cache
 import Hasura.Table.Metadata (TableMetadata (..), tmEventTriggers)
 import Hasura.Tracing (TraceT)
@@ -183,7 +184,7 @@ data InvokeEventTriggerQuery (b :: BackendType) = InvokeEventTriggerQuery
     _ietqPayload :: Value
   }
 
-instance (Backend b) => FromJSON (InvokeEventTriggerQuery b) where
+instance FromJSON (InvokeEventTriggerQuery b) where
   parseJSON = withObject "InvokeEventTriggerQuery" $ \o ->
     InvokeEventTriggerQuery
       <$> o
@@ -482,14 +483,6 @@ checkIfTriggerNameExists sourceName triggerName = do
     Nothing -> pure False
     _ -> pure True
 
--- This change helps us create functions for the event triggers
--- without the function name being truncated by PG, since PG allows
--- for only 63 chars for identifiers.
--- Reasoning for the 42 characters:
--- 63 - (notify_hasura_) - (_INSERT | _UPDATE | _DELETE)
-maxTriggerNameLength :: Int
-maxTriggerNameLength = 42
-
 -- Consists of a list of environment variables with invalid/missing values
 newtype ResolveHeaderError = ResolveHeaderError {unResolveHeaderError :: [Text]} deriving (Show)
 
@@ -639,6 +632,19 @@ getTriggersMap ::
   SourceMetadata b ->
   InsOrdHashMap TriggerName (EventTriggerConf b)
 getTriggersMap = InsOrdHashMap.unions . map _tmEventTriggers . InsOrdHashMap.elems . _smTables
+
+-- | Get a map from trigger name to the table it is defined on
+getTriggerTableMap ::
+  SourceMetadata b ->
+  InsOrdHashMap TriggerName (TableName b)
+getTriggerTableMap sourceMetadata =
+  InsOrdHashMap.fromList
+    $ concatMap mkKeyValue
+    $ InsOrdHashMap.toList
+    $ _smTables sourceMetadata
+  where
+    mkKeyValue (tableName, tableMetadata) =
+      map (,tableName) $ InsOrdHashMap.keys (_tmEventTriggers tableMetadata)
 
 getSourceTableAndTriggers ::
   SourceMetadata b ->

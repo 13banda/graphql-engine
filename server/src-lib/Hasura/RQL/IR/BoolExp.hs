@@ -1,5 +1,3 @@
-{-# LANGUAGE UndecidableInstances #-}
-
 -- | Boolean Expressions
 --
 -- This module defines the IR representation of boolean expressions
@@ -31,6 +29,7 @@ module Hasura.RQL.IR.BoolExp
     AnnRedactionExpUnpreparedValue,
     AnnRedactionExp (..),
     annBoolExpTrue,
+    annBoolExpFalse,
     andAnnBoolExps,
     AnnBoolExpFldSQL,
     AnnBoolExpSQL,
@@ -58,6 +57,7 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.Hashable (hashWithSalt)
 import Data.Monoid
 import Data.Text.Extended
+import Hasura.Authentication.Session (SessionVariable)
 import Hasura.Function.Cache
 import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp.RemoteRelationshipPredicate (RemoteRelRHSFetchWhereExp)
@@ -70,7 +70,6 @@ import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.ComputedField
 import Hasura.RQL.Types.Relationships.Local
 import Hasura.SQL.AnyBackend qualified as AB
-import Hasura.Session
 
 ----------------------------------------------------------------------------------------------------
 -- Boolean structure
@@ -92,7 +91,9 @@ data GBoolExp (backend :: BackendType) field
     BoolExists (GExists backend field)
   | -- | A column field
     BoolField field
-  deriving (Show, Eq, Functor, Foldable, Traversable, Data, Generic)
+  deriving (Show, Functor, Foldable, Traversable, Data, Generic)
+
+deriving instance (Backend b, Eq a) => Eq (GBoolExp b a)
 
 instance (Backend b, NFData a) => NFData (GBoolExp b a)
 
@@ -197,7 +198,7 @@ instance ToJSONKeyValue ColExp where
 -- | This @BoolExp@ type is a simple alias for the boolean expressions used in permissions, that
 -- uses 'ColExp' as the term in GBoolExp.
 newtype BoolExp (b :: BackendType) = BoolExp {unBoolExp :: GBoolExp b ColExp}
-  deriving newtype (Show, Eq, Generic, NFData, ToJSON, FromJSON)
+  deriving newtype (Show, Eq, NFData, ToJSON, FromJSON)
 
 -- TODO: This implementation delegates to Aeson instances for encoding and
 -- decoding GBoolExp. To accurately represent GBoolExp with a codec we will need
@@ -336,35 +337,30 @@ deriving instance (Backend b) => Traversable (OpExpG b)
 
 deriving instance
   ( Backend b,
-    Show (BooleanOperators b a),
     Show a
   ) =>
   Show (OpExpG b a)
 
 deriving instance
   ( Backend b,
-    Eq (BooleanOperators b a),
     Eq a
   ) =>
   Eq (OpExpG b a)
 
 instance
   ( Backend b,
-    NFData (BooleanOperators b a),
     NFData a
   ) =>
   NFData (OpExpG b a)
 
 instance
   ( Backend b,
-    Hashable (BooleanOperators b a),
     Hashable a
   ) =>
   Hashable (OpExpG b a)
 
 instance
   ( Backend b,
-    ToJSONKeyValue (BooleanOperators b a),
     ToJSON a
   ) =>
   ToJSONKeyValue (OpExpG b a)
@@ -407,34 +403,31 @@ data ComputedFieldBoolExp (backend :: BackendType) scalar
   = -- | SQL function returning a scalar
     CFBEScalar (AnnRedactionExp backend scalar) [OpExpG backend scalar]
   | -- | SQL function returning SET OF table
-    CFBETable (TableName backend) (AnnBoolExp backend scalar)
+    CFBETable (TableName backend) (RelationshipFilters backend scalar)
   deriving (Functor, Foldable, Traversable, Generic)
 
 deriving instance
   ( Backend b,
-    Eq (AnnBoolExp b a),
-    Eq (OpExpG b a)
+    Eq a
   ) =>
   Eq (ComputedFieldBoolExp b a)
 
 deriving instance
   ( Backend b,
-    Show (AnnBoolExp b a),
-    Show (OpExpG b a)
+    Show a
   ) =>
   Show (ComputedFieldBoolExp b a)
 
 instance
   ( Backend b,
-    NFData (AnnBoolExp b a),
-    NFData (OpExpG b a)
+    NFData a
   ) =>
   NFData (ComputedFieldBoolExp b a)
 
 instance
   ( Backend b,
-    Hashable (AnnBoolExp b a),
-    Hashable (OpExpG b a)
+    Eq a,
+    Hashable a
   ) =>
   Hashable (ComputedFieldBoolExp b a)
 
@@ -469,29 +462,26 @@ deriving instance (Backend b) => Traversable (AnnComputedFieldBoolExp b)
 
 deriving instance
   ( Backend b,
-    Eq (ComputedFieldBoolExp b a),
-    Eq (FunctionArgsExp b a)
+    Eq a
   ) =>
   Eq (AnnComputedFieldBoolExp b a)
 
 deriving instance
   ( Backend b,
-    Show (ComputedFieldBoolExp b a),
-    Show (FunctionArgsExp b a)
+    Show a
   ) =>
   Show (AnnComputedFieldBoolExp b a)
 
 instance
   ( Backend b,
-    NFData (ComputedFieldBoolExp b a),
-    NFData (FunctionArgsExp b a)
+    NFData a
   ) =>
   NFData (AnnComputedFieldBoolExp b a)
 
 instance
   ( Backend b,
-    Hashable (ComputedFieldBoolExp b a),
-    Hashable (FunctionArgsExp b a)
+    Eq a,
+    Hashable a
   ) =>
   Hashable (AnnComputedFieldBoolExp b a)
 
@@ -502,11 +492,11 @@ data RemoteRelPermBoolExp b field = RemoteRelPermBoolExp
   }
   deriving (Generic)
 
-deriving instance (Backend b) => Functor (RemoteRelPermBoolExp b)
+deriving instance Functor (RemoteRelPermBoolExp b)
 
-deriving instance (Backend b) => Foldable (RemoteRelPermBoolExp b)
+deriving instance Foldable (RemoteRelPermBoolExp b)
 
-deriving instance (Backend b) => Traversable (RemoteRelPermBoolExp b)
+deriving instance Traversable (RemoteRelPermBoolExp b)
 
 instance Eq (RemoteRelPermBoolExp b f) where
   (RemoteRelPermBoolExp rawBoolExp1 _ _) == (RemoteRelPermBoolExp rawBoolExp2 _ _) = rawBoolExp1 == rawBoolExp2
@@ -549,48 +539,31 @@ data AnnBoolExpFld (backend :: BackendType) leaf
 
 deriving instance
   ( Backend b,
-    Eq (AggregationPredicates b a),
-    Eq (AnnBoolExp b a),
-    Eq (AnnComputedFieldBoolExp b a),
-    Eq (OpExpG b a),
-    Eq (RemoteRelPermBoolExp b a)
+    Eq a
   ) =>
   Eq (AnnBoolExpFld b a)
 
 deriving instance
   ( Backend b,
-    Show (AggregationPredicates b a),
-    Show (AnnBoolExp b a),
-    Show (AnnComputedFieldBoolExp b a),
-    Show (OpExpG b a),
-    Show (RemoteRelPermBoolExp b a)
+    Show a
   ) =>
   Show (AnnBoolExpFld b a)
 
 instance
   ( Backend b,
-    NFData (AggregationPredicates b a),
-    NFData (AnnBoolExp b a),
-    NFData (AnnComputedFieldBoolExp b a),
-    NFData (OpExpG b a),
-    NFData (RemoteRelPermBoolExp b a)
+    NFData a
   ) =>
   NFData (AnnBoolExpFld b a)
 
 instance
   ( Backend b,
-    Hashable (AggregationPredicates b a),
-    Hashable (AnnBoolExp b a),
-    Hashable (AnnComputedFieldBoolExp b a),
-    Hashable (OpExpG b a),
-    Hashable (RemoteRelPermBoolExp b a)
+    Eq a,
+    Hashable a
   ) =>
   Hashable (AnnBoolExpFld b a)
 
 instance
   ( Backend b,
-    ToJSONKeyValue (AggregationPredicates b a),
-    ToJSONKeyValue (OpExpG b a),
     ToJSON a
   ) =>
   ToJSONKeyValue (AnnBoolExpFld b a)
@@ -613,15 +586,16 @@ instance
         let function = _acfbFunction cfBoolExp
          in case _acfbBoolExp cfBoolExp of
               CFBEScalar _redactionExp opExps -> toJSON (function, object . pure . toJSONKeyValue <$> opExps)
-              CFBETable _ boolExp -> toJSON (function, toJSON boolExp)
+              CFBETable _ filters -> toJSON (function, toJSON filters)
       )
     AVAggregationPredicates avAggregationPredicates -> toJSONKeyValue avAggregationPredicates
     AVRemoteRelationship (RemoteRelPermBoolExp (relName, fieldValue) _ _) ->
       (K.fromText (relNameToTxt relName), fieldValue)
 
--- | This type represents a boolean expression over a relationship. In addition
--- to the actual user-specified predicate, we need to also consider the
--- permissions of the target table.
+-- | This type represents a boolean expression over a relationship, both tables
+-- and functions (for computed fields). In addition to the actual
+-- user-specified predicate, we need to also consider the permissions of the
+-- target table.
 --
 -- Because the permissions may include column-comparison-operators, they need to
 -- be translated in the context of the table they apply to. Thus we keep the
@@ -634,29 +608,30 @@ data RelationshipFilters (backend :: BackendType) leaf = RelationshipFilters
 
 deriving instance
   ( Backend b,
-    Eq (AnnBoolExp b a)
+    Eq a
   ) =>
   Eq (RelationshipFilters b a)
 
 deriving instance
   ( Backend b,
-    Show (AnnBoolExp b a)
+    Show a
   ) =>
   Show (RelationshipFilters b a)
 
 instance
   ( Backend b,
-    NFData (AnnBoolExp b a)
+    NFData a
   ) =>
   NFData (RelationshipFilters b a)
 
 instance
   ( Backend b,
-    Hashable (AnnBoolExp b a)
+    Eq a,
+    Hashable a
   ) =>
   Hashable (RelationshipFilters b a)
 
-instance (ToJSON (AnnBoolExp backend leaf)) => ToJSON (RelationshipFilters backend leaf)
+instance (Backend backend, ToJSON leaf) => ToJSON (RelationshipFilters backend leaf)
 
 -- | A simple alias for the kind of boolean expressions used in the schema, that ties together
 -- 'GBoolExp', 'OpExpG', and 'AnnBoolExpFld'.
@@ -671,6 +646,10 @@ type AnnBoolExpPartialSQL backend = AnnBoolExp backend (PartialSQLExp backend)
 
 annBoolExpTrue :: AnnBoolExp backend scalar
 annBoolExpTrue = gBoolExpTrue
+
+-- | A default representation for a @false@ boolean value.
+annBoolExpFalse :: AnnBoolExp backend scalar
+annBoolExpFalse = BoolOr []
 
 andAnnBoolExps :: AnnBoolExp backend scalar -> AnnBoolExp backend scalar -> AnnBoolExp backend scalar
 andAnnBoolExps l r = BoolAnd [l, r]
@@ -769,15 +748,15 @@ data AnnRedactionExp b v
   | RedactIfFalse (GBoolExp b (AnnBoolExpFld b v))
   deriving stock (Functor, Foldable, Traversable, Generic)
 
-deriving stock instance (Backend b, Show (GBoolExp b (AnnBoolExpFld b v))) => Show (AnnRedactionExp b v)
+deriving stock instance (Backend b, Show v) => Show (AnnRedactionExp b v)
 
-deriving stock instance (Backend b, Eq (GBoolExp b (AnnBoolExpFld b v))) => Eq (AnnRedactionExp b v)
+deriving stock instance (Backend b, Eq v) => Eq (AnnRedactionExp b v)
 
-instance (Backend b, Hashable (GBoolExp b (AnnBoolExpFld b v))) => Hashable (AnnRedactionExp b v)
+instance (Backend b, Hashable v) => Hashable (AnnRedactionExp b v)
 
-instance (Backend b, NFData (GBoolExp b (AnnBoolExpFld b v))) => NFData (AnnRedactionExp b v)
+instance (Backend b, NFData v) => NFData (AnnRedactionExp b v)
 
-instance (Backend b, ToJSON (GBoolExp b (AnnBoolExpFld b v))) => ToJSON (AnnRedactionExp b v) where
+instance (Backend b, ToJSON v) => ToJSON (AnnRedactionExp b v) where
   toJSON = \case
     NoRedaction -> Null
     RedactIfFalse boolExp -> toJSON boolExp

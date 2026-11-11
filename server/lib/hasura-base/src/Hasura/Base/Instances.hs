@@ -10,20 +10,17 @@ import Control.Monad.Fail
 import Control.Monad.Fix
 import Data.Aeson qualified as J
 import Data.ByteString (ByteString)
-import Data.Fixed (Fixed (..))
 import Data.OpenApi.Declare as D
 import Data.Text qualified as T
 import Data.Text.Encoding (decodeUtf8With, encodeUtf8)
 import Data.Text.Encoding.Error (lenientDecode)
 import Data.Text.Extended (ToTxt (toTxt))
-import Data.Time (NominalDiffTime)
 import Data.URL.Template qualified as UT
 import Database.ODBC.SQLServer qualified as ODBC
 import Database.PG.Query qualified as PG
 import Hasura.Prelude
 import Kriti qualified
 import Kriti.Parser qualified as Kriti
-import Language.Haskell.TH.Lift qualified as TH (deriveLift)
 import Language.Haskell.TH.Syntax qualified as TH
 import System.Cron.Parser qualified as C
 import System.Cron.Types qualified as C
@@ -81,17 +78,11 @@ deriving instance TH.Lift TDFA.Pattern
 
 deriving instance TH.Lift TDFA.PatternSet
 
-deriving instance TH.Lift (Fixed a)
-
 deriving instance TH.Lift TDFA.PatternSetCharacterClass
 
 deriving instance TH.Lift TDFA.PatternSetCollatingElement
 
 deriving instance TH.Lift TDFA.PatternSetEquivalenceClass
-
-$(TH.deriveLift ''DiffTime)
-
-$(TH.deriveLift ''NominalDiffTime)
 
 deriving instance TH.Lift Milliseconds
 

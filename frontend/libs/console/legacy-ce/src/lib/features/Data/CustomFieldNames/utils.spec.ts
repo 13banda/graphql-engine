@@ -8,17 +8,18 @@ import { CustomFieldNamesFormVals } from './types';
 
 describe('getTrackTableType', () => {
   it.each`
-    driver        | expected
-    ${'postgres'} | ${'pg_track_table'}
-    ${'mssql'}    | ${'mssql_track_table'}
-    ${'mysql'}    | ${'mysql_track_table'}
-    ${'citus'}    | ${'citus_track_table'}
-    ${'bigquery'} | ${'bigquery_track_table'}
+    driver         | expected
+    ${'postgres'}  | ${'pg_track_table'}
+    ${'mssql'}     | ${'mssql_track_table'}
+    ${'mysql'}     | ${'mysql_track_table'}
+    ${'citus'}     | ${'citus_track_table'}
+    ${'cockroach'} | ${'cockroach_track_table'}
+    ${'bigquery'}  | ${'bigquery_track_table'}
   `(
     'Given a $driver driver, then returns $expected',
     ({ driver, expected }) => {
       expect(getTrackTableType(driver)).toBe(expected);
-    }
+    },
   );
 });
 
@@ -38,9 +39,9 @@ describe('getTableObjectType', () => {
           driver,
           schema,
           tableName,
-        })
+        }),
       ).toEqual(expected);
-    }
+    },
   );
 });
 

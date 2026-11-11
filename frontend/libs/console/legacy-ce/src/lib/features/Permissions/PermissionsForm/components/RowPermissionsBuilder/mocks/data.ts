@@ -1,6 +1,6 @@
 import { buildClientSchema, IntrospectionQuery } from 'graphql';
 
-export const results = {
+const results = {
   data: {
     __schema: {
       queryType: {
@@ -8777,5 +8777,5 @@ export const results = {
 };
 
 export const schema = buildClientSchema(
-  results.data as unknown as IntrospectionQuery
+  results.data as unknown as IntrospectionQuery,
 );

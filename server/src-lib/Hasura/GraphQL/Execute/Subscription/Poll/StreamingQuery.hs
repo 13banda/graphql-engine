@@ -18,6 +18,7 @@ import Data.List.Split (chunksOf)
 import Data.Monoid (Endo (..), Sum (..))
 import Data.Text.Extended
 import GHC.AssertNF.CPP
+import Hasura.Authentication.Role (RoleName)
 import Hasura.Base.Error
 import Hasura.GraphQL.Execute.Backend
 import Hasura.GraphQL.Execute.Subscription.Options
@@ -37,7 +38,6 @@ import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendTag (backendTag, reify)
 import Hasura.RQL.Types.BackendType (BackendType (..), PostgresKind (Vanilla))
 import Hasura.RQL.Types.Common (SourceName)
-import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.RQL.Types.Subscription (SubscriptionType (..))
 import Hasura.SQL.Value (TxtEncodedVal (..))
 import Hasura.Server.Logging (ModelInfo (..), ModelInfoLog (..))
@@ -180,6 +180,11 @@ pushResultToCohort ::
   GQResult BS.ByteString ->
   Maybe ResponseHash ->
   SubscriptionMetadata ->
+  -- | the cursor value to store for the next poll
+  CursorVariableValues ->
+  -- | the cursor value in effect just before this poll, i.e. what a client
+  -- would need to pass as this batch's cursor's @initial_value@ to refetch
+  -- it -- reported to the client if this batch can't be delivered
   CursorVariableValues ->
   -- | Root field name
   G.Name ->
@@ -187,7 +192,7 @@ pushResultToCohort ::
   -- have this data (this information is exposed by metrics reporting)
   (CohortSnapshot 'Streaming, Cohort 'Streaming) ->
   IO ([SubscriberExecutionDetails], [SubscriberExecutionDetails])
-pushResultToCohort result !respHashM (SubscriptionMetadata dTime) cursorValues rootFieldName (cohortSnapshot, cohort) = do
+pushResultToCohort result !respHashM (SubscriptionMetadata dTime) cursorValues prevCursorValues rootFieldName (cohortSnapshot, cohort) = do
   prevRespHashM <- STM.readTVarIO respRef
   -- write to the current websockets if needed
   (subscribersToPush, subscribersToIgnore) <-
@@ -231,7 +236,7 @@ pushResultToCohort result !respHashM (SubscriptionMetadata dTime) cursorValues r
 
     C.CohortSnapshot _ respRef curSinks newSinks = cohortSnapshot
 
-    response = result <&> \payload -> SubscriptionResponse payload dTime
+    response = result <&> \payload -> SubscriptionResponse payload dTime (Just prevCursorValues)
 
     pushResultToSubscribers subscribers =
       unless isResponseEmpty
@@ -326,14 +331,14 @@ pollStreamingQuery pollerId pollerResponseState streamingQueryOpts (sourceName, 
       (pushTime, cohortsExecutionDetails) <- withElapsedTime
         $ A.forConcurrently operations
         $ \(res, cohortId, respData, latestCursorValueMaybe, (snapshot, cohort)) -> do
-          let latestCursorValue@(CursorVariableValues updatedCursorVarVal) =
-                let prevCursorVariableValue = CursorVariableValues $ C._unValidatedVariables $ C._cvCursorVariables $ C._csVariables snapshot
-                 in case latestCursorValueMaybe of
-                      Nothing -> prevCursorVariableValue -- Nothing indicates there was an error when the query was polled
-                      Just currentPollCursorValue -> mergeOldAndNewCursorValues prevCursorVariableValue currentPollCursorValue
+          let prevCursorVariableValue = CursorVariableValues $ C._unValidatedVariables $ C._cvCursorVariables $ C._csVariables snapshot
+              latestCursorValue@(CursorVariableValues updatedCursorVarVal) =
+                case latestCursorValueMaybe of
+                  Nothing -> prevCursorVariableValue -- Nothing indicates there was an error when the query was polled
+                  Just currentPollCursorValue -> mergeOldAndNewCursorValues prevCursorVariableValue currentPollCursorValue
           (pushedSubscribers, ignoredSubscribers) <-
             -- Push the result to the subscribers present in the cohorts
-            pushResultToCohort res (fst <$> respData) subscriptionMeta latestCursorValue rootFieldName (snapshot, cohort)
+            pushResultToCohort res (fst <$> respData) subscriptionMeta latestCursorValue prevCursorVariableValue rootFieldName (snapshot, cohort)
           let currentCohortKey = C._csVariables snapshot
               updatedCohortKey = modifyCursorCohortVariables (mkUnsafeValidateVariables updatedCursorVarVal) $ C._csVariables snapshot
               snapshottedNewSubs = C._csNewSubscribers snapshot
@@ -515,7 +520,7 @@ pollStreamingQuery pollerId pollerResponseState streamingQueryOpts (sourceName, 
 
     getCohortOperations cohorts = \case
       Left e ->
-        let resp = throwError $ GQExecError [encodeGQLErr False e]
+        let resp = throwError $ GQExecError [encodeGQLErr HideInternalErrors e]
          in [(resp, cohortId, Nothing, Nothing, snapshot) | (cohortId, snapshot) <- cohorts]
       Right responses -> do
         let cohortSnapshotMap = HashMap.fromList cohorts

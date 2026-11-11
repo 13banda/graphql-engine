@@ -1,5 +1,4 @@
-import * as React from 'react';
-import { useQuery } from 'react-query';
+import { useQuery } from '@tanstack/react-query';
 import { schemaRegsitryControlPlaneClient } from '../utils';
 import { FETCH_URL_REGISTRY_SCHEMA_QUERY } from '../queries';
 import {
@@ -35,7 +34,7 @@ export const useGetURLSchema = (schemaId: string): FetchSchemaResponse => {
     queryKey: FETCH_URL_REGISTRY_SCHEMA_QUERY_NAME,
     queryFn: () => fetchRegistrySchemaQueryFn(schemaId),
     refetchOnMount: 'always',
-    refetchOnWindowFocus: true,
+    refetchOnWindowFocus: false,
   });
   if (isLoading) {
     return {

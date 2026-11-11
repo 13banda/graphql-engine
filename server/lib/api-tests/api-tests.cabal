@@ -9,6 +9,9 @@ common common-all
   ghc-options:
     -- Taken from https://medium.com/mercury-bank/enable-all-the-warnings-a0517bc081c3
     -Weverything
+    -Wno-missing-role-annotations
+    -Wno-term-variable-capture
+    -Wno-missing-poly-kind-signatures
     -Wno-missing-exported-signatures
     -Wno-missed-specialisations
     -Wno-missing-import-lists
@@ -74,6 +77,7 @@ library
     , lens-aeson
     , managed
     , morpheus-graphql
+    , morpheus-graphql-server
     , pg-client
     , postgres-options
     , postgresql-simple
@@ -131,6 +135,7 @@ library
     Test.DataConnector.MockAgent.OrderBySpec
     Test.DataConnector.MockAgent.QueryRelationshipsSpec
     Test.DataConnector.MockAgent.RemoteRelationshipsSpec
+    Test.DataConnector.MockAgent.RemoteSourcePermissionPredicateSpec
     Test.DataConnector.MockAgent.TestHelpers
     Test.DataConnector.MockAgent.TransformedConfigurationSpec
     Test.DataConnector.MockAgent.UpdateMutationsSpec
@@ -158,11 +163,12 @@ library
     Test.EventTriggers.MSSQL.EventTriggersNameQuotingSpec
     Test.EventTriggers.MSSQL.EventTriggersUniqueNameSpec
     Test.EventTriggers.MSSQL.EventTriggersUntrackTableCleanupSpec
+    Test.EventTriggers.PG.EventTriggersClearMetadataSpec
     Test.EventTriggers.PG.EventTriggersExtensionSchemaSpec
     Test.EventTriggers.PG.EventTriggersForReplicationSpec
+    Test.EventTriggers.PG.EventTriggersMoveTableSpec
     Test.EventTriggers.PG.EventTriggersRecreationSpec
     Test.EventTriggers.PG.EventTriggersReplaceMetadataCleanupSpec
-    Test.EventTriggers.PG.EventTriggersClearMetadataSpec
     Test.EventTriggers.PG.EventTriggersRunSQLSpec
     Test.EventTriggers.PG.EventTriggersUniqueNameSpec
     Test.EventTriggers.PG.EventTriggersUntrackTableCleanupSpec
@@ -228,6 +234,7 @@ library
     Test.Regression.ObjectRelationshipsLimit7936Spec
     Test.Regression.OptimizePermissionFiltersSpec
     Test.Regression.RemoteRelationshipStringifyNum8387Spec
+    Test.Regression.RemoteSchemaConflictingTypesSpec
     Test.Regression.RootExistElementAliasing9457Spec
     Test.Regression.SqlServerIdentifierQuotingSpec
     Test.Regression.SqlServerRemoteRelationshipRhs8712Spec
@@ -290,6 +297,7 @@ library feature-matrix
   build-depends:
     , aeson
     , attoparsec
+    , attoparsec-aeson
     , base
     , bytestring
     , containers

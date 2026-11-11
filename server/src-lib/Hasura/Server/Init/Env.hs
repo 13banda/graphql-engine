@@ -30,16 +30,17 @@ import Data.Text qualified as Text
 import Data.Time qualified as Time
 import Data.URL.Template qualified as Template
 import Database.PG.Query qualified as Query
+import Hasura.Authentication.Role (RoleName, mkRoleName)
 import Hasura.Backends.Postgres.Connection.MonadTx (ExtensionsSchema)
 import Hasura.Backends.Postgres.Connection.MonadTx qualified as MonadTx
 import Hasura.Cache.Bounded qualified as Cache
 import Hasura.GraphQL.Execute.Subscription.Options qualified as Subscription.Options
 import Hasura.Logging qualified as Logging
+import Hasura.NativeQuery.Validation qualified as NativeQuery
 import Hasura.Prelude
 import Hasura.RQL.Types.Metadata (Metadata, MetadataDefaults (..))
 import Hasura.RQL.Types.NamingCase (NamingCase)
 import Hasura.RQL.Types.NamingCase qualified as NamingCase
-import Hasura.RQL.Types.Roles (RoleName, mkRoleName)
 import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.Server.Auth qualified as Auth
 import Hasura.Server.Cors qualified as Cors
@@ -247,6 +248,9 @@ instance FromEnv Metadata where
 instance FromEnv Options.StringifyNumbers where
   fromEnv = fmap (bool Options.Don'tStringifyNumbers Options.StringifyNumbers) . fromEnv @Bool
 
+instance FromEnv NativeQuery.DisableNativeQueryValidation where
+  fromEnv = fmap (bool NativeQuery.AlwaysValidateNativeQueries NativeQuery.NeverValidateNativeQueries) . fromEnv @Bool
+
 instance FromEnv Options.RemoteSchemaPermissions where
   fromEnv = fmap (bool Options.DisableRemoteSchemaPermissions Options.EnableRemoteSchemaPermissions) . fromEnv @Bool
 
@@ -265,8 +269,17 @@ instance FromEnv Options.InferFunctionPermissions where
 instance FromEnv (Server.Types.MaintenanceMode ()) where
   fromEnv = fmap (bool Server.Types.MaintenanceModeDisabled (Server.Types.MaintenanceModeEnabled ())) . fromEnv @Bool
 
+instance FromEnv Server.Types.EventingMode where
+  fromEnv = fmap (bool Server.Types.EventingEnabled Server.Types.EventingDisabled) . fromEnv @Bool
+
+instance FromEnv Server.Types.EventProcessingMode where
+  fromEnv = fmap (bool Server.Types.EventProcessingEnabled Server.Types.EventProcessingDisabled) . fromEnv @Bool
+
 instance FromEnv Server.Logging.MetadataQueryLoggingMode where
   fromEnv = fmap (bool Server.Logging.MetadataQueryLoggingDisabled Server.Logging.MetadataQueryLoggingEnabled) . fromEnv @Bool
+
+instance FromEnv Server.Logging.HttpLogQueryOnlyOnError where
+  fromEnv = fmap (bool Server.Logging.HttpLogQueryOnlyOnErrorDisabled Server.Logging.HttpLogQueryOnlyOnErrorEnabled) . fromEnv @Bool
 
 instance FromEnv Query.TxIsolation where
   fromEnv = Utils.readIsoLevel
@@ -344,6 +357,9 @@ instance FromEnv [Auth.JWTConfig] where
 instance (Logging.EnabledLogTypes impl) => FromEnv (HashSet (Logging.EngineLogType impl)) where
   fromEnv = fmap HashSet.fromList . Logging.parseEnabledLogTypes
 
+instance FromEnv (HashSet Text) where
+  fromEnv = Right . HashSet.fromList . filter (not . Text.null) . map Text.strip . Text.splitOn "," . Text.pack
+
 instance FromEnv Logging.LogLevel where
   fromEnv s = case Text.toLower $ Text.strip $ Text.pack s of
     "debug" -> Right Logging.LevelDebug
@@ -385,6 +401,15 @@ instance FromEnv Server.Types.CloseWebsocketsOnMetadataChangeStatus where
 instance FromEnv Server.Types.TriggersErrorLogLevelStatus where
   fromEnv = fmap (bool Server.Types.TriggersErrorLogLevelDisabled Server.Types.TriggersErrorLogLevelEnabled) . fromEnv @Bool
 
+instance FromEnv Server.Types.RedactEventTriggerLogsStatus where
+  fromEnv = fmap (bool Server.Types.RedactEventTriggerLogsDisabled Server.Types.RedactEventTriggerLogsEnabled) . fromEnv @Bool
+
+instance FromEnv Server.Types.RedactScheduledTriggerLogsStatus where
+  fromEnv = fmap (bool Server.Types.RedactScheduledTriggerLogsDisabled Server.Types.RedactScheduledTriggerLogsEnabled) . fromEnv @Bool
+
+instance FromEnv Server.Types.RedactActionHandlerLogsStatus where
+  fromEnv = fmap (bool Server.Types.RedactActionHandlerLogsDisabled Server.Types.RedactActionHandlerLogsEnabled) . fromEnv @Bool
+
 instance FromEnv Server.Types.PersistedQueriesState where
   fromEnv = fmap (bool Server.Types.PersistedQueriesDisabled Server.Types.PersistedQueriesEnabled) . fromEnv @Bool
 
@@ -393,3 +418,6 @@ instance FromEnv Server.Types.RemoteSchemaResponsePriority where
 
 instance FromEnv Server.Types.HeaderPrecedence where
   fromEnv = fmap (bool Server.Types.ClientHeadersFirst Server.Types.ConfiguredHeadersFirst) . fromEnv @Bool
+
+instance FromEnv Server.Types.TraceQueryStatus where
+  fromEnv = fmap (bool Server.Types.TraceQueryDisabled Server.Types.TraceQueryEnabled) . fromEnv @Bool

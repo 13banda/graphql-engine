@@ -5,6 +5,7 @@ module Hasura.Base.Error
   ( Code (..),
     QErr (..),
     QErrExtra (..),
+    IncludeInternalErrors (..),
     overrideQErrStatus,
     prefixQErr,
     showQErr,
@@ -227,11 +228,16 @@ prefixQErr prefix err = err {qeError = prefix <> qeError err}
 showQErr :: QErr -> Text
 showQErr = TL.toStrict . TL.decodeUtf8 . encode
 
-encodeGQLErr :: Bool -> QErr -> Encoding
+data IncludeInternalErrors = IncludeInternalErrors | HideInternalErrors
+  deriving (Eq, Ord, Show)
+
+encodeGQLErr :: IncludeInternalErrors -> QErr -> Encoding
 encodeGQLErr includeInternal (QErr jPath _ msg code maybeExtra) =
   pairs (("message" .= msg) <> (J.pair "extensions" extnsObj))
   where
-    appendIf cond a b = if cond then a <> b else a
+    appendInternal a b = case includeInternal of
+      IncludeInternalErrors -> a <> b
+      HideInternalErrors -> a
 
     extnsObj = case maybeExtra of
       Nothing -> pairs codeAndPath
@@ -240,15 +246,15 @@ encodeGQLErr includeInternal (QErr jPath _ msg code maybeExtra) =
       -- contains a `code` field:
       Just (ExtraExtensions v) -> toEncoding v
       Just (ExtraInternal v) ->
-        pairs $ appendIf includeInternal codeAndPath ("internal" .= v)
+        pairs $ appendInternal codeAndPath ("internal" .= v)
     codeAndPath =
       ("path" .= encodeJSONPath jPath)
         <> ("code" .= code)
 
 -- whether internal should be included or not
-encodeQErr :: Bool -> QErr -> Encoding
-encodeQErr True = toEncoding
-encodeQErr False = toEncoding . removeInternalErr
+encodeQErr :: IncludeInternalErrors -> QErr -> Encoding
+encodeQErr IncludeInternalErrors = toEncoding
+encodeQErr HideInternalErrors = toEncoding . removeInternalErr
   where
     removeInternalErr :: QErr -> QErr
     removeInternalErr err = err {qeInternal = Nothing}
@@ -366,21 +372,24 @@ liftTxtMod500 :: (Text -> Text) -> QErr -> QErr
 liftTxtMod500 f (QErr path _ s c i) = QErr path HTTP.status500 (f s) c i
 
 withPathE :: (ArrowError QErr arr) => arr (e, s) a -> arr (e, (JSONPathElement, s)) a
-withPathE f = proc (e, (pe, s)) -> (| mapErrorA ((e, s) >- f) |) (injectPrefix pe)
-  where
-    injectPrefix pe (QErr path st msg code i) = QErr (pe : path) st msg code i
+withPathE f = proc (e, (pe, s)) -> (| mapErrorA ((e, s) >- f) |) (prependPath pe)
 
 withPathKA :: (ArrowError QErr arr) => arr (e, s) a -> arr (e, (Text, s)) a
 withPathKA f = second (first $ arr (Key . K.fromText)) >>> withPathE f
 
 withPathK :: (QErrM m) => Text -> m a -> m a
-withPathK a = runKleisli proc m -> (| withPathKA (m >- bindA) |) a
+withPathK a = modifyQErr (prependPath (Key (K.fromText a)))
+{-# INLINE withPathK #-}
+
+prependPath :: JSONPathElement -> QErr -> QErr
+prependPath pe (QErr path st msg code i) = QErr (pe : path) st msg code i
 
 withPathIA :: (ArrowError QErr arr) => arr (e, s) a -> arr (e, (Int, s)) a
 withPathIA f = second (first $ arr Index) >>> withPathE f
 
 withPathI :: (QErrM m) => Int -> m a -> m a
-withPathI a = runKleisli proc m -> (| withPathIA (m >- bindA) |) a
+withPathI a = modifyQErr (prependPath (Index a))
+{-# INLINE withPathI #-}
 
 indexedFoldlA' ::
   (ArrowChoice arr, ArrowError QErr arr, Foldable t) =>

@@ -5,22 +5,24 @@ The binaries are built using the [pkg](https://www.npmjs.com/package/pkg) packag
 ```bash
 npm install
 npm run build
-OR 
+OR
 make clean-build
 ```
 
 The binaries will be placed in the `bin` directory at root. Copy the binary to your PATH as `cli-ext`.
 
 Presently, binaries are built for following targets:
-- node12-linux-x64
-- node12-windows-x64
-- node12-macos-x64
-- node12-linux-arm64
-- node16-macos-arm64
+
+- node24.22.1-linux-x64
+- node24.22.1-windows-x64
+- node24.22.1-macos-x64
+- node24.22.1-linux-arm64
+- node24.22.1-macos-arm64
 
 More information on `pkg` and `targets` is available on the [pkg page](https://www.npmjs.com/package/pkg).
 
 If you want to build only a specific binary or one for a different target altogether, you can do so by following the commands below:
+
 ```bash
 npm install -g pkg
 pkg ./build/command.js --output <output-path> -t <node-range>-<platform>-<architecture>
@@ -30,8 +32,50 @@ A supported list and combinations of `node-range`, `platform` and `architecture`
 
 The hasura cli provides a `--cli-ext-path` flag to use a different cli-ext binary.
 
-## API
+## Releasing cli-ext
 
+cli-ext publication uses an already-built pull-request commit, separately from
+an HGE/CLI release:
+
+1. Open a PR with the cli-ext changes and apply `auto-approve-ci` and
+   `ci/build-cli-ext`. Do not apply `auto-update-auto-merge` before the source
+   build: that mode reuses cached binaries. CLI/console dev modes and server-test
+   mode can omit the job, and normal mono CI skip rules still apply.
+2. Wait for a successful, actually executed source build in the mono pipeline's
+   `build-cli-ext` job. Record the exact source commit and producer job; a green
+   cached or skipped job is not sufficient.
+3. Push a new `cli-ext/vX.Y.Z` tag on that exact successfully built commit. The
+   tagged commit must include the release workflow and producer-selection logic
+   described here. The `release cli-ext` GitHub workflow selects the newest
+   **mono** producer status on that SHA; a pending or failed mono build blocks
+   publication, even if an older mono build succeeded. Tag-triggered EE-lite
+   statuses are not release producers. No new source build is requested by the
+   tag itself.
+4. Check the workflow's provenance/checksum verification, macOS arm64 ad-hoc
+   signing, and publication to
+   `gs://graphql-engine-cdn.hasura.io/cli-ext/releases/versioned/vX.Y.Z/`.
+   Missing, expired, cached, or mismatched artifacts fail closed; rebuild the
+   same source commit in mono and rerun the workflow instead of bypassing checks.
+5. In the same PR, update the cached-download version in
+   `.buildkite/scripts/cli/build-cli-ext.sh` and the Go CLI fallback version in
+   `cli/internal/cliext/cli_ext.go`. Leave the release tag on the earlier built
+   commit; then get the pin update reviewed and merged.
+6. Include that pin update in the next relevant HGE/CLI release branch and verify
+   the helper embedded by the released CLI. Publishing a helper does not upgrade
+   existing CLI executables, and `cli-ext/package.json` does not determine the
+   published CDN version.
+
+The Buildkite webhook filters can still start a full EE-lite pipeline for a
+`cli-ext/` tag. This procedure does not require its source build or its HGE
+publication/deployment gates, and does not change those external pipeline filters.
+
+Run the credential-free release-helper regressions with:
+
+```bash
+node --test .github/scripts/cli-ext-*.test.js
+```
+
+## API
 
 ```
 scaffolder sdl to '{ "types": { "enums": [], "scalars": [], "input_objects": [ { "name": "UserInput", "fields": [ { "name": "username", "type": "String", "description": "lalz" }, { "name": "password", "type": "String!", "description": "pass" } ] } ], "objects": [ { "name": "UserInfo", "fields": [ { "name": "accessToken", "type": "String", "description": "lolz" } ] } ] } }'
@@ -65,3 +109,13 @@ Each templater function must return an array of file objects. Something like:
 ```
 
 These files will be generated in the PWD of execution.
+
+## Packaged runtime provenance and release gate
+
+The locked packager is `@yao-pkg/pkg` 6.24.0, which requires `@yao-pkg/pkg-fetch` 3.6.7. The published pkg-fetch 3.6.7 patch manifest maps the pinned Node 24.22.1 targets to its Node 24.22.1 packaging patch. An updated build-host Node does not update the embedded runtime by itself.
+
+Node 24.22.1's official release records the Brotli backport `49dff6f57a` of upstream `0ed4268a4401abcb4472096340477cf4af7d1a2b`. Its embedded Brotli version string remains 1.2.0; that string alone is not a security acceptance check. pkg-fetch's expected SHA-256 for its Linux x64 supplier binary is `c0a4715edd09277f0e66c780dc16eb40be7c14e823e074e0218dd6c27fdac4c3`.
+
+For release validation, use a clean `PKG_CACHE_PATH`, disallow `PKG_NODE_PATH` overrides and locally built/fallback supplier entries, and verify the fetched supplier hash against the locked package. Validate each target independently. Retain the source commit, lockfile, supplier hash and final cli-ext hash, then run benign SDL-to/from and controlled-local-template scaffolding checks on the resulting executable in the final consumer images. A successful roundtrip or exported decoder constant is not a malformed-input regression.
+
+The runtime update does not restrict action-codegen's template execution: its URL and local template paths still execute template JavaScript. Runtime dependency remediation must not be treated as remediation of that separate behavior or as evidence about a reported environment-extraction incident.

@@ -1,5 +1,3 @@
-import { buildClientSchema, GraphQLSchema, IntrospectionQuery } from 'graphql';
-
 export const introspection = {
   data: {
     __schema: {
@@ -3091,7 +3089,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3101,7 +3099,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3111,7 +3109,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3121,7 +3119,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3131,7 +3129,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'number_mysql8_comparison_exp',
+                name: 'number_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3141,7 +3139,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3151,7 +3149,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3161,7 +3159,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3171,7 +3169,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3181,7 +3179,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3191,7 +3189,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3201,7 +3199,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'string_mysql8_comparison_exp',
+                name: 'string_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3211,7 +3209,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'INPUT_OBJECT',
-                name: 'number_mysql8_comparison_exp',
+                name: 'number_mysql_comparison_exp',
                 ofType: null,
               },
               defaultValue: null,
@@ -3613,7 +3611,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3623,7 +3621,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3633,7 +3631,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3643,7 +3641,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3653,7 +3651,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3663,7 +3661,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3673,7 +3671,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3683,7 +3681,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3693,7 +3691,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3703,7 +3701,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3713,7 +3711,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3723,7 +3721,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -3733,7 +3731,7 @@ export const introspection = {
               description: null,
               type: {
                 kind: 'ENUM',
-                name: 'mysql8_order_by',
+                name: 'mysql_order_by',
                 ofType: null,
               },
               defaultValue: null,
@@ -10511,7 +10509,7 @@ export const introspection = {
         },
         {
           kind: 'ENUM',
-          name: 'mysql8_order_by',
+          name: 'mysql_order_by',
           description: 'column ordering options',
           fields: null,
           inputFields: null,
@@ -10662,7 +10660,7 @@ export const introspection = {
         },
         {
           kind: 'INPUT_OBJECT',
-          name: 'number_mysql8_comparison_exp',
+          name: 'number_mysql_comparison_exp',
           description:
             'Boolean expression to compare columns of type "number". All fields are combined with logical \'AND\'.',
           fields: null,
@@ -14229,7 +14227,7 @@ export const introspection = {
         },
         {
           kind: 'INPUT_OBJECT',
-          name: 'string_mysql8_comparison_exp',
+          name: 'string_mysql_comparison_exp',
           description:
             'Boolean expression to compare columns of type "string". All fields are combined with logical \'AND\'.',
           fields: null,
@@ -16379,9 +16377,3 @@ export const introspection = {
     },
   },
 };
-
-export const schema = new GraphQLSchema(
-  buildClientSchema(
-    introspection.data as unknown as IntrospectionQuery
-  ).toConfig()
-);

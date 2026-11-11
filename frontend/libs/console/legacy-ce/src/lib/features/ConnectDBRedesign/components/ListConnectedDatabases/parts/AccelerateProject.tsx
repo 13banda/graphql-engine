@@ -1,8 +1,6 @@
-import { Button } from '../../../../../new-components/Button';
+import { Button, IndicatorCard, LearnMoreLink } from '@hasura/shared/ui';
 import { FaRedoAlt, FaExternalLinkAlt } from 'react-icons/fa';
-import { IndicatorCard } from '../../../../../new-components/IndicatorCard';
-import { LearnMoreLink } from '../../../../../new-components/LearnMoreLink';
-import React from 'react';
+import { Flex } from '@radix-ui/themes';
 
 export function AccelerateProject({
   isLoading,
@@ -14,12 +12,12 @@ export function AccelerateProject({
   onUpdateRegionClick: () => void;
 }) {
   return (
-    <div className="mt-xs">
+    <div className="mt-2">
       <IndicatorCard
         status="negative"
         headline="Accelerate your Hasura Project"
       >
-        <div className="flex items-center flex-row">
+        <Flex align="center" direction="row">
           <span>
             Databases marked with “Elevated Latency” indicate that it took us
             over 200 ms for this Hasura project to communicate with your
@@ -32,25 +30,25 @@ export function AccelerateProject({
             where you&apos;ve deployed Hasura.
             <LearnMoreLink href="https://hasura.io/docs/latest/projects/regions/#changing-region-of-an-existing-project" />
           </span>
-          <div className="flex items-center flex-row ml-xs">
+          <Flex align="center" direction="row" className="ml-xs">
             <Button
-              className="mr-xs"
+              className="mr-1"
               onClick={onReCheckClick}
-              isLoading={isLoading}
+              loading={isLoading}
               loadingText="Measuring Latencies..."
-              icon={<FaRedoAlt />}
+              leftIcon={FaRedoAlt}
             >
               Re-check Database Latency
             </Button>
             <Button
-              className="mr-xs"
+              className="mr-1"
               onClick={onUpdateRegionClick}
-              icon={<FaExternalLinkAlt />}
+              leftIcon={FaExternalLinkAlt}
             >
               Update Project Region
             </Button>
-          </div>
-        </div>
+          </Flex>
+        </Flex>
       </IndicatorCard>
     </div>
   );

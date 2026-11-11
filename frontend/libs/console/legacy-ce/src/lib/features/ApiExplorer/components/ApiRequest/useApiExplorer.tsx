@@ -1,0 +1,294 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router';
+import { hasuraToast } from '@hasura/shared/ui';
+import { getGraphQLEndpoint, getHeadersAsJSON } from '../../utils';
+import {
+  getDefaultGraphiqlHeaders,
+  getPersistedGraphiQLHeaders,
+  persistGraphiQLHeaders,
+  persistGraphiQLMode,
+  getGraphiQLQueryFromLocalStorage,
+  createTokenInfo,
+  applyAuthHeaders,
+} from './utils';
+import type { DataHeader, GraphiqlMode } from '@hasura/shared/types';
+import { jwtDecode } from 'jwt-decode';
+import isEqual from 'lodash/isEqual';
+import {
+  getErrorMessage,
+  getLSItem,
+  removeLSItem,
+  request,
+} from '@hasura/shared/utils';
+import { useAuthContext } from '@hasura/shared/context';
+import { LS_KEYS } from '@hasura/shared/types';
+
+type Props = {
+  numberOfTables: number;
+};
+
+const FETCH_REMOTE_FILE_ERROR_MESSAGE = 'Failed to fetch remote query file';
+// when there are no tables and nothing in the localstorage, show the following comment in the graphiQL
+const NO_TABLES_MESSAGE = `# Looks like you do not have any tables.
+  # Click on the "Data" tab on top to create tables
+  # Try out GraphQL queries here after you create tables
+  `;
+const FRESH_GRAPHQL_MSG = '# Try out GraphQL queries here\n';
+
+const createGraphiqlHeader = (): DataHeader => ({
+  key: '',
+  value: '',
+  selected: false,
+  isDisabled: false,
+});
+
+const createAnalyzingTokenState = () => ({
+  isAnalyzing: false,
+  headerRow: -1,
+});
+
+const useApiExplorer = ({ numberOfTables }: Props) => {
+  const { getHeaders } = useAuthContext();
+  const [searchParams] = useSearchParams();
+  // Seed the query synchronously from local storage / table state on mount
+  // (lazy initializer). The one asynchronous source — a remote `query_file` —
+  // is loaded in the mount effect below and starts empty here.
+  const [query, setQuery] = useState(() => {
+    const queryFile = searchParams.get('query_file');
+    if (queryFile) {
+      return '';
+    }
+
+    const localStorageQuery = getGraphiQLQueryFromLocalStorage();
+    if (numberOfTables === 0 && !localStorageQuery) {
+      // FIX ME : this message will be shown, whenever there are no tables tracked and nothing in history (LS),
+      // there could still be a possibility when there are no tables but remote schemas even then this message will be shown only for the first time
+      // after that when the user type something, the LS gets populated and this message will not be shown afterwards
+      return NO_TABLES_MESSAGE;
+    }
+
+    if (localStorageQuery) {
+      return localStorageQuery.includes('do not have')
+        ? FRESH_GRAPHQL_MSG
+        : localStorageQuery;
+    }
+
+    return '';
+  });
+  const [mode, setMode] = useState<GraphiqlMode>('graphql');
+  const [headers, setHeaders] = useState<DataHeader[]>([]);
+  const [objectHeaders, setObjectHeaders] = useState<Record<string, string>>(
+    {},
+  );
+  const [headersInitialized, setHeadersInitialized] = useState(false);
+  const [headerFocus, setHeaderFocus] = useState(false);
+  const [analyzingToken, setAnalyzingToken] = useState(
+    createAnalyzingTokenState(),
+  );
+  const [tokenInfo, setTokenInfo] = useState(createTokenInfo());
+  const endpoint = getGraphQLEndpoint(mode);
+
+  const resetAnalyzingToken = () => {
+    setAnalyzingToken(createAnalyzingTokenState());
+  };
+
+  const toggleGraphiqlMode = () => {
+    const newMode = mode === 'relay' ? 'graphql' : 'relay';
+
+    persistGraphiQLMode(newMode);
+    setMode(newMode);
+  };
+
+  const setAndPersistHeaders = (newHeaders: DataHeader[]) => {
+    setHeaders(newHeaders);
+    persistGraphiQLHeaders(newHeaders);
+  };
+
+  const removeRequestHeader = (index: number) => {
+    const newHeaders = headers.filter((_, i) => i !== index);
+    setAndPersistHeaders(newHeaders);
+    diffAndSetObjectHeaders(newHeaders);
+  };
+
+  const changeRequestHeader = (header: DataHeader, index: number) => {
+    const newHeaders =
+      headers.length <= index
+        ? [...headers, header]
+        : headers.map((h, i) => (i === index ? header : h));
+    setAndPersistHeaders(newHeaders);
+
+    // Key/value edits are applied on blur (handleHeaderUnfocus), but toggling
+    // the checkbox has no blur, so apply it immediately. A new headers object
+    // rebuilds GraphiQL's fetcher, which re-runs schema introspection.
+    if (headers[index]?.selected !== header.selected) {
+      diffAndSetObjectHeaders(newHeaders);
+    }
+
+    if (index === newHeaders.length - 1 && header.key) {
+      // Add a new empty header.
+      setHeaders([...newHeaders, createGraphiqlHeader()]);
+    }
+  };
+
+  const analyzeBearerToken = (
+    token: string | null | undefined,
+    dataHeaderIndex: number,
+  ) => {
+    if (!token) {
+      return;
+    }
+
+    setAnalyzingToken({
+      isAnalyzing: true,
+      headerRow: dataHeaderIndex,
+    });
+
+    try {
+      const payload = jwtDecode(token);
+      const header = jwtDecode(token, { header: true });
+      setTokenInfo({
+        header,
+        payload,
+      });
+    } catch (_) {
+      const message =
+        'This JWT seems to be invalid. Please check the token value and try again!';
+      setTokenInfo({
+        header: null,
+        payload: null,
+        error: message,
+      });
+    }
+  };
+
+  // Mount-only initialization. `query` is seeded synchronously by the lazy
+  // useState initializer above; this effect handles only the asynchronous work
+  // (loading a remote `query_file` and the auth headers) plus a one-time LS
+  // cleanup. `getHeaders`/`searchParams` can change identity on later renders,
+  // so we capture the mount-render values in a ref and run the init exactly once
+  // instead of listing them as effect dependencies (which would re-fetch on
+  // unrelated re-renders).
+  const initRef = useRef({ getHeaders, searchParams });
+
+  useEffect(() => {
+    const { getHeaders, searchParams } = initRef.current;
+
+    const queryFile = searchParams.get('query_file');
+    if (queryFile) {
+      request(queryFile)
+        .then((result) => result.text())
+        .then((query) => {
+          if (query) {
+            setQuery(query);
+            return;
+          }
+
+          return hasuraToast({
+            type: 'warning',
+            title: FETCH_REMOTE_FILE_ERROR_MESSAGE,
+            message: 'The content of remote query file is empty',
+          });
+        })
+        .catch((err) => {
+          return hasuraToast({
+            type: 'warning',
+            title: FETCH_REMOTE_FILE_ERROR_MESSAGE,
+            message: getErrorMessage(err),
+          });
+        });
+    }
+
+    const graphqlQueryInLS = getLSItem(LS_KEYS.graphiqlQuery);
+    if (graphqlQueryInLS && graphqlQueryInLS.indexOf('do not have') !== -1) {
+      removeLSItem(LS_KEYS.graphiqlQuery);
+    }
+
+    getHeaders().then((authHeaders) => {
+      const persistHeaders = getPersistedGraphiQLHeaders(authHeaders);
+
+      const graphiqlHeaders = [
+        ...(persistHeaders?.length
+          ? persistHeaders
+          : getDefaultGraphiqlHeaders()),
+      ];
+
+      setObjectHeaders(getHeadersAsJSON(graphiqlHeaders));
+      // add an empty placeholder header
+      graphiqlHeaders.push({
+        key: '',
+        value: '',
+        selected: true,
+        isDisabled: false,
+      });
+
+      // persist headers to local storage
+      setHeaders(graphiqlHeaders);
+      setHeadersInitialized(true);
+    });
+  }, []);
+
+  // the auth header refresh runs from a timer, so read the latest headers from a ref
+  // to avoid overwriting edits made after the timer was scheduled.
+  const headersRef = useRef(headers);
+  useEffect(() => {
+    headersRef.current = headers;
+  }, [headers]);
+
+  // write refreshed auth header values (e.g. a renewed SSO token) into the header rows
+  const updateAuthHeaders = useCallback(
+    (authHeaders: Record<string, string>) => {
+      const newHeaders = applyAuthHeaders(headersRef.current, authHeaders);
+      if (!newHeaders) {
+        return;
+      }
+
+      headersRef.current = newHeaders;
+      setAndPersistHeaders(newHeaders);
+      setObjectHeaders((current) => {
+        const newObjectHeaders = getHeadersAsJSON(newHeaders);
+        return isEqual(newObjectHeaders, current) ? current : newObjectHeaders;
+      });
+    },
+    [],
+  );
+
+  const diffAndSetObjectHeaders = (newHeaders: DataHeader[]) => {
+    const newObjectHeaders = getHeadersAsJSON(newHeaders);
+    if (!isEqual(newObjectHeaders, objectHeaders)) {
+      setObjectHeaders(newObjectHeaders);
+    }
+  };
+
+  const handleHeaderFocus = () => {
+    setHeaderFocus(true);
+  };
+
+  const handleHeaderUnfocus = () => {
+    setHeaderFocus(false);
+    diffAndSetObjectHeaders(headers);
+  };
+
+  return {
+    query,
+    setQuery,
+    toggleGraphiqlMode,
+    endpoint,
+    mode,
+    headers,
+    setHeaders,
+    objectHeaders,
+    headerFocus,
+    handleHeaderFocus,
+    removeRequestHeader,
+    changeRequestHeader,
+    updateAuthHeaders,
+    analyzeBearerToken,
+    analyzingToken,
+    resetAnalyzingToken,
+    tokenInfo,
+    headersInitialized,
+    handleHeaderUnfocus,
+  };
+};
+
+export default useApiExplorer;

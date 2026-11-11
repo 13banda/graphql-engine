@@ -1,5 +1,6 @@
 import { useContext } from 'react';
-import { Button } from '../../../../../../../new-components/Button';
+import { Flex } from '@radix-ui/themes';
+import { Button } from '@hasura/shared/ui';
 import { isComparator } from '../utils/helpers';
 import { ValueInput } from '../ValueInput';
 import { rowPermissionsContext } from '../RowPermissionsProvider';
@@ -24,7 +25,7 @@ export function ArrayEntry({
           !isComparator(k) ? `border-dashed border-l border-gray-200` : ''
         }
       >
-        <div className="p-2 ml-6">
+        <Flex align="center" className="p-2 ml-6">
           {array.map((entry, i) => {
             return (
               <ValueInput
@@ -38,10 +39,11 @@ export function ArrayEntry({
           <Button
             onClick={() => setValue([...path, String(array.length)], '')}
             mode="default"
+            size="sm"
           >
             Add input
           </Button>
-        </div>
+        </Flex>
       </div>
     </ConditionalTableProvider>
   );

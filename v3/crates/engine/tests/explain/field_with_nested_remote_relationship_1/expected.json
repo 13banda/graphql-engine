@@ -9,6 +9,7 @@
           "ndcRequest": {
             "type": "query",
             "value": {
+              "version": "v0.1.x",
               "collection": "Album",
               "query": {
                 "fields": {
@@ -38,14 +39,14 @@
                         }
                       }
                     },
-                    "relationship": "[{\"subgraph\":\"connector_2\",\"name\":\"Album\"},\"Tracks\"]",
+                    "relationship": "connector_2___Album__Tracks",
                     "arguments": {}
                   }
                 }
               },
               "arguments": {},
               "collection_relationships": {
-                "[{\"subgraph\":\"connector_2\",\"name\":\"Album\"},\"Tracks\"]": {
+                "connector_2___Album__Tracks": {
                   "column_mapping": {
                     "AlbumId": "AlbumId"
                   },
@@ -59,6 +60,7 @@
           "ndcExplain": {
             "type": "response",
             "value": {
+              "version": "v0.1.x",
               "details": {
                 "explain": "<redacted>"
               }
@@ -78,6 +80,7 @@
                 "ndcRequest": {
                   "type": "query",
                   "value": {
+                    "version": "v0.1.x",
                     "collection": "Artist",
                     "query": {
                       "fields": {
@@ -97,7 +100,7 @@
                         "operator": "_eq",
                         "value": {
                           "type": "variable",
-                          "name": "$ArtistId"
+                          "name": "$field_ArtistId"
                         }
                       }
                     },
@@ -109,6 +112,7 @@
                 "ndcExplain": {
                   "type": "response",
                   "value": {
+                    "version": "v0.1.x",
                     "details": {
                       "explain": "<redacted>"
                     }
@@ -129,6 +133,7 @@
                     "ndcRequest": {
                       "type": "query",
                       "value": {
+                        "version": "v0.1.x",
                         "collection": "Album",
                         "query": {
                           "fields": {
@@ -148,7 +153,7 @@
                             "operator": "_eq",
                             "value": {
                               "type": "variable",
-                              "name": "$AlbumId"
+                              "name": "$field_AlbumId"
                             }
                           }
                         },
@@ -160,6 +165,7 @@
                     "ndcExplain": {
                       "type": "response",
                       "value": {
+                        "version": "v0.1.x",
                         "details": {
                           "explain": "<redacted>"
                         }

@@ -1,16 +1,14 @@
 import { GraphQLSchema, isInputObjectType } from 'graphql';
-import { columnOperatorsInfo } from '../../../../../../../components/Services/Data/TablePermissions/PermissionBuilder/utils';
-import lowerCase from 'lodash/lowerCase';
+import { columnOperatorsInfo } from './permissionBuilderOperators';
 import { tableContext } from '../TableProvider';
 import { Columns, Comparators, Tables, Operator } from '../types';
-import { areTablesEqual } from '../../../../../../hasura-metadata-api';
-import { Table } from '../../../../../../hasura-metadata-types';
+import { ComputedField, Table } from '@hasura/shared/types';
 import { useContext } from 'react';
 import { rowPermissionsContext } from '../RowPermissionsProvider';
 import { sourceDataTypes, SourceDataTypes } from './sourceDataTypes';
 import { rootTableContext } from '../RootTableProvider';
-import { columnDataType } from '../../../../../../DataSource/utils';
-import { ComputedField } from '../../../../../../../metadata/types';
+import { columnDataType } from '@hasura/metadata/data-source';
+import { findTable } from './tables';
 
 function columnOperators(): Array<Operator> {
   return Object.keys(columnOperatorsInfo).reduce((acc, key) => {
@@ -62,38 +60,51 @@ export function comparatorsFromSchema(schema: GraphQLSchema): Comparators {
   // Get input types ending in `_comparison_exp`
   // E.g: String_BigQuery_comparison_exp, string_SQLite_comparison_exp, String_comparison_exp, etc...
   const inputObjectTypes = Object.values(schema.getTypeMap()).filter(
-    type => isInputObjectType(type) && type.name.endsWith('_comparison_exp')
+    (type) => isInputObjectType(type) && type.name.endsWith('_comparison_exp'),
   );
-  return inputObjectTypes.reduce((acc, inputType) => {
+  return inputObjectTypes.reduce<Record<string, unknown>>((acc, inputType) => {
     if (!isInputObjectType(inputType)) {
       return acc;
     }
     const operators: Operator[] = Object.values(inputType.getFields()).map(
-      field => {
+      (field) => {
         const name = field.name;
-        const operator = allOperators.find(o => o.name === name);
+        const operator = allOperators.find((o) => o.name === name);
         return {
           type: operator?.type || '',
-          name: operator?.name ?? lowerCase(name),
+          name: operator?.name ?? name.toLowerCase(),
           operator: name,
           graphqlType: field.type,
           inputStructure: operator?.inputStructure,
           inputType: operator?.inputType,
         };
-      }
+      },
     );
     const key = inputType.name.replace('_comparison_exp', '');
-    return {
-      ...acc,
-      [key]: {
-        operators: [
-          ...operators,
-          ...columnComparators, // Add column comparators because they are not reflected on the graphql schema
-        ],
-      },
+    // assigned rather than spread, as a schema has many comparison types
+    acc[key] = {
+      operators: [
+        ...operators,
+        ...columnComparators, // Add column comparators because they are not reflected on the graphql schema
+      ],
     };
-  }, {});
+    return acc;
+  }, {}) as Comparators;
 }
+
+// the comparators by lowercase data type, built once per comparators object
+const lowerCaseComparatorsCache = new WeakMap<Comparators, Comparators>();
+
+const getLowerCaseComparators = (comparators: Comparators) => {
+  let lowerCaseComparators = lowerCaseComparatorsCache.get(comparators);
+  if (!lowerCaseComparators) {
+    lowerCaseComparators = Object.fromEntries(
+      Object.entries(comparators).map(([k, v]) => [k.toLowerCase(), v]),
+    );
+    lowerCaseComparatorsCache.set(comparators, lowerCaseComparators);
+  }
+  return lowerCaseComparators;
+};
 
 const commonOperators = [
   '_eq',
@@ -114,6 +125,8 @@ const whitelist: Record<string, string[]> = {
     '_has_key',
     '_has_keys_any',
     '_has_keys_all',
+    '_jsonb_path_exists',
+    '_jsonb_path_match',
   ],
   // JSON does not seem to come with any operators
   // To match the old implementation, which does not provide any operators, we do not whitelist any for now
@@ -134,29 +147,44 @@ const whitelist: Record<string, string[]> = {
 };
 
 type Sources =
-  | 'postgres'
-  | 'bigquery'
-  | 'mssql'
-  | 'citus'
-  | 'cockroach'
-  | 'alloy';
+  'postgres' | 'bigquery' | 'mssql' | 'citus' | 'cockroach' | 'alloy';
 
 export const mapScalarDataType = (
   dataSource: string | undefined,
-  dataType: SourceDataTypes
+  dataType: SourceDataTypes,
 ) => {
   if (!dataSource) return dataType;
   const dataTypes = sourceDataTypes[dataSource as Sources];
   return dataTypes?.[dataType] || dataType;
 };
 
+/**
+ * The comparators the server accepts on a column of a remote database
+ * relationship (`RemoteRelSupportedOp`): column comparators aren't, the
+ * columns being in another source.
+ */
+export const remoteRelationshipOperators = [
+  '_eq',
+  '_neq',
+  '_gt',
+  '_lt',
+  '_gte',
+  '_lte',
+  '_in',
+  '_nin',
+  '_like',
+  '_nlike',
+  '_is_null',
+];
+
 export function useOperators({ path }: { path: string[] }) {
   const { comparators } = useContext(rowPermissionsContext);
   const { tables } = useContext(rootTableContext);
-  const { columns, table, computedFields } = useContext(tableContext);
+  const { columns, table, source, computedFields, isRemote } =
+    useContext(tableContext);
 
   const columnName = path[path.length - 2];
-  const column = columns.find(c => c.name === columnName);
+  const column = columns.find((c) => c.name === columnName);
   let dataType = column?.dataType;
   if (dataType === 'USER-DEFINED') {
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
@@ -170,22 +198,28 @@ export function useOperators({ path }: { path: string[] }) {
     computedFields,
     tables,
     table,
+    source,
   });
-  if (dataType && hasWhitelistedOperators(columnDataType(dataType))) {
-    return operators.filter(o =>
-      whitelist[columnDataType(dataType || '')]?.includes(o.name)
-    );
-  }
-  return operators;
+  const typeOperators =
+    dataType && hasWhitelistedOperators(columnDataType(dataType))
+      ? operators.filter((o) =>
+          whitelist[columnDataType(dataType || '')]?.includes(o.name),
+        )
+      : operators;
+  return isRemote
+    ? typeOperators.filter((o) => remoteRelationshipOperators.includes(o.name))
+    : typeOperators;
 }
 
-export type GetDataTypeOperatorsProps = {
+type GetDataTypeOperatorsProps = {
   comparators: Comparators;
   path: string[];
   columns: Columns;
   computedFields: ComputedField[];
   tables: Tables;
   table: Table;
+  /** the source of the table */
+  source?: string;
 };
 
 export const getDataTypeOperators = ({
@@ -194,28 +228,26 @@ export const getDataTypeOperators = ({
   columns,
   tables,
   table,
+  source,
 }: GetDataTypeOperatorsProps) => {
   const columnName = path[path.length - 2];
-  const column = columns.find(c => c.name === columnName);
-  const dataSourceKind = tables.find(t => areTablesEqual(t.table, table))
-    ?.dataSource?.kind;
+  const column = columns.find((c) => c.name === columnName);
+  const dataSourceKind = findTable(tables, table, source)?.dataSource?.kind;
   // types associated to postgres don't have a suffix on the GraphQL Schema, whereas the other types have dataSource as suffix
   const comparatorSuffix =
     dataSourceKind === 'postgres' ? '' : `_${dataSourceKind}`;
   const comparatorKey = column ? `${column.dataType}${comparatorSuffix}` : '';
   const operators = comparators[comparatorKey]?.operators;
   if (!operators) {
-    const dataSource = tables?.[0]?.dataSource?.name;
+    // the data types are mapped per kind of source
     const dataType = mapScalarDataType(
-      dataSource,
-      column?.dataType as SourceDataTypes
+      dataSourceKind,
+      column?.dataType as SourceDataTypes,
     );
     const fallbackComparatorKey = column
       ? `${dataType}${comparatorSuffix}`
       : '';
-    const lowerCaseComparators = Object.fromEntries(
-      Object.entries(comparators).map(([k, v]) => [k.toLowerCase(), v])
-    );
+    const lowerCaseComparators = getLowerCaseComparators(comparators);
     const backupOperators =
       lowerCaseComparators[fallbackComparatorKey]?.operators;
     return backupOperators || allOperators;

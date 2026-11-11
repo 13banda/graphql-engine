@@ -2,6 +2,7 @@
 -- Definitions for schema building configuration.
 module Hasura.RQL.Types.Schema.Options
   ( SchemaOptions (..),
+    NamingConventionSep2023 (..),
     StringifyNumbers (..),
     DangerouslyCollapseBooleans (..),
     BackwardsCompatibleNullInNonNullableVariables (..),
@@ -15,6 +16,8 @@ module Hasura.RQL.Types.Schema.Options
     BigQueryStringNumericInput (..),
     IncludeGroupByAggregateFields (..),
     UsePostgresArrays (..),
+    NoNullUnboundVariableDefault (..),
+    RemoveEmptySubscriptionResponses (..),
   )
 where
 
@@ -34,8 +37,21 @@ data SchemaOptions = SchemaOptions
     soIncludeStreamFields :: IncludeStreamFields,
     soBigQueryStringNumericInput :: BigQueryStringNumericInput,
     soIncludeGroupByAggregateFields :: IncludeGroupByAggregateFields,
-    soPostgresArrays :: UsePostgresArrays
+    soPostgresArrays :: UsePostgresArrays,
+    soNoNullUnboundVariableDefault :: NoNullUnboundVariableDefault,
+    soRemoveEmptySubscriptionResponses :: RemoveEmptySubscriptionResponses,
+    soNamingConventionSep2023 :: NamingConventionSep2023
   }
+
+-- | Whether the naming-convention changes introduced in September 2023 should
+-- be applied when building the schema. This was previously gated behind the
+-- @naming-convention-sep-2023@ feature flag and is now controlled by the
+-- @HASURA_FF_NAMING_CONVENTION_SEP_2023@ environment variable. It defaults to
+-- disabled to preserve the pre-existing (@fromCustomName@) naming behaviour.
+data NamingConventionSep2023
+  = EnableNamingConventionSep2023
+  | DisableNamingConventionSep2023
+  deriving (Eq, Show)
 
 -- | Should we represent numbers in our responses as numbers, or strings?
 -- Some backends can return numbers that exceed the bounds of JSON's own
@@ -196,3 +212,47 @@ data UsePostgresArrays
   = UsePostgresArrays
   | DontUsePostgresArrays
   deriving (Eq, Show)
+
+-- | The spec says that unbound nullable variables with no defaults should be
+-- "removed" from the query. In other words, if no value for @$var@ is given,
+-- and no default value exists within the query, then @{ foo: $var }@ should be
+-- equivalent to @{}@. Without the flag, @$var@ becomes @null@.
+data NoNullUnboundVariableDefault
+  = DefaultUnboundNullableVariablesToNull
+  | RemoveUnboundNullableVariablesFromTheQuery
+  deriving (Eq, Show)
+
+instance FromJSON NoNullUnboundVariableDefault where
+  parseJSON =
+    withBool "NoNullUnboundVariableDefault"
+      $ pure
+      . \case
+        True -> RemoveUnboundNullableVariablesFromTheQuery
+        False -> DefaultUnboundNullableVariablesToNull
+
+instance ToJSON NoNullUnboundVariableDefault where
+  toJSON = \case
+    RemoveUnboundNullableVariablesFromTheQuery -> Bool True
+    DefaultUnboundNullableVariablesToNull -> Bool False
+
+-- | When we're dealing with many multiplexed streaming subscriptions that
+-- don't update often, network overhead can become very large due to us
+-- returning empty result sets from the database. This option allows the user
+-- to stipulate that empty result sets should not be returned.
+data RemoveEmptySubscriptionResponses
+  = RemoveEmptyResponses
+  | PreserveEmptyResponses
+  deriving (Eq, Show)
+
+instance FromJSON RemoveEmptySubscriptionResponses where
+  parseJSON =
+    withBool "RemoveEmptySubscriptionResponses"
+      $ pure
+      . \case
+        True -> RemoveEmptyResponses
+        False -> PreserveEmptyResponses
+
+instance ToJSON RemoveEmptySubscriptionResponses where
+  toJSON = \case
+    RemoveEmptyResponses -> Bool True
+    PreserveEmptyResponses -> Bool False

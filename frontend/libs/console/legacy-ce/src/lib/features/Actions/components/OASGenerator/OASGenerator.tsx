@@ -1,6 +1,5 @@
-import React from 'react';
 import { GeneratedAction } from './types';
-import { SimpleForm } from '../../../../new-components/Form';
+import { SimpleForm } from '@hasura/shared/ui';
 import { OasGeneratorForm } from './OASGeneratorForm';
 import { formSchema } from './OASGeneratorPage';
 
@@ -13,7 +12,12 @@ export interface OASGeneratorProps {
 export const OASGenerator = (props: OASGeneratorProps) => {
   const { onGenerate, onDelete, disabled } = props;
   return (
-    <SimpleForm onSubmit={() => {}} schema={formSchema}>
+    <SimpleForm
+      onSubmit={() => {
+        /* noop */
+      }}
+      schema={formSchema}
+    >
       <OasGeneratorForm
         onGenerate={onGenerate}
         onDelete={onDelete}

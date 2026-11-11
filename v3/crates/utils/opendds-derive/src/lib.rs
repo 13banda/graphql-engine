@@ -1,6 +1,6 @@
 use proc_macro::{self, TokenStream};
 use quote::quote;
-use syn::{self, parse_macro_input, DeriveInput};
+use syn::{self, DeriveInput, parse_macro_input};
 
 mod container;
 mod enum_derive;
@@ -12,9 +12,7 @@ use crate::container::*;
 #[proc_macro_derive(OpenDd, attributes(opendd))]
 pub fn derive(input_tok: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input_tok as DeriveInput);
-    impl_opendd(&input)
-        .map(TokenStream::from)
-        .unwrap_or_else(TokenStream::from)
+    impl_opendd(&input).map_or_else(TokenStream::from, TokenStream::from)
 }
 
 fn impl_opendd(input: &DeriveInput) -> MacroResult<proc_macro2::TokenStream> {
@@ -27,7 +25,7 @@ fn impl_opendd(input: &DeriveInput) -> MacroResult<proc_macro2::TokenStream> {
         Data::Enum(EnumData::DefaultImpl) => {
             return Ok(quote! {
                 open_dds::impl_OpenDd_default_for!(#name);
-            })
+            });
         }
         Data::Enum(EnumData::Impl(impl_style, enum_variants)) => {
             enum_derive::impl_opendd_enum(impl_style, &enum_variants)
@@ -35,16 +33,16 @@ fn impl_opendd(input: &DeriveInput) -> MacroResult<proc_macro2::TokenStream> {
         Data::Struct(struct_data) => struct_derive::impl_opendd_struct(name, &struct_data),
     };
     let json_schema_metadata = cont.json_schema_metadata;
-    let schema_name = &json_schema_metadata.schema_name.to_string();
+    let schema_name = json_schema_metadata.schema_name.clone();
     let impl_json_schema = helpers::apply_schema_metadata(&json_schema, json_schema_metadata);
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     Ok(quote! {
         impl #impl_generics open_dds::traits::OpenDd for #name #ty_generics #where_clause {
-            fn deserialize(json: serde_json::Value) -> Result<Self, open_dds::traits::OpenDdDeserializeError> {
+            fn deserialize(json: serde_json::Value, path: jsonpath::JSONPath) -> Result<Self, open_dds::traits::OpenDdDeserializeError> {
                 #impl_deserialize
             }
 
-            fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+            fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
                 #impl_json_schema
             }
 

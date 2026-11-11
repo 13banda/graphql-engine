@@ -1,99 +1,141 @@
 import { useState, useContext, useEffect, createContext } from 'react';
-import { Table } from '../../../../../hasura-metadata-types';
+import { ComputedField, Table } from '@hasura/shared/types';
 import { Columns, Relationships, TableContext } from './types';
 import { rootTableContext } from './RootTableProvider';
-import { areTablesEqual } from '../../../../../hasura-metadata-api';
 import { fieldsToColumns } from './utils/nestedObjects';
 import { rowPermissionsContext } from './RowPermissionsProvider';
-import { ComputedField } from '../../../../../../metadata/types';
+import { getTableDisplayName } from '@hasura/shared/utils';
+import { findTable } from './utils/tables';
 
 export const tableContext = createContext<TableContext>({
-  table: {},
-  setTable: () => {},
+  table: [],
+  setTable: () => {
+    /* noop */
+  },
   comparator: undefined,
-  setComparator: () => {},
+  setComparator: () => {
+    /* noop */
+  },
   columns: [],
-  setColumns: () => {},
+  setColumns: () => {
+    /* noop */
+  },
   computedFields: [],
-  setComputedFields: () => {},
+  setComputedFields: () => {
+    /* noop */
+  },
   relationships: [],
-  setRelationships: () => {},
+  setRelationships: () => {
+    /* noop */
+  },
 });
+
+/**
+ * The relationships a permission can use: the server accepts a remote database
+ * relationship to a source of any kind, but only on a single column join.
+ * Remote schema relationships aren't supported.
+ */
+export const isPermissionRelationship = (relationship: Relationships[number]) =>
+  relationship.type === 'localRelationship' ||
+  (relationship.type === 'remoteDatabaseRelationship' &&
+    Object.keys(relationship.definition.mapping).length === 1);
 
 export const TableProvider = ({
   children,
   table: defaultTable,
+  source: sourceProp,
+  isRemote: isRemoteProp,
   objectPath,
 }: {
   children: React.ReactNode;
   table?: Table;
+  /** the source of the table, the one of the closest table by default */
+  source?: string;
+  /** whether a remote database relationship leads to the table, inherited by default */
+  isRemote?: boolean;
   objectPath?: string;
 }) => {
-  const [table, setTableName] = useState<Table>(defaultTable || {});
+  const [table, setTableName] = useState<Table>(defaultTable || ({} as Table));
   const [comparator, setComparator] = useState<string | undefined>();
   const [columns, setColumns] = useState<Columns>([]);
   const [computedFields, setComputedFields] = useState<ComputedField[]>([]);
   const [relationships, setRelationships] = useState<Relationships>([]);
-  const { tables, rootTable } = useContext(rootTableContext);
+  const {
+    tables,
+    tablesKey,
+    rootTable,
+    source: rootSource,
+  } = useContext(rootTableContext);
   const { loadRelationships } = useContext(rowPermissionsContext);
-  const { table: closestTableName } = useContext(tableContext);
-  const closestTable = tables.find(t =>
-    areTablesEqual(t.table, closestTableName)
-  );
+  const {
+    table: closestTableName,
+    source: closestSource,
+    isRemote: closestIsRemote,
+  } = useContext(tableContext);
+  const source = sourceProp ?? closestSource ?? rootSource;
+  const isRemote = isRemoteProp ?? closestIsRemote;
 
-  const supportedSources = tables
-    .map(i => i.dataSource)
-    .filter(s => s?.kind === 'postgres')
-    .map(s => s?.name);
+  //  Stringify values to get a stable key for the derived-state sync below
+  const stringifiedTable = getTableDisplayName(table);
+  const syncKey = `${stringifiedTable}|${source ?? ''}|${tablesKey}|${
+    objectPath ?? ''
+  }|${closestTableName ? getTableDisplayName(closestTableName) : ''}|${
+    rootTable?.dataSource?.name ?? ''
+  }`;
 
-  //  Stringify values to get a stable value for useEffect
-  const stringifiedTable = JSON.stringify(table);
-  const stringifiedTables = JSON.stringify(tables);
-
-  useEffect(() => {
-    const foundTable = tables.find(t => areTablesEqual(t.table, table));
+  // Sync the derived columns/computed fields/relationships while rendering when
+  // the relevant inputs change. This is the React "adjusting state during
+  // render" pattern: it avoids the cascading renders of setting this state in an
+  // effect while producing identical output (the setters are idempotent, so
+  // unchanged values bail out). `loadRelationships` is a genuine side effect and
+  // is kept in the effect below.
+  const [prevSyncKey, setPrevSyncKey] = useState<string | null>(null);
+  if (syncKey !== prevSyncKey) {
+    setPrevSyncKey(syncKey);
+    const closestTable = findTable(tables, closestTableName, closestSource);
+    const foundTable = findTable(tables, table, source);
+    let skipObjectPath = false;
     if (foundTable) {
       setColumns(foundTable.columns);
       setComputedFields(foundTable.computedFields);
-      if (foundTable?.dataSource?.name !== rootTable?.dataSource?.name) return;
-      setRelationships(
-        foundTable.relationships.filter(rel => {
-          return (
-            rel.type === 'localRelationship' ||
-            (rel.type !== 'remoteSchemaRelationship' &&
-              supportedSources?.includes(rel.definition.toSource))
-          );
-        })
-      );
-      // Load initial related tables' columns
-      loadRelationships?.(foundTable.relationships);
+      if (foundTable?.dataSource?.name !== rootTable?.dataSource?.name) {
+        skipObjectPath = true;
+      } else {
+        setRelationships(
+          foundTable.relationships.filter(isPermissionRelationship),
+        );
+      }
     }
     // If it's a nested object, set its fields as columns instead of the parent's columns
-    if (objectPath) {
+    if (!skipObjectPath && objectPath) {
       setColumns(
         fieldsToColumns(
-          closestTable?.columns?.find(c => {
+          closestTable?.columns?.find((c) => {
             const objectPathArray = objectPath.split('.');
             const path = objectPathArray[objectPathArray.length - 1];
             return c.name === path;
-          })
-        )
+          }),
+        ),
       );
     }
-  }, [
-    stringifiedTable,
-    stringifiedTables,
-    setColumns,
-    setRelationships,
-    objectPath,
-    loadRelationships,
-    computedFields,
-    setComputedFields,
-  ]);
+  }
+
+  useEffect(() => {
+    const foundTable = findTable(tables, table, source);
+    if (
+      foundTable &&
+      foundTable?.dataSource?.name === rootTable?.dataSource?.name
+    ) {
+      // Load initial related tables' columns
+      loadRelationships?.(foundTable.relationships);
+    }
+  }, [table, source, tables, rootTable?.dataSource?.name, loadRelationships]);
 
   return (
     <tableContext.Provider
       value={{
+        source,
+        isRemote,
         columns,
         setColumns,
         computedFields,

@@ -24,6 +24,7 @@ import Hasura.App.State
   )
 import Hasura.Backends.Postgres.Connection.MonadTx
 import Hasura.Backends.Postgres.Connection.Settings
+import Hasura.CpuDetect qualified as CpuDetect
 import Hasura.GC qualified as GC
 import Hasura.Logging (Hasura, LogLevel (..), defaultEnabledEngineLogTypes)
 import Hasura.Prelude
@@ -101,7 +102,7 @@ runApp env (HGEOptions rci metadataDbUrl hgeCmd) = do
       -- It'd be nice if we didn't have to call lowerManagedT twice here, but
       -- there is a data dependency problem since the call to runAppM below
       -- depends on appCtx.
-      runManagedT (initialiseAppEnv env basicConnectionInfo serveOptions Nothing serverMetrics prometheusMetrics sampleAlways) \(appInit, appEnv) -> do
+      runManagedT (initialiseAppEnv basicConnectionInfo serveOptions Nothing serverMetrics prometheusMetrics sampleAlways) \(appInit, appEnv) -> do
         -- Catches the SIGTERM signal and initiates a graceful shutdown.
         -- Graceful shutdown for regular HTTP requests is already implemented in
         -- Warp, and is triggered by invoking the 'closeSocket' callback.
@@ -111,6 +112,8 @@ runApp env (HGEOptions rci metadataDbUrl hgeCmd) = do
         void $ Signals.installHandler Signals.sigINT (Signals.CatchOnce (shutdownGracefully $ appEnvShutdownLatch appEnv)) Nothing
 
         let Loggers _ logger _ = appEnvLoggers appEnv
+
+        liftIO $ CpuDetect.tryAutoSetNumCapabilities logger
 
         _idleGCThread <-
           C.forkImmortal "ourIdleGC" logger

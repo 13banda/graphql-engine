@@ -24,6 +24,8 @@ import Data.HashSet qualified as Set
 import Data.Sequence qualified as Seq
 import Data.Text qualified as T
 import Data.Text.Extended
+import Hasura.Authentication.Role (RoleName)
+import Hasura.Authentication.Session (fromSessionVariable, isSessionVariable, userIdHeader)
 import Hasura.Base.Error
 import Hasura.LogicalModel.Common (logicalModelFieldsToFieldInfo)
 import Hasura.LogicalModel.Fields (LogicalModelFieldsRM (..))
@@ -39,11 +41,10 @@ import Hasura.RQL.Types.Metadata.Backend
 import Hasura.RQL.Types.Permission
 import Hasura.RQL.Types.Relationships.Local
 import Hasura.RQL.Types.Relationships.Remote (DBJoinField (..), RemoteFieldInfo (..), RemoteFieldInfoRHS (..), RemoteSourceFieldInfo (..))
-import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.RQL.Types.SchemaCache
 import Hasura.RQL.Types.SchemaCacheTypes
 import Hasura.SQL.AnyBackend qualified as AB
-import Hasura.Server.Utils
+import Hasura.Server.Utils (isReqUserId)
 import Hasura.Table.Cache
 
 -- | Intrepet a 'PermColSpec' column specification, which can either refer to a
@@ -224,7 +225,12 @@ annColExp rhsParser rootFieldInfoMap colInfoMap (ColExp fieldName colVal) = do
               )
     FIComputedField computedFieldInfo ->
       AVComputedField <$> buildComputedFieldBooleanExp (BoolExpResolver annBoolExp) rhsParser rootFieldInfoMap colInfoMap computedFieldInfo colVal
-    -- Using remote fields in the boolean expression is not supported.
+    -- Remote (to_source) relationships ARE supported in permission boolean
+    -- expressions, but only as a restricted predicate of the shape
+    -- @{ <rhs_col>: { _eq|_in|... : <session-var-or-literal> } }@ over a
+    -- single-column join (see 'RemoteRelRHSFetchWhereExp'). This is evaluated
+    -- at query time via 'getColVals' (Zendesk #15062). Note: remote SCHEMA
+    -- relationships and multi-column joins are rejected below.
     FIRemoteRelationship (RemoteFieldInfo {..}) -> do
       (lhsFieldName, lhsJoinField) <-
         case (Map.toList _rfiLHS) of
@@ -262,7 +268,7 @@ getDepHeadersFromVal val = case val of
     parseOnlyString v = case v of
       (String t)
         | isSessionVariable t -> [T.toLower t]
-        | isReqUserId t -> [userIdHeader]
+        | isReqUserId t -> [fromSessionVariable userIdHeader]
         | otherwise -> []
       _ -> []
     parseObject o =

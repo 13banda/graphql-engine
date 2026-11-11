@@ -11,9 +11,11 @@ where
 
 import Data.HashMap.Strict qualified as HashMap
 import Data.Text.Extended (ToTxt, toTxt)
+import Hasura.Authentication.User (UserInfo (..))
 import Hasura.Backends.Postgres.SQL.DML qualified as S
 import Hasura.Backends.Postgres.SQL.Types hiding (TableName)
 import Hasura.Backends.Postgres.Types.BoolExp
+import Hasura.Backends.Postgres.Types.Column (unsafePGColumnToBackend)
 import Hasura.Backends.Postgres.Types.Function (onArgumentExp)
 import Hasura.Base.Error (QErr)
 import Hasura.Function.Cache
@@ -26,7 +28,6 @@ import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Column
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Relationships.Local
-import Hasura.RQL.Types.Session (UserInfo (..))
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.SQL.Types
 import Hasura.Table.Cache ()
@@ -170,18 +171,26 @@ translateBoolExp userInfo = \case
           -- Convert the where clause on scalar computed field
           bExps <- traverse (lift . mkFieldCompExp rootReference currTableReference redactionExp (LComputedField function sessionArgPresence) userInfo) opExps
           pure $ sqlAnd bExps
-        CFBETable _ be -> do
-          -- Convert the where clause on table computed field
+        -- NOTE: this mostly mirrors the AVRelationship case above
+        CFBETable _ RelationshipFilters { rfTargetTablePermissions, rfFilter } -> do
+          -- Convert the where clause on table computed field, mirroring AVRelationship:
+          -- AND the returning table's row permission filter into the EXISTS subquery.
           BoolExpCtx {currTableReference} <- ask
           functionAlias <- S.toTableAlias <$> freshIdentifier function
           let functionIdentifier = S.tableAliasToIdentifier functionAlias
+              functionQual = S.QualifiedIdentifier functionIdentifier Nothing
               functionExp =
                 mkComputedFieldFunctionExp currTableReference function sessionArgPresence
                   $ Just
                   $ functionAlias
-          S.mkExists (S.FIFunc functionExp) <$> withCurrentTable (S.QualifiedIdentifier functionIdentifier Nothing) (translateBoolExp userInfo be)
+          permBoolExp <-
+            local
+              (\e -> e {currTableReference = functionQual, rootReference = functionQual})
+              (translateBoolExp userInfo rfTargetTablePermissions)
+          annBoolExp <- withCurrentTable functionQual (translateBoolExp userInfo rfFilter)
+          pure $ S.mkExists (S.FIFunc functionExp) (S.BEBin S.AndOp permBoolExp annBoolExp)
     AVAggregationPredicates aggPreds -> translateAVAggregationPredicates userInfo aggPreds
-    AVRemoteRelationship (RemoteRelPermBoolExp _rawRelBoolExp (lhsCol, _rawRelBoolExplhsColType) rhsFetchInfo) -> do
+    AVRemoteRelationship (RemoteRelPermBoolExp _rawRelBoolExp (lhsCol, lhsColType) rhsFetchInfo) -> do
       {-
         The permission is the following:
 
@@ -203,7 +212,16 @@ translateBoolExp userInfo = \case
           let colFieldName = rrrfweColumnFieldName filterExp
               colFieldBoolExpressions = rrrfweBoolExp filterExp
           result <- lift $ getColVals @b (_uiSession userInfo) sourceName sourceConfig tableName (colType, col) (colFieldName, colFieldBoolExpressions)
-          let typeAnn = S.mkTypeAnn (CollectableTypeScalar (textToPGScalarType (toTxt colType)))
+          -- The values are compared against the LHS (origin) Postgres column via the
+          -- generated `<lhsCol> IN (...)`, so annotate the literals with the LHS
+          -- column's Postgres type. Using the RHS column's scalar type here breaks
+          -- cross-backend remote relationships (e.g. Postgres -> Data Connector),
+          -- where that scalar type name (e.g. "number") is not a valid Postgres type
+          -- and `textToPGScalarType` yields `PGUnknown`, producing invalid casts
+          -- like `'1'::number` (Zendesk #15062). The LHS column is always Postgres
+          -- here, so its type is always valid, and for same-source (PG -> PG) remote
+          -- relationships it matches the column the values are actually compared to.
+          let typeAnn = S.mkTypeAnn (CollectableTypeScalar (unsafePGColumnToBackend lhsColType))
           if null result
             then pure $ [S.SENull]
             else pure (fmap ((`S.SETyAnn` typeAnn) . S.SELit) result)
@@ -477,6 +495,8 @@ mkFieldCompExp rootReference currTableReference lhsRedactionExp lhsField userInf
         AHasKey val -> S.BECompare S.SHasKey lhs val
         AHasKeysAny val -> S.BECompare S.SHasKeysAny lhs val
         AHasKeysAll val -> S.BECompare S.SHasKeysAll lhs val
+        AJsonbPathExists val -> S.BECompare S.SJsonbPathExists lhs (S.SETyAnn val (S.TypeAnn "jsonpath"))
+        AJsonbPathMatch val -> S.BECompare S.SJsonbPathMatch lhs (S.SETyAnn val (S.TypeAnn "jsonpath"))
         AAncestor val -> S.BECompare S.SContains lhs val
         AAncestorAny val -> S.BECompare S.SContains lhs val
         ADescendant val -> S.BECompare S.SContainedIn lhs val

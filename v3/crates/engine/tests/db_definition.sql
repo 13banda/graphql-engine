@@ -17,6 +17,18 @@ COPY public.article (id, title, author_id) FROM stdin;
 5	Generalizing monads to arrows	2
 \.
 
+CREATE OR REPLACE FUNCTION public.search_articles(search_term text)
+RETURNS SETOF public.article
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT * FROM public.article
+    WHERE title ILIKE '%' || search_term || '%';
+END;
+$$;
+
 CREATE TABLE author (
   id integer NOT NULL,
   first_name text,
@@ -95,9 +107,91 @@ SELECT pg_catalog.setval('public.movie_analytics_id_seq', 3, true);
 
 ALTER SEQUENCE public.movie_analytics_id_seq OWNED BY public.movie_analytics.id;
 
-
 --
 -- Name: movie_analytics id; Type: DEFAULT; Schema: public; Owner: postgres
 --
 
-ALTER TABLE ONLY public.movie_analytics ALTER COLUMN id SET DEFAULT nextval('public.movie_analytics_id_seq'::regclass);
+ALTER TABLE ONLY public.movie_analytics
+ALTER COLUMN id
+SET DEFAULT nextval('public.movie_analytics_id_seq'::regclass);
+-- `institution` table for testing queries into JSON objects
+CREATE TYPE public.city AS (name text);
+CREATE TYPE public.country AS (name text, continent text, cities city []);
+CREATE TYPE public.location AS (city text, country country, campuses text []);
+CREATE TYPE public.pet AS (name text, age int);
+CREATE TYPE public.staff AS (
+  first_name text,
+  last_name text,
+  specialities text [],
+  pets pet [],
+  favourite_artist_id int
+);
+CREATE TYPE public.institution_songs AS (
+  primary_anthem_track_id int,
+  secondary_anthem_track_id int
+);
+CREATE TABLE public.institution (
+  id integer NOT NULL,
+  name text,
+  location location,
+  staff staff [],
+  departments text [],
+  songs institution_songs,
+  CONSTRAINT institution_pkey PRIMARY KEY (id)
+);
+INSERT INTO public.institution (id, name, location, staff, departments, songs)
+VALUES (
+    1,
+    'Queen Mary University of London',
+    ROW(
+      'London',
+      ROW(
+        'UK',
+        'Europe',
+        ARRAY [ROW('London')::city, ROW('Birmingham')::city]
+      )::country,
+      ARRAY ['Mile End','Whitechapel','Charterhouse Square','West Smithfield']
+    )::location,
+    ARRAY [ROW('Peter','Landin',
+      ARRAY['Computer Science','Education'],
+    ARRAY [('Dog',100) ::pet],
+    1
+  )::staff ],
+  ARRAY ['Humanities and Social Sciences','Science and Engineering','Medicine and Dentistry'],
+  ROW(2270, 2271)::institution_songs
+),
+(
+  2,
+  'Chalmers University of Technology',
+  ROW(
+    'Gothenburg',
+    ROW(
+      'Sweden',
+      'Europe',
+      ARRAY [ROW('Gothenburg')::city, ROW('Stockholm')::city]
+    )::country,
+    ARRAY ['Johanneberg','Lindholmen']
+  )::location,
+  ARRAY [ROW('John','Hughes',
+      ARRAY['Computer Science', 'Functional Programming', 'Software Testing'],
+  ARRAY [('Horse', 20) :: pet],
+  2
+)::staff,
+ROW(
+  'Koen',
+  'Claessen',
+  ARRAY ['Computer Science', 'Functional Programming', 'Automated Reasoning'],
+  ARRAY [('First horse',1) :: pet, ('Second horse', 2) ::pet],
+  3
+)::staff ],
+ARRAY ['Architecture and Civil Engineering','Computer Science and Engineering','Electrical Engineering','Physics','Industrial and Materials Science'],
+ROW(3421, NULL)::institution_songs
+),
+(
+  3,
+  'University of Nowhere',
+  null,
+  null,
+  ARRAY ['nothing',null],
+  NULL
+);

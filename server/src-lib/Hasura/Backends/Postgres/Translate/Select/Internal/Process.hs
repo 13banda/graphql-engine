@@ -28,6 +28,7 @@ import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.List.NonEmpty qualified as NE
 import Data.Text.Extended (ToTxt (toTxt))
 import Data.Text.NonEmpty qualified as TNE
+import Hasura.Authentication.User (UserInfo)
 import Hasura.Backends.Postgres.SQL.DML qualified as S
 import Hasura.Backends.Postgres.SQL.Types
 import Hasura.Backends.Postgres.Translate.BoolExp (toSQLBoolExp, withRedactionExp)
@@ -88,7 +89,6 @@ import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.NamingCase (NamingCase)
 import Hasura.RQL.Types.Relationships.Local
 import Hasura.RQL.Types.Schema.Options qualified as Options
-import Hasura.RQL.Types.Session (UserInfo)
 
 processSelectParams ::
   forall pgKind m.
@@ -144,14 +144,15 @@ processSelectParams
       thisSourcePrefix = _pfThis sourcePrefixes
       SelectArgs whereM orderByM inpLimitM offsetM distM = tableArgs
       TablePerm permFilter permLimit = tablePermissions
-      selectSlicing = SelectSlicing finalLimit offsetM
-      finalLimit =
+      selectSlicing = SelectSlicing finalLimitArg offsetM
+      finalLimitArg =
         -- if sub query is required, then only use input limit
         --    because permission limit is being applied in subquery
         -- else compare input and permission limits
         case permLimitSubQ of
-          PLSQRequired _ -> inpLimitM
-          PLSQNotRequired -> compareLimits
+          -- Currently the only place LimitArg is created (see TODO in this commit)
+          PLSQRequired _ -> LimitArg False <$> inpLimitM
+          PLSQNotRequired -> LimitArg False <$> compareLimits
 
       compareLimits =
         case (inpLimitM, permLimit) of
@@ -252,6 +253,8 @@ processAnnAggregateSelect userInfo sourcePrefixes fieldAlias annAggSel = do
                   ( [(nodesColumnAlias, nodesExtractorExp)],
                     withJsonAggExtr permLimitSubQuery (orderByForJsonAgg selectSource) nodesColumnAlias
                   )
+              -- TODO: if we ever fix this, be sure to look more closely at the potential security
+              -- issue tentatively flagged in TestGroupByKeyRedactionInheritedRoles
               TAFGroupBy _xGroupBy _groupBy -> error "processAnnAggregateSelect: group_by is not yet supported"
               TAFExp e ->
                 pure

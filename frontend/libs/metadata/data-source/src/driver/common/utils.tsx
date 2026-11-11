@@ -1,0 +1,172 @@
+import { FaFolder, FaTable } from 'react-icons/fa';
+import { RunSQLResponse, Table } from '@hasura/shared/types';
+import {
+  GetTableColumnsProps,
+  IntrospectedTable,
+  TableFkRelationships,
+} from '../types';
+import { areTablesEqual } from '@hasura/metadata/helpers';
+import {
+  getTypeName,
+  extractTableInfo,
+  getTableDisplayName,
+} from '@hasura/shared/utils';
+import { getNamedType, isObjectType, isScalarType } from 'graphql';
+import { exportMetadataShared, getGraphQLSchema } from './sharedRequests';
+
+export const adaptIntrospectedTables = (
+  runSqlResponse: RunSQLResponse,
+): IntrospectedTable[] => {
+  /* 
+    The `slice(1)` on the result is done because the first item of the result is always the columns names from the SQL output.
+    It is not required for the final result and should be avoided 
+  */
+  const adaptedResponse = runSqlResponse?.result
+    ?.slice(1)
+    .map((row: string[]) => ({
+      name: `${row[1]}.${row[0]}`,
+      table: {
+        name: row[0],
+        schema: row[1],
+      },
+      type: row[2],
+    }));
+
+  return adaptedResponse ?? [];
+};
+
+export const convertToTreeData = (
+  tables: Table[],
+  hierarchy: string[],
+  name: string,
+): any => {
+  if (!hierarchy.length) return;
+
+  const key = hierarchy[0];
+
+  function onlyUnique(value: any, index: any, self: string | any[]) {
+    return self.indexOf(value) === index;
+  }
+
+  const levelValues: string[] = tables.map((t: any) => t[key]).filter(Boolean);
+
+  const uniqueLevelValues = levelValues.filter(onlyUnique);
+
+  return [
+    ...uniqueLevelValues.map((levelValue) => {
+      const { database, ...rest } = JSON.parse(name);
+
+      const _key = JSON.stringify({
+        database,
+        table: { ...rest.table, [key]: levelValue },
+      });
+      const children = convertToTreeData(
+        tables.filter((t: any) => t[key] === levelValue),
+        hierarchy.slice(1),
+        _key,
+      );
+
+      if (!children)
+        return {
+          icon: <FaTable />,
+          title: levelValue,
+          key: _key,
+        };
+
+      return {
+        icon: <FaFolder />,
+        title: levelValue,
+        selectable: false,
+        children,
+        key: _key,
+      };
+    }),
+  ];
+};
+
+export function generateForeignKeyLabel(foreignKey: TableFkRelationships) {
+  const table = extractTableInfo(foreignKey.to.table);
+  const toTableLabel = table
+    ? getTableDisplayName(foreignKey.to.table)
+    : '<Unknown>';
+
+  return `${foreignKey.from.columns
+    .join(',')
+    // Replace double quotes with empty string
+    .replace(/"/g, '')} → ${toTableLabel}.${foreignKey.to.columns
+    .join(',')
+    .replace(/"/g, '')}`;
+}
+
+export const checkSchemaModification = (sql: string): boolean => {
+  const sqlStatements = sql
+    .toLowerCase()
+    .split(';')
+    .map((sqlStr) => sqlStr.trim());
+
+  return sqlStatements.some(
+    (statement) =>
+      statement.startsWith('create ') ||
+      statement.startsWith('alter ') ||
+      statement.startsWith('drop '),
+  );
+};
+
+export async function introspectTableScalarTypes({
+  dataSourceName,
+  table,
+  defaultQueryRoot,
+  endpoints,
+  fetchJson,
+}: GetTableColumnsProps & {
+  defaultQueryRoot: string;
+}) {
+  const { metadata, resource_version } = await exportMetadataShared({
+    endpoints,
+    fetchJson,
+  });
+
+  if (!metadata) throw Error('Metadata could not be retrieved');
+
+  const metadataSource = metadata.sources.find(
+    (s) => s.name === dataSourceName,
+  );
+
+  const metadataTable = metadataSource?.tables.find((t) =>
+    areTablesEqual(t.table, table),
+  );
+
+  if (!metadataTable) throw Error('No table found in metadata');
+
+  const queryRoot = getTypeName({
+    defaultQueryRoot,
+    operation: 'select',
+    sourceCustomization: metadataSource?.customization,
+    configuration: metadataTable.configuration,
+  });
+
+  const schema = await getGraphQLSchema({
+    endpoints,
+    fetchJson,
+    resourceVersion: resource_version,
+  });
+  const schemaType = schema.getType(queryRoot);
+
+  const graphQLFields = isObjectType(schemaType)
+    ? Object.values(schemaType.getFields())
+    : [];
+
+  const scalarTypes = graphQLFields
+    .map(({ name, type }) => {
+      const namedType = getNamedType(type);
+      return isScalarType(namedType) ? { name, type: namedType.name } : null;
+    })
+    .filter(Boolean);
+
+  return {
+    schema,
+    scalarTypes,
+    metadataSource,
+    metadataTable,
+  };
+}

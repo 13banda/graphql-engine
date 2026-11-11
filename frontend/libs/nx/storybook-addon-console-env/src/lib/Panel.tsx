@@ -1,21 +1,20 @@
-import React, { useMemo, useCallback, useEffect } from 'react';
+import React, { useMemo, useCallback, useEffect, useRef } from 'react';
 import {
-  Args,
-  ArgTypes,
   useGlobals,
   useGlobalTypes,
   useParameter,
-} from '@storybook/api';
-import { AddonPanel } from '@storybook/components';
+} from 'storybook/manager-api';
+import type { Args, ArgTypes } from 'storybook/internal/types';
+import { AddonPanel } from 'storybook/internal/components';
 import { ADDON_ID } from './constants';
-import { PureArgsTable } from '@storybook/blocks';
+import { PureArgsTable } from '@storybook/addon-docs/blocks';
 
 type PanelProps = {
   active?: boolean;
 };
 
 const filterUncontrolledTypes = (globalTypes: ArgTypes) =>
-  Object.entries(globalTypes).reduce((acc, [key, arg]) => {
+  Object.entries(globalTypes).reduce((acc, [key, arg]: [string, any]) => {
     if (arg['control'] !== undefined) acc[key] = arg;
     return acc;
   }, {} as ArgTypes);
@@ -27,11 +26,11 @@ export const Panel = ({ active = true }: PanelProps) => {
   const [globals, updateGlobals] = useGlobals();
   const adminSecretSetParameter = useParameter(
     'adminSecretSet',
-    globalTypes['adminSecretSet']?.defaultValue
+    globalTypes['adminSecretSet']?.defaultValue,
   );
   const consoleTypeParameter = useParameter(
     'consoleType',
-    globalTypes['consoleType']?.defaultValue
+    globalTypes['consoleType']?.defaultValue,
   );
 
   const refreshAndUpdateGlobal = useCallback(
@@ -41,22 +40,37 @@ export const Panel = ({ active = true }: PanelProps) => {
         // Force reload iFrame
         (
           document.getElementById(
-            'storybook-preview-iframe'
+            'storybook-preview-iframe',
           ) as HTMLIFrameElement
         ).contentDocument?.location.reload();
       });
     },
-    [updateGlobals]
+    [updateGlobals],
   );
 
+  // This effect pushes the active story's parameters into Storybook globals and
+  // must run ONLY when those parameters change. `globals` and
+  // `refreshAndUpdateGlobal` are read via a ref holding their latest values so
+  // the effect does not re-run on every globals change (which would revert
+  // manual edits made through the args table back to the story parameters).
+  const latestRef = useRef({ globals, refreshAndUpdateGlobal });
+  // Keep the ref pointed at the latest values. Declared before the sync effect
+  // below so, on every commit, the ref is refreshed first and the sync effect
+  // reads current values.
   useEffect(() => {
+    latestRef.current = { globals, refreshAndUpdateGlobal };
+  });
+
+  useEffect(() => {
+    const { globals: currentGlobals, refreshAndUpdateGlobal: refresh } =
+      latestRef.current;
     if (
       (adminSecretSetParameter !== null &&
-        adminSecretSetParameter !== globals['adminSecretSet']) ||
+        adminSecretSetParameter !== currentGlobals['adminSecretSet']) ||
       (consoleTypeParameter !== null &&
-        consoleTypeParameter !== globals['consoleType'])
+        consoleTypeParameter !== currentGlobals['consoleType'])
     ) {
-      const newGlobals = { ...globals };
+      const newGlobals = { ...currentGlobals };
       console.log('newGlobals', newGlobals);
       if (adminSecretSetParameter !== null) {
         newGlobals['adminSecretSet'] = adminSecretSetParameter;
@@ -64,7 +78,7 @@ export const Panel = ({ active = true }: PanelProps) => {
       if (consoleTypeParameter !== null) {
         newGlobals['consoleType'] = consoleTypeParameter;
       }
-      refreshAndUpdateGlobal(newGlobals);
+      refresh(newGlobals);
     }
   }, [adminSecretSetParameter, consoleTypeParameter]);
 

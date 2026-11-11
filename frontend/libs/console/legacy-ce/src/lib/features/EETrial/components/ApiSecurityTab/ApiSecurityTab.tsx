@@ -1,11 +1,11 @@
 import React from 'react';
-import globals from '../../../../Globals';
 import { ApiSecuritySvg } from './ApiSecuritySvg';
 import { useEELiteAccess } from '../../hooks/useEELiteAccess';
 import { EETrialCard } from '../EETrialCard/EETrialCard';
+import { Flex, Heading, Link, Text } from '@radix-ui/themes';
 
 type Props = {
-  children?: React.ReactElement;
+  children?: React.ReactElement<any>;
 };
 
 // This tab shows an example component of how the EE registration button and hooks for fetching
@@ -16,44 +16,34 @@ type Props = {
 // specific EE promotion UI. And use the Enable Enterprise button wrapper to start the registration flow.
 export function ApiSecurityTabEELiteWrapper(props: Props) {
   const { children } = props;
-  const { access } = useEELiteAccess(globals);
+  const { access, consoleType } = useEELiteAccess();
 
-  if (
-    globals.consoleType === 'cloud' ||
-    globals.consoleType === 'pro' ||
-    access === 'active'
-  ) {
+  if (consoleType === 'cloud' || consoleType === 'pro' || access === 'active') {
     return children ?? null;
   }
 
-  if (access === 'forbidden') {
-    return null;
-  }
-
   return (
-    <div className="flex justify-center">
-      <div className="max-w-3xl">
-        <div className="text-xl text-slate-900 font-semibold mb-xs">
-          API Security
-        </div>
-        <div className="mt-0 mb-xs">
-          <span className="text-muted">
+    <Flex justify="center" className="p-6 w-full h-screen">
+      <Flex direction="column" gap="4" className="w-172.5">
+        <Heading size="6">API Security</Heading>
+        <div>
+          <Text size="2">
             Enable advanced security options to help secure your GraphQL API for
             production.
-          </span>
-          <a
+          </Text>{' '}
+          <Link
             href="https://hasura.io/docs/latest/security/index"
             target="_blank"
             rel="noopener noreferrer"
-            className="italic font-thin text-sm ml-1 text-secondary"
+            size="1"
+            className="italic"
           >
             (Know More)
-          </a>
+          </Link>
         </div>
-        <ApiSecuritySvg />
+        <ApiSecuritySvg className="w-full" />
         <EETrialCard
           id="security-tab"
-          className="mt-md"
           cardTitle="Production grade security for your API"
           cardText={
             <span>
@@ -66,7 +56,7 @@ export function ApiSecurityTabEELiteWrapper(props: Props) {
           eeAccess={access}
           horizontal
         />
-      </div>
-    </div>
+      </Flex>
+    </Flex>
   );
 }

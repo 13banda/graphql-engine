@@ -16,16 +16,22 @@ module Hasura.Backends.Postgres.DDL.RunSQL
     RunSQL (..),
     isReadOnly,
     isSchemaCacheBuildRequiredRunSQL,
+
+    -- * Export for tests
+    splitSQLStatements,
   )
 where
 
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Aeson
+import Data.Char qualified as Char
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as HS
 import Data.List.NonEmpty qualified as NE
+import Data.Text qualified as T
 import Data.Text.Extended
 import Database.PG.Query qualified as PG
+import Hasura.Authentication.User (UserInfoM (..))
 import Hasura.Backends.Postgres.Connection.MonadTx
 import Hasura.Backends.Postgres.DDL.EventTrigger
 import Hasura.Backends.Postgres.DDL.Source
@@ -57,7 +63,6 @@ import Hasura.RQL.Types.SchemaCacheTypes
 import Hasura.RQL.Types.Source
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.Server.Utils (quoteRegex)
-import Hasura.Session
 import Hasura.Table.Cache
 import Hasura.Tracing qualified as Tracing
 import Text.Regex.TDFA qualified as TDFA
@@ -67,7 +72,8 @@ data RunSQL = RunSQL
     rSource :: SourceName,
     rCascade :: Bool,
     rCheckMetadataConsistency :: Maybe Bool,
-    rTxAccessMode :: PG.TxAccess
+    rTxAccessMode :: PG.TxAccess,
+    rNoTransaction :: Bool
   }
   deriving (Show, Eq)
 
@@ -78,6 +84,7 @@ instance FromJSON RunSQL where
     rCascade <- o .:? "cascade" .!= False
     rCheckMetadataConsistency <- o .:? "check_metadata_consistency"
     readOnly <- o .:? "read_only" .!= False
+    rNoTransaction <- o .:? "no_transaction" .!= False
     let rTxAccessMode = if readOnly then PG.ReadOnly else PG.ReadWrite
     pure RunSQL {..}
 
@@ -91,7 +98,8 @@ instance ToJSON RunSQL where
         "read_only"
           .= case rTxAccessMode of
             PG.ReadOnly -> True
-            PG.ReadWrite -> False
+            PG.ReadWrite -> False,
+        "no_transaction" .= rNoTransaction
       ]
 
 -- | Check for known schema-mutating keywords in the raw SQL text.
@@ -222,19 +230,178 @@ runRunSQL sqlGen q@RunSQL {..} = do
   if (isSchemaCacheBuildRequiredRunSQL q)
     then do
       -- see Note [Checking metadata consistency in run_sql]
-      withMetadataCheck @pgKind sqlGen rSource rCascade rTxAccessMode
+      withMetadataCheck @pgKind sqlGen rSource rCascade pgExecTxType
         $ withTraceContext traceCtx
         $ withUserInfo userInfo
-        $ execRawSQL rSql
+        $ execSQL rSql
     else do
-      runTxWithCtx pgExecCtx (Tx rTxAccessMode Nothing) RunSQLQuery $ execRawSQL rSql
+      runTxWithCtx pgExecCtx pgExecTxType RunSQLQuery $ execSQL rSql
   where
+    execSQL :: (MonadTx n) => Text -> n EncJSON
+    execSQL =
+      if rNoTransaction
+        then -- If the SQL contains multiple statements separated by ';', Postgres will execute them in a single transaction.
+        -- Ref: https://www.postgresql.org/docs/current/protocol-flow.html#PROTOCOL-FLOW-MULTI-STATEMENT
+        -- Hence, it is defeating the purpose of no_transaction. To avoid this, split the SQL into multiple statements
+        -- and execute them one by one.
+          execMultipleStatements
+        else execRawSQL
+
     execRawSQL :: (MonadTx n) => Text -> n EncJSON
     execRawSQL =
       fmap (encJFromJValue @RunSQLRes) . liftTx . PG.multiQE rawSqlErrHandler . PG.fromText
+
+    execMultipleStatements :: (MonadTx n) => Text -> n EncJSON
+    execMultipleStatements sql = do
+      -- If the SQL contains multiple statements, execute them one by one.
+      -- And return the result of the last statement.
+      let go [] = execRawSQL sql -- If no statements, execute the whole SQL
+          go [sql'] = execRawSQL sql' -- This is the last statement, return its result
+          go (sql' : sqls') = do
+            _ <- execRawSQL sql'
+            go sqls'
+      go $ splitSQLStatements sql
+
+    rawSqlErrHandler :: PG.PGTxErr -> QErr
+    rawSqlErrHandler txe =
+      (err400 PostgresError "query execution failed") {qeInternal = Just $ ExtraInternal $ toJSON txe}
+
+    pgExecTxType :: PGExecTxType
+    pgExecTxType =
+      if rNoTransaction
+        then case rTxAccessMode of
+          PG.ReadOnly -> NoTxRead
+          PG.ReadWrite -> NoTxReadWrite
+        else Tx rTxAccessMode Nothing
+
+data SQLSplitState
+  = SQLNormal
+  | SQLString Bool
+  | SQLIdentifier
+  | SQLDollarString Text
+  | SQLLineComment
+  | SQLBlockComment Int
+
+-- | Split at unquoted semicolons, preserving SQL text and ignoring comment-only statements.
+-- Ordinary strings follow PostgreSQL's default standard_conforming_strings = on.
+splitSQLStatements :: Text -> [Text]
+splitSQLStatements = scan [] False SQLNormal
+  where
+    scan :: [Text] -> Bool -> SQLSplitState -> Text -> [Text]
+    -- Keep ordinary runs as Text slices rather than allocating one chunk per character.
+    scan chunks hasSQL ssState txt =
+      case T.uncons txt of
+        Nothing -> case ssState of
+          SQLBlockComment _ -> [statement chunks] -- Let PostgreSQL reject unterminated comments.
+          _ -> [statement chunks | hasSQL]
+        Just (c, rest) ->
+          let keep chunk = scan (chunk : chunks)
+              keepChar = keep (T.singleton c)
+           in case ssState of
+                SQLNormal
+                  | "--" `T.isPrefixOf` txt -> keep "--" hasSQL SQLLineComment (T.drop 2 txt)
+                  | "/*" `T.isPrefixOf` txt -> keep "/*" hasSQL (SQLBlockComment 1) (T.drop 2 txt)
+                  | c == ';' -> [statement chunks | hasSQL] <> scan [] False SQLNormal rest
+                  | (c == 'e' || c == 'E') && "'" `T.isPrefixOf` rest ->
+                      keep (T.take 2 txt) True (SQLString True) (T.drop 1 rest)
+                  | c == '\'' -> keepChar True (SQLString False) rest
+                  | c == '"' -> keepChar True SQLIdentifier rest
+                  | identifierStart c ->
+                      let (identifier, remaining) = T.span identifierContinue txt
+                       in keep identifier True SQLNormal remaining
+                  | c == '$' -> case T.uncons rest of
+                      Just (digit, _)
+                        | asciiDigit digit ->
+                            let (digits, remaining) = T.span asciiDigit rest
+                             in keep ("$" <> digits) True SQLNormal remaining
+                      _ -> case dollarDelimiter txt of
+                        Just (delimiter, remaining) -> keep delimiter True (SQLDollarString delimiter) remaining
+                        Nothing -> keepChar True SQLNormal rest
+                  | otherwise -> keepChar (hasSQL || not (sqlSpace c)) SQLNormal rest
+                SQLString escapes
+                  | escapes && c == '\\' ->
+                      let (escaped, remaining) = T.splitAt 1 rest
+                       in keep (T.singleton c <> escaped) hasSQL ssState remaining
+                  | c == '\'' -> case T.uncons rest of
+                      Just ('\'', remaining) -> keep "''" hasSQL ssState remaining
+                      _ -> case stringContinuation rest of
+                        Just (separator, remaining) -> keep ("'" <> separator) hasSQL ssState remaining
+                        Nothing -> keepChar hasSQL SQLNormal rest
+                  | otherwise ->
+                      let (body, remaining) = T.span (\x -> x /= '\'' && (not escapes || x /= '\\')) txt
+                       in keep body hasSQL ssState remaining
+                SQLIdentifier
+                  | c == '"' -> case T.uncons rest of
+                      Just ('"', remaining) -> keep "\"\"" hasSQL ssState remaining
+                      _ -> keepChar hasSQL SQLNormal rest
+                  | otherwise ->
+                      let (body, remaining) = T.span (/= '"') txt
+                       in keep body hasSQL ssState remaining
+                SQLDollarString delimiter
+                  | delimiter `T.isPrefixOf` txt -> keep delimiter hasSQL SQLNormal (T.drop (T.length delimiter) txt)
+                  | otherwise ->
+                      let (body, remaining) = T.breakOn delimiter txt
+                       in keep body hasSQL ssState remaining
+                SQLLineComment
+                  | newline c -> keepChar hasSQL SQLNormal rest
+                  | otherwise ->
+                      let (body, remaining) = T.span (not . newline) txt
+                       in keep body hasSQL ssState remaining
+                SQLBlockComment depth
+                  | "/*" `T.isPrefixOf` txt -> keep "/*" hasSQL (SQLBlockComment (depth + 1)) (T.drop 2 txt)
+                  | "*/" `T.isPrefixOf` txt ->
+                      keep "*/" hasSQL (if depth == 1 then SQLNormal else SQLBlockComment (depth - 1)) (T.drop 2 txt)
+                  | c == '/' || c == '*' -> keepChar hasSQL ssState rest
+                  | otherwise ->
+                      let (body, remaining) = T.span (\x -> x /= '/' && x /= '*') txt
+                       in keep body hasSQL ssState remaining
+
+    statement :: [Text] -> Text
+    statement = T.dropAround sqlSpace . T.concat . reverse
+
+    asciiDigit :: Char -> Bool
+    asciiDigit c = c >= '0' && c <= '9'
+
+    identifierStart :: Char -> Bool
+    identifierStart c = c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || Char.ord c >= 128
+
+    identifierContinue :: Char -> Bool
+    identifierContinue c = identifierStart c || asciiDigit c || c == '$'
+
+    dollarDelimiter :: Text -> Maybe (Text, Text)
+    dollarDelimiter txt =
+      let afterDollar = T.drop 1 txt
+          (tag, suffix) = T.span (\c -> identifierStart c || asciiDigit c) afterDollar
+          validStart = maybe True (identifierStart . fst) (T.uncons tag)
+       in case T.uncons suffix of
+            Just ('$', remaining) | validStart -> Just ("$" <> tag <> "$", remaining)
+            _ -> Nothing
+
+    newline :: Char -> Bool
+    newline c = c == '\n' || c == '\r'
+
+    sqlSpace :: Char -> Bool
+    sqlSpace c = c `elem` [' ', '\t', '\n', '\r', '\f']
+
+    -- PostgreSQL carries escape-string mode across newline-separated string literals.
+    -- Only whitespace and line comments (not block comments) allow this continuation.
+    stringContinuation :: Text -> Maybe (Text, Text)
+    -- Count only the separator consumed: taking the length of each remaining UTF-8
+    -- suffix makes long chains of concatenated literals quadratic.
+    stringContinuation txt = lookAhead False 0 txt
       where
-        rawSqlErrHandler txe =
-          (err400 PostgresError "query execution failed") {qeInternal = Just $ ExtraInternal $ toJSON txe}
+        lookAhead seenNewline consumed remaining =
+          let (spaces, rest) = T.span sqlSpace remaining
+              seenNewline' = seenNewline || T.any newline spaces
+              consumed' = consumed + T.length spaces
+           in case T.uncons rest of
+                Just ('\'', afterQuote)
+                  | seenNewline' ->
+                      Just (T.take (consumed' + 1) txt, afterQuote)
+                _ | "--" `T.isPrefixOf` rest ->
+                      let (comment, afterComment) = T.span (not . newline) rest
+                       in lookAhead seenNewline' (consumed' + T.length comment) afterComment
+                _ -> Nothing
 
 -- | @'withMetadataCheck' source cascade txAccess runSQLQuery@ executes @runSQLQuery@ and checks if the schema changed as a
 -- result. If it did, it checks to ensure the changes do not violate any integrity constraints, and
@@ -255,14 +422,14 @@ withMetadataCheck ::
   SQLGenCtx ->
   SourceName ->
   Bool ->
-  PG.TxAccess ->
+  PGExecTxType ->
   PG.TxET QErr m a ->
   m a
-withMetadataCheck sqlGen source cascade txAccess runSQLQuery = do
+withMetadataCheck sqlGen source cascade txType runSQLQuery = do
   SourceInfo {..} <- askSourceInfo @('Postgres pgKind) source
 
   -- Run SQL query and metadata checker in a transaction
-  (queryResult, metadataUpdater) <- runTxWithMetadataCheck source _siConfiguration txAccess _siTables _siFunctions cascade runSQLQuery
+  (queryResult, metadataUpdater) <- runTxWithMetadataCheck source _siConfiguration txType _siTables _siFunctions cascade runSQLQuery
 
   -- Build schema cache with updated metadata
   withNewInconsistentObjsCheck
@@ -305,18 +472,19 @@ runTxWithMetadataCheck ::
   ) =>
   SourceName ->
   SourceConfig ('Postgres pgKind) ->
-  PG.TxAccess ->
+  PGExecTxType ->
   TableCache ('Postgres pgKind) ->
   FunctionCache ('Postgres pgKind) ->
   Bool ->
   PG.TxET QErr m a ->
   m (a, MetadataModifier)
-runTxWithMetadataCheck source sourceConfig txAccess tableCache functionCache cascadeDependencies tx =
+runTxWithMetadataCheck source sourceConfig txType tableCache functionCache cascadeDependencies tx =
   liftEitherM
     $ runExceptT
-    $ _pecRunTx (_pscExecCtx sourceConfig) (PGExecCtxInfo (Tx txAccess Nothing) RunSQLQuery)
+    $ _pecRunTx (_pscExecCtx sourceConfig) (PGExecCtxInfo txType RunSQLQuery)
     $ do
-      -- Running in a transaction helps to rollback the @'tx' execution in case of any exceptions
+      -- Following steps maybe executed in a transaction depending on @'txType'.
+      -- Running in a transaction helps to rollback the @'tx' execution in case of any exceptions.
 
       -- Before running the @'tx', fetch metadata of existing tables and functions from Postgres.
       let tableNames = HashMap.keysSet tableCache

@@ -6,6 +6,7 @@ module Hasura.Server.API.Metadata
   )
 where
 
+import Control.Exception.Lifted qualified as E
 import Control.Lens (_Just)
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Aeson
@@ -15,11 +16,11 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.Text qualified as T
 import GHC.Generics.Extended (constrName)
 import Hasura.App.State
+import Hasura.Authentication.User (UserInfoM)
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.Eventing.Backend
 import Hasura.Function.API qualified as Functions
-import Hasura.GraphQL.Schema.Common (SchemaSampledFeatureFlags)
 import Hasura.GraphQL.Transport.WebSocket qualified as WS
 import Hasura.Logging qualified as L
 import Hasura.LogicalModel.API qualified as LogicalModel
@@ -69,13 +70,12 @@ import Hasura.SQL.AnyBackend
 import Hasura.Server.API.Instances ()
 import Hasura.Server.API.Metadata.Instances ()
 import Hasura.Server.API.Metadata.Types
-import Hasura.Server.Init.FeatureFlag (HasFeatureFlagChecker)
 import Hasura.Server.Logging (SchemaSyncLog (..), SchemaSyncThreadType (TTMetadataApi))
 import Hasura.Server.Types
 import Hasura.Services
-import Hasura.Session
 import Hasura.StoredProcedure.API qualified as StoredProcedures
 import Hasura.Tracing qualified as Tracing
+import Network.WebSockets qualified as WS (ConnectionException (..))
 
 -- | The payload for the @/v1/metadata@ endpoint. See:
 --
@@ -113,7 +113,7 @@ runMetadataQuery ::
 runMetadataQuery appContext schemaCache closeWebsocketsOnMetadataChange RQLMetadata {..} = do
   AppEnv {..} <- askAppEnv
   let logger = _lsLogger appEnvLoggers
-  MetadataWithResourceVersion metadata currentResourceVersion <- Tracing.newSpan "fetchMetadata" $ liftEitherM fetchMetadata
+  MetadataWithResourceVersion metadata currentResourceVersion <- Tracing.newSpan "fetchMetadata" Tracing.SKInternal $ liftEitherM fetchMetadata
   let exportsMetadata = \case
         RMV1 (RMExportMetadata _) -> True
         RMV2 (RMV2ExportMetadata _) -> True
@@ -141,7 +141,6 @@ runMetadataQuery appContext schemaCache closeWebsocketsOnMetadataChange RQLMetad
   ((r, modMetadata), modSchemaCache, cacheInvalidations, sourcesIntrospection, schemaRegistryAction) <-
     runMetadataQueryM
       (acEnvironment appContext)
-      (acSchemaSampledFeatureFlags appContext)
       (acRemoteSchemaPermsCtx appContext)
       currentResourceVersion
       _rqlMetadata
@@ -160,7 +159,7 @@ runMetadataQuery appContext schemaCache closeWebsocketsOnMetadataChange RQLMetad
           $ "Attempting to insert new metadata in storage"
 
         newResourceVersion <-
-          Tracing.newSpan "updateMetadataAndNotifySchemaSync"
+          Tracing.newSpan "updateMetadataAndNotifySchemaSync" Tracing.SKInternal
             $ liftEitherM
             $ updateMetadataAndNotifySchemaSync appEnvInstanceId (fromMaybe currentResourceVersion _rqlMetadataResourceVersion) modMetadata cacheInvalidations
 
@@ -177,26 +176,37 @@ runMetadataQuery appContext schemaCache closeWebsocketsOnMetadataChange RQLMetad
           <> showMetadataResourceVersion newResourceVersion
 
         -- save sources introspection to stored-introspection DB
-        Tracing.newSpan "storeSourcesIntrospection"
+        Tracing.newSpan "storeSourcesIntrospection" Tracing.SKInternal
           $ saveSourcesIntrospection logger sourcesIntrospection newResourceVersion
 
         -- run the schema registry action
-        Tracing.newSpan "runSchemaRegistryAction"
+        Tracing.newSpan "runSchemaRegistryAction" Tracing.SKInternal
           $ for_ schemaRegistryAction
           $ \action -> do
             liftIO $ action newResourceVersion (scInconsistentObjs (lastBuiltSchemaCache modSchemaCache)) modMetadata
 
         (_, modSchemaCache', _, _, _) <-
-          Tracing.newSpan "setMetadataResourceVersionInSchemaCache"
+          Tracing.newSpan "setMetadataResourceVersionInSchemaCache" Tracing.SKInternal
             $ setMetadataResourceVersionInSchemaCache newResourceVersion
             & runCacheRWT dynamicConfig modSchemaCache
 
         -- Close all subscriptions with 1012 code (subscribers should reconnect)
         -- and close poller threads
-        when ((_cdcCloseWebsocketsOnMetadataChangeStatus dynamicConfig) == CWMCEnabled)
-          $ Tracing.newSpan "closeWebsocketsOnMetadataChange"
-          $ liftIO
-          $ WS.runWebsocketCloseOnMetadataChangeAction closeWebsocketsOnMetadataChange
+        when ((_cdcCloseWebsocketsOnMetadataChangeStatus dynamicConfig) == CWMCEnabled) $ do
+          Tracing.newSpan "closeWebsocketsOnMetadataChange" Tracing.SKInternal
+            $ E.catch (liftIO $ WS.runWebsocketCloseOnMetadataChangeAction closeWebsocketsOnMetadataChange)
+            -- 'ConnectionClosed' seems to happen when this is run between an
+            -- unclean client shutdown and (probably) the attempt to send the
+            -- next keepalive message on the connection. It's fine to ignore
+            -- it. Other exception types have not been observed here.
+            $ \case
+              WS.ConnectionClosed -> pure ()
+              e ->
+                L.unLoggerTracing logger
+                  $ SchemaSyncLog L.LevelDebug TTMetadataApi
+                  $ String
+                  $ "When closeWebsocketsOnMetadataChange, got: "
+                  <> tshow e
 
         pure (r, modSchemaCache')
       (MaintenanceModeEnabled (), ReadOnlyModeDisabled) ->
@@ -355,24 +365,22 @@ runMetadataQueryM ::
     MonadError QErr m,
     MonadEventLogCleanup m,
     ProvidesHasuraServices m,
-    MonadGetPolicies m,
-    HasFeatureFlagChecker m
+    MonadGetPolicies m
   ) =>
   Env.Environment ->
-  SchemaSampledFeatureFlags ->
   Options.RemoteSchemaPermissions ->
   MetadataResourceVersion ->
   RQLMetadataRequest ->
   m EncJSON
-runMetadataQueryM env schemaSampledFeatureFlags remoteSchemaPerms currentResourceVersion =
+runMetadataQueryM env remoteSchemaPerms currentResourceVersion =
   withPathK "args" . \case
     -- NOTE: This is a good place to install tracing, since it's involved in
     -- the recursive case via "bulk":
     RMV1 q ->
-      Tracing.newSpan ("v1 " <> T.pack (constrName q))
-        $ runMetadataQueryV1M env schemaSampledFeatureFlags remoteSchemaPerms currentResourceVersion q
+      Tracing.newSpan ("v1 " <> T.pack (constrName q)) Tracing.SKInternal
+        $ runMetadataQueryV1M env remoteSchemaPerms currentResourceVersion q
     RMV2 q ->
-      Tracing.newSpan ("v2 " <> T.pack (constrName q))
+      Tracing.newSpan ("v2 " <> T.pack (constrName q)) Tracing.SKInternal
         $ runMetadataQueryV2M currentResourceVersion q
 
 runMetadataQueryV1M ::
@@ -389,16 +397,14 @@ runMetadataQueryV1M ::
     MonadError QErr m,
     MonadEventLogCleanup m,
     ProvidesHasuraServices m,
-    MonadGetPolicies m,
-    HasFeatureFlagChecker m
+    MonadGetPolicies m
   ) =>
   Env.Environment ->
-  SchemaSampledFeatureFlags ->
   Options.RemoteSchemaPermissions ->
   MetadataResourceVersion ->
   RQLMetadataV1 ->
   m EncJSON
-runMetadataQueryV1M env schemaSampledFeatureFlags remoteSchemaPerms currentResourceVersion = \case
+runMetadataQueryV1M env remoteSchemaPerms currentResourceVersion = \case
   RMAddSource q -> dispatchMetadata (runAddSource env) q
   RMDropSource q -> runDropSource q
   RMRenameSource q -> runRenameSource q
@@ -470,8 +476,8 @@ runMetadataQueryV1M env schemaSampledFeatureFlags remoteSchemaPerms currentResou
   RMGetEventLogs q -> dispatchEventTrigger runGetEventLogs q
   RMGetEventInvocationLogs q -> dispatchEventTrigger runGetEventInvocationLogs q
   RMGetEventById q -> dispatchEventTrigger runGetEventById q
-  RMAddRemoteSchema q -> runAddRemoteSchema env schemaSampledFeatureFlags q
-  RMUpdateRemoteSchema q -> runUpdateRemoteSchema env schemaSampledFeatureFlags q
+  RMAddRemoteSchema q -> runAddRemoteSchema env q
+  RMUpdateRemoteSchema q -> runUpdateRemoteSchema env q
   RMRemoveRemoteSchema q -> runRemoveRemoteSchema q
   RMReloadRemoteSchema q -> runReloadRemoteSchema q
   RMIntrospectRemoteSchema q -> runIntrospectRemoteSchema q
@@ -547,11 +553,11 @@ runMetadataQueryV1M env schemaSampledFeatureFlags remoteSchemaPerms currentResou
   RMSetQueryTagsConfig q -> runSetQueryTagsConfig q
   RMSetOpenTelemetryConfig q -> runSetOpenTelemetryConfig q
   RMSetOpenTelemetryStatus q -> runSetOpenTelemetryStatus q
-  RMBulk q -> encJFromList <$> indexedMapM (runMetadataQueryM env schemaSampledFeatureFlags remoteSchemaPerms currentResourceVersion) q
+  RMBulk q -> encJFromList <$> indexedMapM (runMetadataQueryM env remoteSchemaPerms currentResourceVersion) q
   RMBulkKeepGoing commands -> do
     results <-
       commands & indexedMapM \command ->
-        runMetadataQueryM env schemaSampledFeatureFlags remoteSchemaPerms currentResourceVersion command
+        runMetadataQueryM env remoteSchemaPerms currentResourceVersion command
           -- Because changes to the metadata are maintained in MetadataT, which is a state monad
           -- that is layered above the QErr error monad, this catchError causes any changes to
           -- the metadata made during running the failed API function to be rolled back
@@ -581,8 +587,7 @@ dispatchMetadata f x = dispatchAnyBackend @BackendMetadata x f
 -- re-add commands to do edits, or add two interdependent items at once.
 runBulkAtomic ::
   forall m.
-  ( HasFeatureFlagChecker m,
-    MonadError QErr m,
+  ( MonadError QErr m,
     CacheRWM m,
     MetadataM m
   ) =>
@@ -602,7 +607,7 @@ runBulkAtomic cmds = do
 
   -- Try building the schema cache using the combined modifiers. If we run into
   -- any inconsistencies, we should fail and roll back.
-  inconsistencies <- tryBuildSchemaCacheWithModifiers mdModifiers
+  inconsistencies <- tryBuildSchemaCacheWithModifiers [] mdModifiers
 
   unless (null inconsistencies)
     $ throw400WithDetail BadRequest "Schema inconsistency"

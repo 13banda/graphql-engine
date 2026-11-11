@@ -1,56 +1,188 @@
 [workspace]
 resolver = "2"
 
-package.version = "0.1.0"
-package.edition = "2021"
+package.version = "3.0.0"
+package.edition = "2024"
 package.license = "Apache-2.0"
 
 members = [
   "crates/auth/*",
+  "crates/compatibility",
   "crates/custom-connector",
   "crates/engine",
+  "crates/engine-types",
   "crates/execute",
-  "crates/lang-graphql",
+  "crates/graphql/*",
+  "crates/jsonapi",
   "crates/metadata-resolve",
   "crates/metadata-schema-generator",
   "crates/open-dds",
+  "crates/plan",
+  "crates/plan-types",
+  "crates/plugins/*",
   "crates/query-usage-analytics",
-  "crates/schema",
   "crates/utils/*",
+
 ]
+
+# generally following guidance from https://nnethercote.github.io/perf-book/build-configuration.html
+[profile.release]
+# FYI increasing this to 16 or more when profiling seems to be effective in getting more granularity in heaptrack profiles
+codegen-units = 1 # reduce parallelisation to increase optimisations
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# ban printing to stdout and stderr
+print_stdout = "warn"
+print_stderr = "warn"
+dbg_macro = "warn"
+# unstable warnings; we might need to suppress them
+redundant_clone = "warn"
+# disable this warning until
+# https://github.com/rust-lang/rust-clippy/issues/12643 is fixed
+manual_unwrap_or_default = "allow"
 # disable certain pedantic warnings
 doc_markdown = "allow"
+implicit_hasher = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
+return_self_not_must_use = "allow"
 struct_field_names = "allow"
 wildcard_imports = "allow"
+trivially_copy_pass_by_ref = "allow"
+unnecessary_debug_formatting = "allow"
+used_underscore_items = "allow"
 # disable these for now, but we should probably fix them
-ignored_unit_patterns = "allow"
-implicit_clone = "allow"
-implicit_hasher = "allow"
-inefficient_to_string = "allow"
-manual_is_variant_and = "allow"
-map_unwrap_or = "allow"
-match_wildcard_for_single_variants = "allow"
 result_large_err = "allow"
-return_self_not_must_use = "allow"
-semicolon_if_nothing_returned = "allow"
 similar_names = "allow"
 too_many_arguments = "allow"
 too_many_lines = "allow"
-uninlined_format_args = "allow"
-unnecessary_box_returns = "allow"
-unnecessary_wraps = "allow"
-unnested_or_patterns = "allow"
 unreadable_literal = "allow"
-unused_async = "allow"
 used_underscore_binding = "allow"
 
 [workspace.lints.rustdoc]
 private_intra_doc_links = "allow"
+
+[workspace.dependencies]
+ndc-models = { package = "ndc-models", git = "https://github.com/hasura/ndc-spec.git", tag = "v0.2.12", features = ["arc-relation"]} # When you update this tag, also update the schema references in crates/open-dds/src/data_connector.rs
+ndc-models-v01 = { package = "ndc-models", git = "https://github.com/hasura/ndc-spec.git", tag = "v0.1.7" } # When you update this tag, also update the schema references in crates/open-dds/src/data_connector.rs
+
+anyhow = "1"
+apollo-parser = "0.8"
+ariadne = { version = "0.5", features = ["auto-color"] }
+async-graphql-parser = "7"
+async-recursion = "1"
+async-stream = "0.3.6"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["http2", "ws"] }
+axum-core = "0.4"
+base64 = "0.22"
+bincode = "1"
+blake2 = "0.10.6"
+bson = "2"
+build-data = "0.3"
+bytes = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+convert_case = "0.11"
+cookie = "0.18"
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+darling = "0.23"
+# Keep this in sync with sqlparser
+datafusion = { version = "51.0.0", features = ["serde"] }
+datafusion-functions-json = "0.51.1"
+derive_more = { version = "2.1", features = ["full"] }
+diffy = "0.4"
+env_logger = "0.11"
+expect-test = "1"
+futures = "0.3"
+futures-util = "0.3"
+goldenfile = "1"
+graphql-parser = "0.4"
+http = "1"
+http-body-util = "0.1"
+human_bytes = "0.4"
+indexmap = { version = "2", features = ["serde"] }
+insta = { version = "1", features = ["glob", "json"] }
+iso8601 = "0.6.3"
+itertools = "0.14.0"
+json_value_merge = "2"
+jsonapi_library = { package = "jsonapi", git = "https://github.com/hasura/jsonapi-rust.git", rev = "9b5a3a08414e559c7285b539acd4d4fc7b31f3b5" }
+jsonptr = "0.7"
+# We're using a fork of this library that updates the deps to use more recent versions
+# (in particular jsonwebtoken from v8->v9 to fix a vulnerability in its dependency on ring: https://rustsec.org/advisories/RUSTSEC-2025-0009)
+# (the branch uses the code from https://github.com/nhynes/jwk-rs/pull/13)
+jsonwebkey = { features = ["generate", "jsonwebtoken","pkcs-convert"], git = "https://github.com/hasura/jwk-rs.git", branch = "update-deps" }
+jsonwebtoken = "9"
+lazy_static = "1.5.0"
+lexical-core = "1"
+log = "0.4"
+mimalloc = "0.1"
+mockito = { version = "~1.7", default-features = false } # v1.5+ depends on http v1
+nonempty = { version = "0.12", features = ["serialize"] }
+oas3 = "0.21.0"
+openssl = "0.10"
+opentelemetry = "0.31"
+opentelemetry-contrib = "0.23"
+opentelemetry-http = "0.31"
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace"] }
+opentelemetry-semantic-conventions = "0.31"
+opentelemetry-stdout = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry-zipkin = { version = "0.31", default-features = false }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
+partition_eithers = "0.1.0"
+postcard = { version = "1", features = ["use-std"] }
+pretty_assertions = "1"
+proc-macro2 = "1"
+quote = "1"
+rand = "0.10"
+ref-cast = "1"
+regex = "1"
+# Adding the gzip/zstd features have the library send appropriate
+# Accept-Encoding and automatically decompress. As of this version it doesn't
+# express preference with quality (q) values, but we'd prefer zstd always
+reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "system-proxy", "gzip", "zstd", "json", "multipart", "stream", "rustls-tls"] }
+rmp-serde = "1"
+semver = "1.0"
+schemars = { version = "0.8", features = ["preserve_order", "smol_str", "url"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_arrow = { version = "0.14.0", features = ["arrow-57"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+serde_path_to_error = "0.1"
+serde_with = { version = "3", features = ["indexmap_2"] }
+sha2 = "0.10"
+similar-asserts = "1.7"
+smol_str = "0.1"
+strum = "0.27"
+strum_macros = "0.26"
+# Keep this in sync with datafusion
+sqlparser = { version = "0.55", features = ["visitor"] }
+syn = "2"
+thiserror = "2"
+time = ">=0.3.47"
+tokio = { version = "1", features = ["macros", "parking_lot", "rt-multi-thread", "signal", "time"] }
+tokio-stream = "0.1"
+tokio-test = "0.4"
+tokio-tungstenite = "0.29.0"
+tokio-util = { version = "0.7", features = ["compat", "io", "io-util"] }
+tower = "0.5"
+# Prefer zstd-encoded request bodies, but also support gzip in case a client can't do that
+tower-http = { version = "0.6", features = ["cors", "fs", "decompression-gzip", "decompression-zstd", "compression-gzip", "compression-zstd", "trace" ] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+transitive = "1.2"
+unicode-normalization = "0.1"
+url = { version = "2", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+zstd = { version = "0.13" }
+
+
+[patch.crates-io]
+
+# The azdls backend in opendal 0.55.0 does not call `AzureStorageConfig::from_env()`, so Azure
+# Workload Identity env vars (AZURE_FEDERATED_TOKEN_FILE etc.) are never loaded. This causes
+# reqsign to skip workload identity and fall through to IMDS, which fails on AKS.
+# Upstream tracking: https://github.com/apache/opendal/issues/5534

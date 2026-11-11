@@ -54,6 +54,7 @@ import Data.Text.Extended
 import Data.Text.NonEmpty (unNonEmptyText)
 import Data.Trie qualified as Trie
 import Database.PG.Query qualified as PG
+import Hasura.Authentication.User (UserInfoM (..))
 import Hasura.Backends.DataConnector.Adapter.Types (DataConnectorName)
 import Hasura.Backends.Postgres.Connection
 import Hasura.Base.Error
@@ -70,9 +71,7 @@ import Hasura.RQL.Types.Metadata
 import Hasura.RQL.Types.Metadata.Object
 import Hasura.RQL.Types.QueryCollection
 import Hasura.RQL.Types.SchemaCache
-import Hasura.RQL.Types.Session
 import Hasura.RemoteSchema.Metadata (RemoteSchemaName)
-import Hasura.Server.Init.FeatureFlag (HasFeatureFlagChecker)
 import Hasura.Server.Types (MonadGetPolicies (..))
 import Hasura.Services.Network
 import Hasura.Tracing (TraceT)
@@ -287,8 +286,7 @@ newtype MetadataT m a = MetadataT {unMetadataT :: StateT Metadata m a}
       Tracing.MonadTrace,
       MonadBase b,
       MonadBaseControl b,
-      ProvidesNetwork,
-      HasFeatureFlagChecker
+      ProvidesNetwork
     )
   deriving anyclass (MonadQueryTags)
 
@@ -328,10 +326,13 @@ buildSchemaCache = buildSchemaCacheWithInvalidations mempty
 -- If there are any new inconsistencies, the changes to the metadata and the schema cache are abandoned.
 tryBuildSchemaCache ::
   (CacheRWM m, MetadataM m) =>
+  -- | A list of metadata object ids for which if there are any inconsistencies in the new build,
+  -- it must be rejected regardless of whether that inconsistency is new or not
+  [MetadataObjId] ->
   MetadataModifier ->
   m (HashMap MetadataObjId (NonEmpty InconsistentMetadata))
-tryBuildSchemaCache MetadataModifier {..} =
-  tryBuildSchemaCacheWithModifiers [pure . runMetadataModifier]
+tryBuildSchemaCache unacceptableInconsistentObjects MetadataModifier {..} =
+  tryBuildSchemaCacheWithModifiers unacceptableInconsistentObjects [pure . runMetadataModifier]
 
 -- | Rebuilds the schema cache after modifying metadata sequentially and returns any _new_ metadata inconsistencies.
 -- If there are any new inconsistencies, the changes to the metadata and the schema cache are abandoned.
@@ -339,9 +340,12 @@ tryBuildSchemaCache MetadataModifier {..} =
 -- we throw these errors back without changing the metadata and schema cache.
 tryBuildSchemaCacheWithModifiers ::
   (CacheRWM m, MetadataM m) =>
+  -- | A list of metadata object ids for which if there are any inconsistencies in the new build,
+  -- it must be rejected regardless of whether that inconsistency is new or not
+  [MetadataObjId] ->
   [Metadata -> m Metadata] ->
   m (HashMap MetadataObjId (NonEmpty InconsistentMetadata))
-tryBuildSchemaCacheWithModifiers modifiers = do
+tryBuildSchemaCacheWithModifiers unacceptableInconsistentObjects modifiers = do
   modifiedMetadata <- do
     metadata <- getMetadata
     foldM (flip ($)) metadata modifiers
@@ -359,11 +363,16 @@ tryBuildSchemaCacheWithModifiers modifiers = do
   where
     validateNewSchemaCache :: SchemaCache -> SchemaCache -> (ValidateNewSchemaCacheResult, HashMap MetadataObjId (NonEmpty InconsistentMetadata))
     validateNewSchemaCache oldSchemaCache newSchemaCache =
-      let diffInconsistentObjects = HashMap.difference `on` (groupInconsistentMetadataById . scInconsistentObjs)
-          newInconsistentObjects = newSchemaCache `diffInconsistentObjects` oldSchemaCache
-       in if newInconsistentObjects == mempty
-            then (KeepNewSchemaCache, newInconsistentObjects)
-            else (DiscardNewSchemaCache, newInconsistentObjects)
+      let inconsistenciesFromOld = groupInconsistentMetadataById $ scInconsistentObjs oldSchemaCache
+          inconsistenciesFromNew = groupInconsistentMetadataById $ scInconsistentObjs newSchemaCache
+          unacceptableInconsistenciesInNew = HashMap.filterWithKey (\objId _ -> objId `elem` unacceptableInconsistentObjects) inconsistenciesFromNew
+          noUnacceptableInconsistenciesInNew = HashMap.null unacceptableInconsistenciesInNew
+          newInconsistentObjects = inconsistenciesFromNew `HashMap.difference` inconsistenciesFromOld
+       in -- If there are no new inconsistencies and no unacceptable inconsistencies in the new build, keep the new build,
+          -- otherwise discard the new build and return the offending inconsistencies
+          if noUnacceptableInconsistenciesInNew && newInconsistentObjects == mempty
+            then (KeepNewSchemaCache, mempty)
+            else (DiscardNewSchemaCache, HashMap.union newInconsistentObjects unacceptableInconsistenciesInNew)
 
 -- | Tries to modify the metadata for all the specified metadata objects. If the modification fails,
 -- any objects that directly caused a new metadata inconsistency are removed and the modification
@@ -383,7 +392,7 @@ tryBuildSchemaCacheAndWarnOnFailingObjects ::
   m (HashMap MetadataObjId a)
 tryBuildSchemaCacheAndWarnOnFailingObjects mkMetadataModifier warningCode metadataObjects = do
   metadataModifier <- fmap mconcat . traverse mkMetadataModifier $ HashMap.elems metadataObjects
-  metadataInconsistencies <- tryBuildSchemaCache metadataModifier
+  metadataInconsistencies <- tryBuildSchemaCache [] metadataModifier
 
   let inconsistentObjects = HashMap.intersectionWith (,) metadataInconsistencies metadataObjects
   let successfulObjects = HashMap.difference metadataObjects inconsistentObjects
@@ -398,7 +407,7 @@ tryBuildSchemaCacheAndWarnOnFailingObjects mkMetadataModifier warningCode metada
 
         -- Try again, this time only with objects that were previously successful
         withoutFailedObjectsMetadataModifier <- fmap mconcat . traverse mkMetadataModifier $ HashMap.elems successfulObjects
-        tryBuildSchemaCache withoutFailedObjectsMetadataModifier
+        tryBuildSchemaCache [] withoutFailedObjectsMetadataModifier
       else -- Otherwise just look at the rest of the errors, if any
         pure metadataInconsistencies
 
@@ -411,14 +420,15 @@ tryBuildSchemaCacheAndWarnOnFailingObjects mkMetadataModifier warningCode metada
   pure successfulObjects
 
 -- | Rebuilds the schema cache after modifying metadata. If an object with the given object id became newly inconsistent,
--- raises an error about it specifically. Otherwise, raises a generic metadata inconsistency error.
+-- or was already inconsistent and stays inconsistent, raises an error about it specifically.
+-- Otherwise, raises a generic metadata inconsistency error.
 buildSchemaCacheFor ::
   (QErrM m, CacheRWM m, MetadataM m) =>
   MetadataObjId ->
   MetadataModifier ->
   m ()
 buildSchemaCacheFor objectId metadataModifier = do
-  newInconsistentObjects <- tryBuildSchemaCache metadataModifier
+  newInconsistentObjects <- tryBuildSchemaCache [objectId] metadataModifier
 
   for_ (HashMap.lookup objectId newInconsistentObjects) $ \matchingObjects -> do
     let reasons = commaSeparated $ imReason <$> matchingObjects

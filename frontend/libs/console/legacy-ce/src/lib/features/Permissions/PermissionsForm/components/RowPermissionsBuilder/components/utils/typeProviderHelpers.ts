@@ -1,25 +1,27 @@
-import { areTablesEqual } from '../../../../../../hasura-metadata-api';
-import { Table } from '../../../../../../hasura-metadata-types';
+import { Table } from '@hasura/shared/types';
 import set from 'lodash/set';
 import isObjectLike from 'lodash/isObjectLike';
 import { PermissionType, Permissions, Tables } from '../types';
 import { getNamedType, getNullableType, isObjectType } from 'graphql';
+import { findTable, getRelationshipTargetSource } from './tables';
 
 export function getPermissionTypes(
   tables: Tables,
-  rootTable: Table,
-  permissions: Permissions
+  rootTable: Table | undefined,
+  permissions: Permissions,
+  rootSource?: string,
 ) {
   const newTypes: Record<string, { type: PermissionType }> = {};
   const setPermissionTypes = (
     value: any,
     path: string[],
-    table: Table,
-    isRelationship: boolean
+    table: Table | undefined,
+    source: string | undefined,
+    isRelationship: boolean,
   ) => {
-    const currentTable = tables.find(t => areTablesEqual(t.table, table));
+    const currentTable = table ? findTable(tables, table, source) : undefined;
     const type = currentTable?.columns.find(
-      c => c.name === path[path.length - 1]
+      (c) => c.name === path[path.length - 1],
     )?.graphQLProperties?.graphQLType;
     const pureType = type ? getNamedType(getNullableType(type)) : undefined;
     if (isRelationship) {
@@ -31,21 +33,28 @@ export function getPermissionTypes(
     if (isObjectLike(value)) {
       if (Array.isArray(value)) {
         value.forEach((item, index) => {
-          setPermissionTypes(item, [...path, index.toString()], table, false);
+          setPermissionTypes(
+            item,
+            [...path, index.toString()],
+            table,
+            source,
+            false,
+          );
         });
       } else {
-        Object.keys(value).forEach(key => {
-          const rel = currentTable?.relationships.find(r => r.name === key);
+        Object.keys(value).forEach((key) => {
+          const rel = currentTable?.relationships.find((r) => r.name === key);
           setPermissionTypes(
             value[key],
             [...path, key],
             rel && 'toTable' in rel.definition ? rel.definition.toTable : table,
-            !!rel
+            rel ? getRelationshipTargetSource(rel) : source,
+            !!rel,
           );
         });
       }
     }
   };
-  setPermissionTypes(permissions, [], rootTable, false);
+  setPermissionTypes(permissions, [], rootTable, rootSource, false);
   return newTypes;
 }

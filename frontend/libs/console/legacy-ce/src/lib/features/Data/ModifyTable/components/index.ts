@@ -1,5 +1,11 @@
-export { TableColumnDescription } from './TableColumnDescription';
 export { TableColumns } from './TableColumns';
 export { TableComments } from './TableComments';
 export { TableRootFields } from './TableRootFields';
 export { ForeignKeys } from './ForeignKeys';
+export { ComputedFields } from './ComputedFields/ComputedFields';
+export { SetAsEnum } from './SetAsEnum';
+export { CheckConstraints } from './CheckConstraints';
+export { PrimaryKey } from './PrimaryKey';
+export { UniqueKeys } from './UniqueKeys';
+export { Indexes } from './Indexes';
+export { Triggers } from './Triggers';

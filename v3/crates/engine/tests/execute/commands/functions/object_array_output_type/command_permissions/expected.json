@@ -3,6 +3,11 @@
     "data": {
       "getAllActors": [
         {
+          "actor_id": 0,
+          "name": "Peter",
+          "movie_id": 2
+        },
+        {
           "actor_id": 1,
           "name": "Leonardo DiCaprio",
           "movie_id": 1
@@ -43,6 +48,11 @@
   {
     "data": {
       "getAllActors": [
+        {
+          "actor_id": 0,
+          "name": "Peter",
+          "movie_id": 2
+        },
         {
           "actor_id": 1,
           "name": "Leonardo DiCaprio",
@@ -85,7 +95,7 @@
     "data": null,
     "errors": [
       {
-        "message": "validation failed: field getAllActors on type Query is not allowed for user_2"
+        "message": "validation failed: no such field on type Query: getAllActors"
       }
     ]
   }

@@ -1,39 +1,33 @@
-import type { ZodType, ZodTypeDef } from 'zod';
+import type { ZodType } from 'zod';
 import type { FieldError, FieldPath } from 'react-hook-form';
-import type { FieldWrapperPassThroughProps } from '../../../../../../new-components/Form';
-
-import * as React from 'react';
-
+import { Switch, FieldWrapper } from '@hasura/shared/ui';
+import type { FieldWrapperPassThroughProps } from '@hasura/shared/ui';
 import { z } from 'zod';
 import get from 'lodash/get';
 import { useFormContext, useWatch } from 'react-hook-form';
 
-import { Switch } from '../../../../../../new-components/Switch';
-import { FieldWrapper } from '../../../../../../new-components/Form';
-
 type TFormValues = Record<string, unknown>;
 
-export type Schema = ZodType<TFormValues, ZodTypeDef, TFormValues>;
+type Schema = ZodType<TFormValues, TFormValues>;
 
-export type ToggleProps<T extends z.infer<Schema>> =
-  FieldWrapperPassThroughProps & {
-    /**
-     * The input field name
-     */
-    name: FieldPath<T>;
-    /**
-     * The input field classes
-     */
-    className?: string;
-    /**
-     * Flag to indicate if the field is disabled
-     */
-    disabled?: boolean;
-    /**
-     * The written status can clarify to the user what the on/off statuses mean
-     */
-    writtenStatus?: { true: string; false: string };
-  };
+type ToggleProps<T extends z.infer<Schema>> = FieldWrapperPassThroughProps & {
+  /**
+   * The input field name
+   */
+  name: FieldPath<T>;
+  /**
+   * The input field classes
+   */
+  className?: string;
+  /**
+   * Flag to indicate if the field is disabled
+   */
+  disabled?: boolean;
+  /**
+   * The written status can clarify to the user what the on/off statuses mean
+   */
+  writtenStatus?: { true: string; false: string };
+};
 
 // TODO: Promote it to a shared component
 export const Toggle = <T extends z.infer<Schema>>({
@@ -79,11 +73,11 @@ export const Toggle = <T extends z.infer<Schema>>({
           aria-label={wrapperProps.label}
           aria-invalid={maybeError ? 'true' : 'false'}
           {...regReturn}
-          checked={value}
+          value={value}
           data-testid={name}
           disabled={disabled}
           defaultChecked={value}
-          onCheckedChange={onCheckedChange}
+          onChange={onCheckedChange}
         />
 
         {/* ml-2 is used in place of the usual ml-1 because otherwise the green border of the focus

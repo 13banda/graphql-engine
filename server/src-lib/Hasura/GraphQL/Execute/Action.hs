@@ -37,10 +37,16 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.List.Extended qualified as LE
 import Data.SerializableBlob qualified as SB
 import Data.Set (Set)
+import Data.String (fromString)
+import Data.Text qualified as T
 import Data.Text.Extended
 import Data.Text.NonEmpty
 import Database.PG.Query qualified as PG
 import Hasura.App.State
+import Hasura.Authentication.Header (mkSetCookieHeaders)
+import Hasura.Authentication.Role (adminRoleName)
+import Hasura.Authentication.Session (SessionVariables, mkClientHeadersForward)
+import Hasura.Authentication.User (UserInfo, _uiRole, _uiSession)
 import Hasura.Backends.Postgres.Connection.MonadTx
 import Hasura.Backends.Postgres.Execute.Prepare
 import Hasura.Backends.Postgres.Execute.Types
@@ -77,17 +83,11 @@ import Hasura.RQL.Types.CustomTypes
 import Hasura.RQL.Types.Eventing
 import Hasura.RQL.Types.Headers (HeaderConf)
 import Hasura.RQL.Types.OpenTelemetry (getOtelTracesPropagator)
-import Hasura.RQL.Types.Roles (adminRoleName)
 import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache
 import Hasura.Server.Init.Config (OptionalInterval (..), ResponseInternalErrorsConfig (..), shouldIncludeInternal)
 import Hasura.Server.Prometheus (PrometheusMetrics (..))
-import Hasura.Server.Types (HeaderPrecedence (..))
-import Hasura.Server.Utils
-  ( mkClientHeadersForward,
-    mkSetCookieHeaders,
-  )
-import Hasura.Session (SessionVariables, UserInfo, _uiRole, _uiSession)
+import Hasura.Server.Types (HeaderPrecedence (..), RedactActionHandlerLogsStatus)
 import Hasura.Tracing qualified as Tracing
 import Language.GraphQL.Draft.Syntax qualified as G
 import Network.HTTP.Client.Transformable qualified as HTTP
@@ -156,9 +156,11 @@ resolveActionExecution ::
   IR.AnnActionExecution Void ->
   ActionExecContext ->
   Maybe GQLQueryText ->
+  IncludeInternalErrors ->
   HeaderPrecedence ->
+  RedactActionHandlerLogsStatus ->
   ActionExecution
-resolveActionExecution httpManager env logger tracesPropagator prometheusMetrics IR.AnnActionExecution {..} ActionExecContext {..} gqlQueryText headerPrecedence =
+resolveActionExecution httpManager env logger tracesPropagator prometheusMetrics IR.AnnActionExecution {..} ActionExecContext {..} gqlQueryText includeInternalErrors headerPrecedence redactActionHandlerLogs =
   ActionExecution $ first (encJFromOrderedValue . makeActionResponseNoRelations _aaeFields _aaeOutputType _aaeOutputFields True) <$> runWebhook
   where
     handlerPayload = ActionWebhookPayload (ActionContext _aaeName) _aecSessionVariables _aaePayload gqlQueryText
@@ -179,12 +181,16 @@ resolveActionExecution httpManager env logger tracesPropagator prometheusMetrics
           _aecHeaders
           _aaeHeaders
           _aaeForwardClientHeaders
+          (map (fromString . T.unpack) _aaeIgnoredClientHeaders)
           _aaeWebhook
           handlerPayload
+          _aaeType
           _aaeTimeOut
           _aaeRequestTransform
           _aaeResponseTransform
+          includeInternalErrors
           headerPrecedence
+          redactActionHandlerLogs
 
 throwUnexpected :: (MonadError QErr m) => Text -> m ()
 throwUnexpected = throw400 Unexpected
@@ -306,16 +312,28 @@ metadata storage. See Note [Resolving async action query] below.
 -}
 
 -- | Resolve asynchronous action mutation which returns only the action uuid
+--
+-- Before persisting the action to the metadata storage we capture the
+-- current 'TraceContext' and serialize it into the request headers using
+-- 'composedPropagator' (W3C TraceContext + B3). The async processor will
+-- later restore that context (see 'callHandler' in 'asyncActionsProcessor')
+-- so the spans for the action handler webhook call roll up under the
+-- original GraphQL request's trace, instead of starting a fresh,
+-- disconnected trace. See customer ticket #14765 (Nutrien).
 resolveActionMutationAsync ::
-  (MonadMetadataStorage m, MonadError QErr m) =>
+  (MonadMetadataStorage m, MonadError QErr m, Tracing.MonadTraceContext m) =>
   IR.AnnActionMutationAsync ->
   [HTTP.Header] ->
   SessionVariables ->
   m ActionId
-resolveActionMutationAsync annAction reqHeaders sessionVariables =
-  liftEitherM $ insertAction actionName sessionVariables reqHeaders inputArgs
+resolveActionMutationAsync annAction reqHeaders sessionVariables = do
+  headersWithTrace <-
+    Tracing.currentContext <&> \case
+      Nothing -> reqHeaders
+      Just ctx -> Tracing.inject Tracing.composedPropagator ctx [] <> reqHeaders
+  liftEitherM $ insertAction actionName sessionVariables headersWithTrace inputArgs
   where
-    IR.AnnActionMutationAsync actionName _ inputArgs = annAction
+    IR.AnnActionMutationAsync actionName _ _ inputArgs = annAction
 
 {- Note: [Resolving async action query]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -380,9 +398,10 @@ resolveAsyncActionQuery userInfo annAction responseErrorsConfig =
                       IR.AsyncId -> mkAnnFldFromPGCol idColumn
                       IR.AsyncCreatedAt -> mkAnnFldFromPGCol createdAtColumn
                       IR.AsyncErrors ->
-                        if (shouldIncludeInternal (_uiRole userInfo) responseErrorsConfig)
-                          then RS.mkAnnColumnField (fst errorsColumn) (ColumnScalar (snd errorsColumn)) NoRedaction Nothing
-                          else
+                        case shouldIncludeInternal (_uiRole userInfo) responseErrorsConfig of
+                          IncludeInternalErrors ->
+                            RS.mkAnnColumnField (fst errorsColumn) (ColumnScalar (snd errorsColumn)) NoRedaction Nothing
+                          HideInternalErrors ->
                             RS.mkAnnColumnField
                               (fst errorsColumn)
                               (ColumnScalar (snd errorsColumn))
@@ -416,12 +435,14 @@ resolveAsyncActionQuery userInfo annAction responseErrorsConfig =
     mkQErrFromErrorValue :: J.Value -> QErr
     mkQErrFromErrorValue actionLogResponseError =
       let internal = ExtraInternal <$> (actionLogResponseError ^? key "internal")
-          internal' = if shouldIncludeInternal (_uiRole userInfo) responseErrorsConfig then internal else Nothing
+          internal' = case shouldIncludeInternal (_uiRole userInfo) responseErrorsConfig of
+            IncludeInternalErrors -> internal
+            HideInternalErrors -> Nothing
           errorMessageText = fromMaybe "internal: error in parsing the action log" $ actionLogResponseError ^? key "error" . _String
           codeMaybe = actionLogResponseError ^? key "code" . _String
           code = maybe Unexpected ActionWebhookCode codeMaybe
        in QErr [] HTTP.status500 errorMessageText code internal'
-    IR.AnnActionAsyncQuery _ actionId outputType asyncFields definitionList stringifyNumerics _ actionSource = annAction
+    IR.AnnActionAsyncQuery _ actionId outputType asyncFields definitionList stringifyNumerics _ _ actionSource = annAction
 
     idColumn = (unsafePGCol "id", PGUUID)
     responsePayloadColumn = (unsafePGCol TF.actionResponsePayloadColumn, PGJSONB)
@@ -488,9 +509,11 @@ asyncActionsProcessor ::
   STM.TVar (Set LockedActionEventId) ->
   Maybe GH.GQLQueryText ->
   Int ->
+  IncludeInternalErrors ->
   IO HeaderPrecedence ->
+  RedactActionHandlerLogsStatus ->
   m (Forever m)
-asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedActionEvents gqlQueryText fetchBatchSize getHeaderPrecedence =
+asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedActionEvents gqlQueryText fetchBatchSize includeInternalErrors getHeaderPrecedence redactActionHandlerLogs =
   return
     $ Forever ()
     $ const
@@ -527,14 +550,25 @@ asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedAct
           liftIO $ sleep $ milliseconds (unrefine sleepTime)
   where
     callHandler :: ActionCache -> Tracing.HttpPropagator -> HeaderPrecedence -> ActionLogItem -> m ()
-    callHandler actionCache tracesPropagator headerPrecedence actionLogItem =
-      Tracing.newTrace Tracing.sampleAlways "async actions processor" do
-        let ActionLogItem
-              actionId
-              actionName
-              reqHeaders
-              sessionVariables
-              inputPayload = actionLogItem
+    callHandler actionCache tracesPropagator headerPrecedence actionLogItem = do
+      let ActionLogItem
+            actionId
+            actionName
+            reqHeaders
+            sessionVariables
+            inputPayload = actionLogItem
+      -- Restore the trace context that was captured when the async action
+      -- was queued by 'resolveActionMutationAsync', so the processor's
+      -- spans (including the webhook call) attach to the original request's
+      -- trace. If no context was stored (older actions queued before this
+      -- fix shipped, or extraction failed), 'extract' falls back to a fresh
+      -- random context, matching the previous behaviour.
+      parentTraceCtx <- Tracing.extract Tracing.composedPropagator reqHeaders
+      -- Strip the trace headers we injected at queue time so we don't ship
+      -- a stale traceparent / B3 header alongside the fresh one that
+      -- 'traceHTTPRequest' emits for the webhook call.
+      let cleanReqHeaders = filter (not . Tracing.isTraceHeader . fst) reqHeaders
+      Tracing.newTraceWith parentTraceCtx Tracing.sampleAlways "async actions processor" do
         case HashMap.lookup actionName actionCache of
           Nothing -> return ()
           Just actionInfo -> do
@@ -542,6 +576,7 @@ asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedAct
                 outputFields = IR.getActionOutputFields $ snd $ _aiOutputType actionInfo
                 webhookUrl = _adHandler definition
                 forwardClientHeaders = _adForwardClientHeaders definition
+                ignoredClientHeaders = _adIgnoredClientHeaders definition
                 confHeaders = _adHeaders definition
                 timeout = _adTimeout definition
                 outputType = _adOutputType definition
@@ -560,15 +595,19 @@ asyncActionsProcessor getEnvHook logger getSCFromRef' getFetchInterval lockedAct
                   appEnvPrometheusMetrics
                   outputType
                   outputFields
-                  reqHeaders
+                  cleanReqHeaders
                   confHeaders
                   forwardClientHeaders
+                  (map (fromString . T.unpack) ignoredClientHeaders)
                   webhookUrl
                   (ActionWebhookPayload actionContext sessionVariables inputPayload gqlQueryText)
+                  (ActionMutation ActionAsynchronous)
                   timeout
                   metadataRequestTransform
                   metadataResponseTransform
+                  includeInternalErrors
                   headerPrecedence
+                  redactActionHandlerLogs
             resE <-
               setActionStatus actionId $ case eitherRes of
                 Left e -> AASError e
@@ -593,12 +632,16 @@ callWebhook ::
   [HTTP.Header] ->
   [HeaderConf] ->
   Bool ->
+  [HTTP.HeaderName] ->
   EnvRecord ResolvedWebhook ->
   ActionWebhookPayload ->
+  ActionType ->
   Timeout ->
   Maybe RequestTransform ->
   Maybe MetadataResponseTransform ->
+  IncludeInternalErrors ->
   HeaderPrecedence ->
+  RedactActionHandlerLogsStatus ->
   m (ActionWebhookResponse, HTTP.ResponseHeaders)
 callWebhook
   env
@@ -610,14 +653,18 @@ callWebhook
   reqHeaders
   confHeaders
   forwardClientHeaders
+  ignoredClientHeaders
   resolvedWebhook
   actionWebhookPayload
+  actionType
   timeoutSeconds
   metadataRequestTransform
   metadataResponseTransform
-  headerPrecedence = do
+  includeInternalErrors
+  headerPrecedence
+  redactActionHandlerLogs = do
     resolvedConfHeaders <- makeHeadersFromConf env confHeaders
-    let clientHeaders = if forwardClientHeaders then mkClientHeadersForward reqHeaders else mempty
+    let clientHeaders = if forwardClientHeaders then mkClientHeadersForward ignoredClientHeaders reqHeaders else mempty
         hdrs = case headerPrecedence of
           -- preserves old behaviour (default)
           -- avoids duplicates and forwards client headers with higher precedence than configuration headers
@@ -630,6 +677,7 @@ callWebhook
         responseTimeout = HTTP.responseTimeoutMicro $ (unTimeout timeoutSeconds) * 1000000
         (EnvRecord webhookEnvName resolvedWebhookValue) = resolvedWebhook
         webhookUrl = unResolvedWebhook resolvedWebhookValue
+        actionContext = _awpAction actionWebhookPayload
         sessionVars = Just $ _awpSessionVariables actionWebhookPayload
 
     initReq <- liftIO $ HTTP.mkRequestThrow webhookUrl
@@ -664,18 +712,24 @@ callWebhook
       Tracing.traceHTTPRequest tracesPropagator actualReq $ \request ->
         liftIO . try $ HTTP.httpLbs request manager
 
-    let requestInfo = ActionRequestInfo webhookEnvName postPayload (confHeaders <> toHeadersConf clientHeaders) transformedReq
+    let requestInfo =
+          ActionRequestInfo
+            webhookEnvName
+            actionContext
+            (_awpInput actionWebhookPayload)
+            (_awpRequestQuery actionWebhookPayload)
+            transformedReq
 
     case httpResponse of
       Left e ->
-        throw500WithDetail "http exception when calling webhook"
-          $ J.toJSON
-          $ ActionInternalError (getHttpExceptionJson (ShowErrorInfo True) $ HttpException e) requestInfo Nothing
+        let msg = "http exception when calling webhook"
+         in throwInternalError msg includeInternalErrors
+              $ ActionInternalError (getHttpExceptionJson (ShowErrorInfo True) $ HttpException e) requestInfo Nothing
       Right responseWreq -> do
         -- TODO(SOLOMON): Remove 'wreq'
         let responseBody = responseWreq ^. Wreq.responseBody
             responseBodySize = BL.length responseBody
-            actionName = _acName $ _awpAction actionWebhookPayload
+            actionName = _acName actionContext
             responseStatus = responseWreq ^. Wreq.responseStatus
             mkResponseInfo respBody =
               ActionResponseInfo (HTTP.statusCode responseStatus) respBody
@@ -706,23 +760,35 @@ callWebhook
             (pmActionBytesReceived prometheusMetrics)
             responseBodySize
         logger :: (L.Logger L.Hasura) <- asks getter
-        L.unLoggerTracing logger $ ActionHandlerLog req transformedReq requestBodySize transformedReqSize responseBodySize actionName
+        L.unLoggerTracing logger
+          $ ActionHandlerLog
+            req
+            transformedReq
+            requestBodySize
+            transformedReqSize
+            responseBodySize
+            actionName
+            actionType
+            redactActionHandlerLogs
 
         case J.eitherDecode transformedResponseBody of
           Left e -> do
             let responseInfo = mkResponseInfo $ J.String $ bsToTxt $ BL.toStrict responseBody
-            throw500WithDetail "not a valid json response from webhook"
-              $ J.toJSON
-              $ ActionInternalError (J.toJSON $ "invalid json: " <> e) requestInfo
-              $ Just responseInfo
+                msg = "not a valid json response from webhook"
+             in throwInternalError msg includeInternalErrors
+                  $ ActionInternalError (J.toJSON $ "invalid JSON: " <> e) requestInfo
+                  $ Just responseInfo
           Right responseValue -> do
             let responseInfo = mkResponseInfo responseValue
                 addInternalToErr e =
-                  let actionInternalError =
-                        J.toJSON
-                          $ ActionInternalError (J.String "unexpected response") requestInfo
-                          $ Just responseInfo
-                   in e {qeInternal = Just $ ExtraInternal actionInternalError}
+                  case includeInternalErrors of
+                    HideInternalErrors -> e
+                    IncludeInternalErrors ->
+                      let actionInternalError =
+                            J.toJSON
+                              $ ActionInternalError (J.String "unexpected response") requestInfo
+                              $ Just responseInfo
+                       in e {qeInternal = Just $ ExtraInternal actionInternalError}
 
             if
               | HTTP.statusIsSuccessful responseStatus -> do
@@ -741,10 +807,19 @@ callWebhook
                         J.toJSON
                           $ "expecting 2xx or 4xx status code, but found "
                           ++ show (HTTP.statusCode responseStatus)
-                  throw500WithDetail "internal error"
-                    $ J.toJSON
-                    $ ActionInternalError err requestInfo
-                    $ Just responseInfo
+                      msg = "internal error"
+                   in throwInternalError msg includeInternalErrors
+                        $ ActionInternalError err requestInfo
+                        $ Just responseInfo
+
+throwInternalError :: (MonadError QErr m) => Text -> IncludeInternalErrors -> ActionInternalError -> m a
+throwInternalError msg includeInternalErrors actionInternalError =
+  case includeInternalErrors of
+    HideInternalErrors -> throwError (internalError msg)
+    IncludeInternalErrors ->
+      throw500WithDetail msg
+        $ J.toJSON
+        $ actionInternalError
 
 processOutputSelectionSet ::
   TF.ArgumentExp v ->

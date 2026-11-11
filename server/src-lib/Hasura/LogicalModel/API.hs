@@ -23,6 +23,7 @@ import Control.Lens (Traversal', has, preview, (^?))
 import Data.Aeson
 import Data.HashMap.Strict.InsOrd.Extended qualified as InsOrdHashMap
 import Data.Text.Extended (toTxt, (<<>))
+import Hasura.Authentication.Role (RoleName)
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.LogicalModel.Lenses (lmmSelectPermissions)
@@ -40,7 +41,6 @@ import Hasura.RQL.Types.Metadata
 import Hasura.RQL.Types.Metadata.Backend
 import Hasura.RQL.Types.Metadata.Object
 import Hasura.RQL.Types.Permission (PermDef (_pdRole), SelPerm)
-import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.RQL.Types.SchemaCache.Build
 import Hasura.SQL.AnyBackend qualified as AB
 
@@ -100,16 +100,16 @@ data GetLogicalModel (b :: BackendType) = GetLogicalModel
   { glmSource :: SourceName
   }
 
-deriving instance (Backend b) => Show (GetLogicalModel b)
+deriving instance Show (GetLogicalModel b)
 
-deriving instance (Backend b) => Eq (GetLogicalModel b)
+deriving instance Eq (GetLogicalModel b)
 
-instance (Backend b) => FromJSON (GetLogicalModel b) where
+instance FromJSON (GetLogicalModel b) where
   parseJSON = withObject "GetLogicalModel" $ \o -> do
     glmSource <- o .: "source"
     pure GetLogicalModel {..}
 
-instance (Backend b) => ToJSON (GetLogicalModel b) where
+instance ToJSON (GetLogicalModel b) where
   toJSON GetLogicalModel {..} =
     object
       [ "source" .= glmSource

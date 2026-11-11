@@ -16,8 +16,8 @@ List of PostgreSQL types supported by the Hasura GraphQL Engine with their equiv
 
 | Name                                    | Aliases            | Description                                                 | Hasura Type                                                                                                                   |
 | --------------------------------------- | ------------------ | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| bigint                                  | int8               | signed eight-byte integer                                   | [Numeric](#numeric) or [String](#string) ([flag](/latest/deployment/graphql-engine-flags/reference/#stringify-numeric-types)) |
-| bigserial                               | serial8            | autoincrementing eight-byte integer                         | [Numeric](#numeric) or [String](#string) ([flag](/latest/deployment/graphql-engine-flags/reference/#stringify-numeric-types)) |
+| bigint                                  | int8               | signed eight-byte integer                                   | [Numeric](#numeric) or [String](#string) ([flag](/deployment/graphql-engine-flags/reference.mdx#stringify-numeric-types))     |
+| bigserial                               | serial8            | autoincrementing eight-byte integer                         | [Numeric](#numeric) or [String](#string) ([flag](/deployment/graphql-engine-flags/reference.mdx#stringify-numeric-types))     |
 | bit [ (n) ]                             |                    | fixed-length bit string                                     | [Implicit](#implicit)                                                                                                         |
 | bit varying [ (n) ]                     | varbit [ (n) ]     | variable-length bit string                                  | [Implicit](#implicit)                                                                                                         |
 | boolean                                 | bool               | logical Boolean (true/false)                                | [Bool](#bool)                                                                                                                 |
@@ -28,7 +28,7 @@ List of PostgreSQL types supported by the Hasura GraphQL Engine with their equiv
 | cidr                                    |                    | IPv4 or IPv6 network address                                | [Implicit](#implicit)                                                                                                         |
 | circle                                  |                    | circle on a plane                                           | [Implicit](#implicit)                                                                                                         |
 | date                                    |                    | calendar date (year, month, day)                            | [Date](#date)                                                                                                                 |
-| double precision                        | float8             | double precision floating-point number (8 bytes)            | [Float](#float) or [String](#string) ([flag](/latest/deployment/graphql-engine-flags/reference/#stringify-numeric-types))     |
+| double precision                        | float8             | double precision floating-point number (8 bytes)            | [Float](#float) or [String](#string) ([flag](/deployment/graphql-engine-flags/reference.mdx#stringify-numeric-types))         |
 | inet                                    |                    | IPv4 or IPv6 host address                                   | [Implicit](#implicit)                                                                                                         |
 | integer                                 | int, int4          | signed four-byte integer                                    | [Int](#int)                                                                                                                   |
 | interval [ fields ] [ (p) ]             |                    | time span                                                   | [Implicit](#implicit)                                                                                                         |
@@ -42,7 +42,7 @@ List of PostgreSQL types supported by the Hasura GraphQL Engine with their equiv
 | macaddr                                 |                    | MAC (Media Access Control) address                          | [Implicit](#implicit)                                                                                                         |
 | macaddr8                                |                    | MAC (Media Access Control) address (EUI-64 format)          | [Implicit](#implicit)                                                                                                         |
 | money                                   |                    | currency amount                                             | [Implicit](#implicit)                                                                                                         |
-| numeric [ (p, s) ]                      | decimal [ (p, s) ] | exact numeric of selectable precision                       | [Numeric](#numeric) or [String](#string) ([flag](/latest/deployment/graphql-engine-flags/reference/#stringify-numeric-types)) |
+| numeric [ (p, s) ]                      | decimal [ (p, s) ] | exact numeric of selectable precision                       | [Numeric](#numeric) or [String](#string) ([flag](/deployment/graphql-engine-flags/reference.mdx#stringify-numeric-types))     |
 | path                                    |                    | geometric path on a plane                                   | [Implicit](#implicit)                                                                                                         |
 | pg_lsn                                  |                    | PostgreSQL Log Sequence Number                              | [Implicit](#implicit)                                                                                                         |
 | point                                   |                    | geometric point on a plane                                  | [Implicit](#implicit)                                                                                                         |
@@ -167,7 +167,8 @@ objects: [
 
 ## Date {#date}
 
-GraphQL custom scalar with name **date**. Date (no time of day). Allowed values are yyyy-mm-dd.
+GraphQL custom scalar with name **date**. Date (no time of day). Allowed values are yyyy-mm-dd, or one of the
+[special date/time input values](#special-date-time-input-values) of Postgres.
 
 E.g.
 
@@ -182,7 +183,8 @@ objects: [
 ## Time with time zone {#timetz}
 
 GraphQL custom scalar type with name **timetz**. Time of day only, with time zone. Allowed values should be of ISO8601
-format (e.g. 17:30:15Z, 17:30:15+05:30, 17:30:15.234890+05:30).
+format (e.g. 17:30:15Z, 17:30:15+05:30, 17:30:15.234890+05:30), or one of the
+[special date/time input values](#special-date-time-input-values) of Postgres.
 
 E.g.
 
@@ -197,7 +199,8 @@ objects: [
 ## Timestamp with time zone {#timestamptz}
 
 GraphQL custom scalar type with name **timestamptz**. Both date and time, with time zone. Allowed values should be of
-ISO8601 format (e.g. 2016-07-20T17:30:15Z, 2016-07-20T17:30:15+05:30, 2016-07-20T17:30:15.234890+05:30).
+ISO8601 format (e.g. 2016-07-20T17:30:15Z, 2016-07-20T17:30:15+05:30, 2016-07-20T17:30:15.234890+05:30), or one of the
+[special date/time input values](#special-date-time-input-values) of Postgres.
 
 E.g.
 
@@ -208,6 +211,24 @@ objects: [
   }
 ]
 ```
+
+<div id="special-date-time-input-values" />
+
+:::info Special date/time input values
+
+A string that Hasura cannot parse as a date or time is passed to Postgres as it is, and Postgres converts it. So the
+[special date/time input values](https://www.postgresql.org/docs/current/datatype-datetime.html#DATATYPE-DATETIME-SPECIAL-VALUES)
+of Postgres can also be used for date/time columns, e.g. `{created_at: "now"}`:
+
+- `now` can be used for `date`, time and timestamp columns. Postgres resolves it to the start time of the current
+  transaction.
+- `today`, `tomorrow`, `yesterday`, `epoch`, `infinity` and `-infinity` can only be used for `date` and timestamp
+  columns.
+- `allballs` (midnight UTC) can only be used for time columns.
+
+A value that is not valid for the column type is rejected by Postgres with an error.
+
+:::
 
 ## JSON {#json}
 

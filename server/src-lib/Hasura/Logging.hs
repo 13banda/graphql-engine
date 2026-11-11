@@ -57,10 +57,11 @@ module Hasura.Logging
     -- * Other internal logs
     StoredIntrospectionLog (..),
     StoredIntrospectionStorageLog (..),
+    RemoteSchemaHealingLog (..),
   )
 where
 
-import Control.Exception (ErrorCall (ErrorCallWithLocation), catch)
+import Control.Exception (ErrorCall (..), catch)
 import Control.FoldDebounce qualified as FDebounce
 import Control.Monad.Trans.Control
 import Control.Monad.Trans.Managed (ManagedT (..), allocate)
@@ -192,6 +193,7 @@ data InternalLogTypes
   | ILTStoredIntrospection
   | ILTStoredIntrospectionStorage
   | ILTModelInfo
+  | ILTRemoteSchemaHealing
   deriving (Show, Eq, Generic)
 
 instance Hashable InternalLogTypes
@@ -214,6 +216,7 @@ instance Witch.From InternalLogTypes Text where
     ILTStoredIntrospection -> "stored-introspection"
     ILTStoredIntrospectionStorage -> "stored-introspection-storage"
     ILTModelInfo -> "model-info"
+    ILTRemoteSchemaHealing -> "remote-schema-healing"
 
 instance J.ToJSON InternalLogTypes where
   toJSON = J.String . Witch.into @Text
@@ -350,10 +353,10 @@ getLogsExporter = _lcLogsExporter
 newtype UnhandledInternalErrorLog = UnhandledInternalErrorLog ErrorCall
 
 instance ToEngineLog UnhandledInternalErrorLog Hasura where
-  toEngineLog (UnhandledInternalErrorLog (ErrorCallWithLocation err loc)) =
+  toEngineLog (UnhandledInternalErrorLog (ErrorCall err)) =
     ( LevelError,
       ELTInternal ILTUnhandledInternalError,
-      J.object [("error", fromString err), ("location", fromString loc)]
+      J.object [("error", fromString err)]
     )
 
 -- * LoggerSettings
@@ -511,6 +514,21 @@ instance J.ToJSON StoredIntrospectionStorageLog where
 instance ToEngineLog StoredIntrospectionStorageLog Hasura where
   toEngineLog sisLog =
     (LevelInfo, ELTInternal ILTStoredIntrospectionStorage, J.toJSON sisLog)
+
+-- | Logs from the background thread that retries introspection of
+-- inconsistent remote schemas. See "Hasura.Server.RemoteSchemaHealing".
+data RemoteSchemaHealingLog = RemoteSchemaHealingLog
+  { rshlLevel :: LogLevel,
+    rshlMessage :: Text,
+    rshlDetail :: J.Value
+  }
+
+instance ToEngineLog RemoteSchemaHealingLog Hasura where
+  toEngineLog (RemoteSchemaHealingLog level message detail) =
+    ( level,
+      ELTInternal ILTRemoteSchemaHealing,
+      J.object $ ["message" J..= message] <> ["detail" J..= detail | detail /= J.Null]
+    )
 
 -- | A logger useful for accumulating  and logging stats, in tight polling loops. It also
 -- debounces to not flood with excessive logs. Use @'logStats' to record statistics for logging.

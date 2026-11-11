@@ -1,57 +1,54 @@
-import React from 'react';
 import { MultipleJWTSecretsSvg } from './MultipleJWTSecretsSvg';
 import { EETrialCard } from '../EETrialCard/EETrialCard';
 import { useEELiteAccess } from '../../hooks/useEELiteAccess';
-import globals from '../../../../Globals';
+import { Code, Flex, Heading } from '@radix-ui/themes';
+import { LearnMoreLink, Text } from '@hasura/shared/ui';
 
 export const MultipleJWTSecretsPage = () => {
-  const { access } = useEELiteAccess(globals);
-  const isFeatureForbidden = access === 'forbidden';
-
-  const isFeatureActive = access === 'active';
+  const { access, consoleType } = useEELiteAccess();
+  const isFeatureForbidden =
+    consoleType === 'oss' ||
+    (consoleType === 'pro-lite' && access === 'forbidden');
 
   if (isFeatureForbidden) return null;
 
+  const isFeatureActive = consoleType !== 'pro-lite' || access === 'active';
+
   return (
-    <div className="flex max-w-screen-md p-md">
+    <Flex className="max-w-(--breakpoint-lg) p-4">
       <div className="max-w-3xl">
-        <div className="text-xl text-slate-900 font-semibold mb-xs">
-          Multiple JWT Secrets
-        </div>
-        <div className="mt-0 mb-xs">
-          <span className="text-muted">
+        <Heading size="5">Multiple JWT Secrets</Heading>
+        <div className="mb-1">
+          <Text>
             Enable access to your Hasura instance using multiple JSON web token
             secrets
-          </span>
-          <a
+          </Text>{' '}
+          <LearnMoreLink
             href="https://hasura.io/docs/latest/security/multiple-jwt-secrets/"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="italic font-thin text-sm ml-1 text-secondary"
-          >
-            (Know More)
-          </a>
+            text="(Know More)"
+          />
         </div>
-        <MultipleJWTSecretsSvg />
+        <div className="mb-4">
+          <MultipleJWTSecretsSvg />
+        </div>
         {isFeatureActive ? (
-          <p className="mt-md text-muted">
-            <strong>Setup Multiple JWT Secrets</strong>
+          <p className="mt-4">
+            <Text weight="bold">Setup Multiple JWT Secrets</Text>
             <br />
-            <a
-              className="font-bold text-secondary"
+            <LearnMoreLink
+              text="Read more"
               href="https://hasura.io/docs/latest/security/multiple-jwt-secrets/"
-            >
-              Read more
-            </a>{' '}
+              weight="bold"
+            />{' '}
             on setting up multiple JWT secrets for your Hasura instance.
             <br />
             Multiple admin secrets may be enabled by setting the environment
-            variable: <code>HASURA_GRAPHQL_JWT_SECRETS</code>
+            variable: <Code>HASURA_GRAPHQL_JWT_SECRETS</Code>
           </p>
         ) : (
           <EETrialCard
             id="multiple-jwt-secrets"
-            className="mt-md"
+            className="mt-4"
             cardTitle="Want to enable multiple secrets for your instance?"
             cardText={
               <span>
@@ -65,6 +62,6 @@ export const MultipleJWTSecretsPage = () => {
           />
         )}
       </div>
-    </div>
+    </Flex>
   );
 };

@@ -89,7 +89,6 @@
 -- Additional details are provided by the documentation for individual bindings.
 module Hasura.GraphQL.Execute.Subscription.Plan
   ( CohortId,
-    dummyCohortId,
     newCohortId,
     CohortIdArray (..),
     CohortVariablesArray (..),
@@ -124,17 +123,16 @@ import Data.HashMap.Strict qualified as HashMap
 import Data.HashSet qualified as Set
 import Data.Monoid (Endo (..))
 import Data.UUID (UUID)
-import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import Database.PG.Query qualified as PG
 import Database.PG.Query.PTI qualified as PTI
+import Hasura.Authentication.Role (RoleName)
+import Hasura.Authentication.Session (SessionVariable, SessionVariables, filterSessionVariables)
 import Hasura.Backends.Postgres.SQL.Value
 import Hasura.EncJSON
 import Hasura.Prelude
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendType
-import Hasura.RQL.Types.Roles (RoleName)
-import Hasura.Session (SessionVariable, SessionVariables, filterSessionVariables)
 import Language.GraphQL.Draft.Syntax qualified as G
 import PostgreSQL.Binary.Encoding qualified as PE
 
@@ -182,9 +180,6 @@ newtype CohortId = CohortId {unCohortId :: UUID}
 
 newCohortId :: (MonadIO m) => m CohortId
 newCohortId = CohortId <$> liftIO UUID.nextRandom
-
-dummyCohortId :: CohortId
-dummyCohortId = CohortId UUID.nil
 
 data CohortVariables = CohortVariables
   { _cvSessionVariables :: !SessionVariables,

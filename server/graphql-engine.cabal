@@ -126,6 +126,8 @@ extra-source-files:
   src-rsr/pg_source_migrations/0_to_1.sql
   src-rsr/pg_source_migrations/1_to_2.sql
   src-rsr/pg_source_migrations/2_to_3.sql
+  src-rsr/pg_source_migrations/3_to_4.sql
+  src-rsr/pg_source_migrations/4_to_5.sql
   src-rsr/pg_table_metadata.sql
   src-rsr/table_meta.sql
   src-rsr/trigger.sql.shakespeare
@@ -161,6 +163,9 @@ common common-all
     -fmax-simplifier-iterations=2
     -- Taken from https://medium.com/mercury-bank/enable-all-the-warnings-a0517bc081c3
     -Weverything
+    -Wno-missing-role-annotations
+    -Wno-term-variable-capture
+    -Wno-missing-poly-kind-signatures
     -Wno-missing-exported-signatures
     -Wno-missing-import-lists
     -Wno-missed-specialisations
@@ -190,10 +195,8 @@ common common-all
       -- This is for performance, and works in combination with '-fspecialise-aggressively'
       -- in the graphql-engine 'executable' stanza below, and in any other dependent
       -- executables (See mono #2610):
-      -fexpose-all-unfoldings
+      -fexpose-overloaded-unfoldings
       -O2
-      -- This is lowered to limit compile time and binary size (default 80)
-      -funfolding-use-threshold=40
   else
     -- we just want to build fast:
     ghc-options: -O0
@@ -285,7 +288,6 @@ common lib-depends
                      , deepseq
                      , dependent-map >=0.4 && <0.5
                      , dependent-sum
-                     , dependent-sum-template
                      , either
                      , extra
                      , hasura-error-message
@@ -368,12 +370,12 @@ common lib-depends
                      , byteorder
 
                      -- for parsing RSA keys
-                     , cryptonite
+                     , crypton
 
                      -- for jwt verification
                      , jose
                      , pem
-                     , x509
+                     , crypton-x509
                      , asn1-encoding
                      , asn1-types
 
@@ -475,12 +477,12 @@ common lib-depends
 
                      -- bigquery support
                      , memory
-                     , x509-store
-                     , connection
+                     , crypton-x509-store
+                     , crypton-connection
                      , tls
-                     , x509-validation
+                     , crypton-x509-validation
                      , data-default-class
-                     , x509-system
+                     , crypton-x509-system
                      , tagged
                       -- dependency of vendored 'ip':
                      , wide-word
@@ -642,6 +644,7 @@ library
                      -- GraphQL Data Connector
                      , Hasura.Backends.DataConnector.Adapter.API
                      , Hasura.Backends.DataConnector.Adapter.Backend
+                     , Hasura.Backends.DataConnector.Adapter.ColumnValues
                      , Hasura.Backends.DataConnector.Adapter.Execute
                      , Hasura.Backends.DataConnector.Adapter.ConfigTransform
                      , Hasura.Backends.DataConnector.Adapter.RunSQL
@@ -665,6 +668,13 @@ library
                      , Hasura.Logging
                      , Hasura.HTTP
                      , Hasura.PingSources
+
+                     , Hasura.Authentication.Header
+                     , Hasura.Authentication.Headers
+                     , Hasura.Authentication.Role
+                     , Hasura.Authentication.Session
+                     , Hasura.Authentication.User
+
                      , Hasura.Server.API.Backend
                      , Hasura.Server.API.Instances
                      , Hasura.Server.API.Metadata
@@ -683,7 +693,6 @@ library
                      , Hasura.Server.Init.Arg.PrettyPrinter
                      , Hasura.Server.Init.Config
                      , Hasura.Server.Init.Env
-                     , Hasura.Server.Init.FeatureFlag
                      , Hasura.Server.Init.Logging
                      , Hasura.Server.Limits
                      , Hasura.Server.Logging
@@ -722,7 +731,6 @@ library
                      , Hasura.GraphQL.Logging.QueryLog
                      , Hasura.GraphQL.Logging.ExecutionLog
                      , Hasura.RQL.DML.Select
-                     , Hasura.Session
 
                      , Hasura.Server.API.Config
                      , Hasura.Server.Metrics
@@ -732,6 +740,7 @@ library
                      , Hasura.Server.Telemetry.Counters
                      , Hasura.Server.Auth.JWT
                      , Hasura.GC
+                     , Hasura.CpuDetect
 
                      , Hasura.LogicalModelResolver.Codec
                      , Hasura.LogicalModelResolver.Lenses
@@ -780,6 +789,7 @@ library
                      , Hasura.Server.CheckUpdates
                      , Hasura.Server.AppStateRef
                      , Hasura.Server.SchemaUpdate
+                     , Hasura.Server.RemoteSchemaHealing
                      , Hasura.Server.Migrate.LatestVersion
                      , Hasura.Server.Migrate.Version
                      , Hasura.Server.Migrate.Internal
@@ -801,6 +811,7 @@ library
                      , Hasura.RemoteSchema.SchemaCache.RemoteRelationship
                      , Hasura.RemoteSchema.SchemaCache.Build
                      , Hasura.RemoteSchema.SchemaCache
+
                      , Hasura.RQL.Types.Action
                      , Hasura.RQL.Types.Allowlist
                      , Hasura.RQL.Types.ApiLimit
@@ -838,7 +849,6 @@ library
                      , Hasura.RQL.Types.Relationships.Remote
                      , Hasura.RQL.Types.Relationships.ToSource
                      , Hasura.RQL.Types.ResultCustomization
-                     , Hasura.RQL.Types.Roles
                      , Hasura.RQL.Types.Roles.Internal
                      , Hasura.RQL.Types.ResizePool
                      , Hasura.RQL.Types.ScheduledTrigger
@@ -848,7 +858,6 @@ library
                      , Hasura.RQL.Types.SchemaCache.Instances
                      , Hasura.RQL.Types.SchemaCacheTypes
                      , Hasura.RQL.Types.Schema.Options
-                     , Hasura.RQL.Types.Session
                      , Hasura.RQL.Types.Source
                      , Hasura.RQL.Types.Source.Column
                      , Hasura.RQL.Types.Source.Table
@@ -1050,6 +1059,7 @@ executable graphql-engine
     ghc-options:
       -- This is for performance (See mono #2610):
       -fspecialise-aggressively
+      -fpolymorphic-specialisation
 
   hs-source-dirs:    src-exec
   main-is:           Main.hs
@@ -1135,6 +1145,7 @@ test-suite graphql-engine-tests
     , monad-control
     , mtl
     , network-uri
+    , odbc
     , openapi3
     , optparse-applicative
     , pg-client
@@ -1182,9 +1193,11 @@ test-suite graphql-engine-tests
     Data.TimeSpec
     Data.TrieSpec
     Hasura.AppSpec
+    Hasura.Authentication.SessionSpec
     Hasura.Base.Error.TestInstances
     Hasura.Backends.BigQuery.SourceSpec
     Hasura.Backends.BigQuery.TypesSpec
+    Hasura.Backends.DataConnector.Adapter.MetadataSpec
     Hasura.Backends.DataConnector.Adapter.TypesSpec
     Hasura.Backends.DataConnector.API.V0.AggregateSpec
     Hasura.Backends.DataConnector.API.V0.CapabilitiesSpec
@@ -1200,6 +1213,7 @@ test-suite graphql-engine-tests
     Hasura.Backends.DataConnector.API.V0.SchemaSpec
     Hasura.Backends.DataConnector.API.V0.TableSpec
     Hasura.Backends.DataConnector.API.V0.TargetSpec
+    Hasura.Backends.MSSQL.FromIr.QuerySpec
     Hasura.Backends.Postgres.Connection.VersionCheckSpec
     Hasura.Backends.Postgres.Execute.PrepareSpec
     Hasura.Backends.Postgres.NativeQueries.NativeQueriesSpec
@@ -1212,13 +1226,16 @@ test-suite graphql-engine-tests
     Hasura.Backends.Postgres.RQLGenerator.GenTablePermG
     Hasura.Backends.Postgres.SQL.EDSL
     Hasura.Backends.Postgres.SQL.Select.RenameIdentifiersSpec
+    Hasura.Backends.Postgres.SQL.SplitSQLSpec
     Hasura.Backends.Postgres.SQL.ValueSpec
+    Hasura.Backends.Postgres.TableMetadataSpec
     Hasura.Backends.Postgres.Translate.DeleteSpec
     Hasura.Backends.Postgres.Translate.InsertSpec
     Hasura.Backends.Postgres.Translate.UpdateSpec
     Hasura.EncJSONSpec
     Hasura.EventingSpec
     Hasura.Generator.Common
+    Hasura.GraphQL.Logging.QueryLogSpec
     Hasura.GraphQL.NamespaceSpec
     Hasura.GraphQL.Schema.BoolExp.AggregationPredicatesSpec
     Hasura.GraphQL.Schema.Build.UpdateSpec
@@ -1226,6 +1243,7 @@ test-suite graphql-engine-tests
     Hasura.GraphQL.Schema.RemoteSpec
     Hasura.Metadata.DTO.MetadataDTOSpec
     Hasura.QuickCheck.Instances
+    Hasura.RQL.DDL.CustomTypesSpec
     Hasura.RQL.DDL.Webhook.TransformSpec
     Hasura.RQL.IR.Generator
     Hasura.RQL.IR.SelectSpec
@@ -1243,12 +1261,12 @@ test-suite graphql-engine-tests
     Hasura.Server.InitSpec
     Hasura.Server.Init.ArgSpec
     Hasura.Server.Migrate.VersionSpec
+    Hasura.Server.RemoteSchemaHealingSpec
     Hasura.Server.TelemetrySpec
     Hasura.Server.VersionSpec
     Hasura.Server.InitSpec
     Hasura.Server.Init.ArgSpec
     Hasura.Server.ResourceCheckerSpec
-    Hasura.SessionSpec
     Hasura.SQL.BackendMapSpec
     Hasura.SQL.WKTSpec
     Hasura.Tracing.TraceIdSpec
@@ -1283,6 +1301,7 @@ test-suite graphql-engine-test-mssql
   other-modules:
     Database.MSSQL.TransactionSpec
     Hasura.Backends.MSSQL.ErrorSpec
+    Hasura.Backends.MSSQL.EventTriggerCleanupSuite
     SpecHook
 
 test-suite graphql-engine-test-postgres
@@ -1302,3 +1321,4 @@ test-suite graphql-engine-test-postgres
     Test.Hasura.EventTriggerCleanupSuite
     Test.Hasura.StreamingSubscriptionSuite
     Test.Hasura.Server.MigrateSuite
+    Test.Hasura.Server.SourceCatalogSuite

@@ -48,7 +48,6 @@ import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache hiding (askTableInfo)
 import Hasura.RQL.Types.Source
 import Hasura.RQL.Types.SourceCustomization
-import Hasura.Server.Init.FeatureFlag qualified as FF
 import Hasura.Table.Cache
 import Language.GraphQL.Draft.Syntax qualified as G
 
@@ -318,7 +317,7 @@ functionArgs ::
   SchemaT r m (InputFieldsParser n (FunctionArgsExp ('Postgres pgKind) (IR.UnpreparedValue ('Postgres pgKind))))
 functionArgs functionTrackedAs (toList -> inputArgs) = do
   sourceInfo :: SourceInfo ('Postgres pgKind) <- asks getter
-  enableNamingConventionSep2023 <- FF.checkFlag FF.namingConventionSep2023
+  enableNamingConventionSep2023 <- (== Options.EnableNamingConventionSep2023) <$> retrieve Options.soNamingConventionSep2023
   let customization = _siCustomization sourceInfo
       tCase
         | enableNamingConventionSep2023 = _rscNamingConvention customization

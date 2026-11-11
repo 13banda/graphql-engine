@@ -1,22 +1,20 @@
 import React, { ReactNode } from 'react';
-import YAML from 'js-yaml';
+import { load as loadYaml } from 'js-yaml';
 import last from 'lodash/last';
-import { CardedTable } from '../../../../new-components/CardedTable';
-import { DropdownButton } from '../../../../new-components/DropdownButton';
-import { CodeEditorField, InputField } from '../../../../new-components/Form';
-import { FaExclamationTriangle, FaFilter, FaSearch } from 'react-icons/fa';
-import { trackCustomEvent } from '../../../Analytics';
-import { useDebouncedEffect } from '../../../../hooks/useDebounceEffect';
-import { Badge, BadgeColor } from '../../../../new-components/Badge';
+import { FaFilter, FaSearch } from 'react-icons/fa';
+import { trackCustomEvent } from '@hasura/shared/analytics';
+import { useDebouncedEffect, useIsUnmounted } from '@hasura/shared/hooks';
 import { Oas3 } from '@hasura/open-api-to-graphql';
-import { useIsUnmounted } from '../../../../components/Services/Data/Common/tsUtils';
 import { useFormContext } from 'react-hook-form';
-import { useMetadata } from '../../../MetadataAPI';
-import { hasuraToast } from '../../../../new-components/Toasts';
+import {
+  DropdownMenu,
+  hasuraToast,
+  showErrorNotification,
+  Text,
+} from '@hasura/shared/ui';
 import { OasGeneratorActions } from './OASGeneratorActions';
 import { GeneratedAction, Operation } from '../OASGenerator/types';
 import uniq from 'lodash/uniq';
-
 import {
   generateAction,
   isOasError,
@@ -24,13 +22,23 @@ import {
   parseOas,
 } from '../OASGenerator/utils';
 import { UploadFile } from './UploadFile';
-import { IndicatorCard } from '../../../../new-components/IndicatorCard';
-import { Button } from '../../../../new-components/Button';
+import {
+  Button,
+  IndicatorCard,
+  CardedTable,
+  DropdownButton,
+  CodeEditorField,
+  InputField,
+  Badge,
+  BadgeColor,
+} from '@hasura/shared/ui';
+import { useMetadata } from '@hasura/metadata/api';
+import { Flex, Grid } from '@radix-ui/themes';
 
 const fillToTenRows = (data: ReactNode[][]) => {
   const rowsToFill = 10 - data.length;
   for (let i = 0; i < rowsToFill; i++) {
-    data.push([<div className="h-5" />, '', '']);
+    data.push([<div key={`fill-${i}`} className="h-5" />, '', '']);
   }
   return data;
 };
@@ -82,7 +90,7 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
   const url = watch('url');
 
   const filteredOperations = React.useMemo(() => {
-    return operations.filter(op => {
+    return operations.filter((op) => {
       const searchMatch =
         !search ||
         op.operationId.toLowerCase().includes(search.toLowerCase()) ||
@@ -99,7 +107,10 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
   const columns = operations?.length
     ? ['Method', 'Endpoint']
     : [
-        <span className="normal-case font-normal tracking-normal">
+        <span
+          key="no-endpoints"
+          className="normal-case font-normal tracking-normal"
+        >
           2. All available endpoints will be listed here after the import
           completes
         </span>,
@@ -128,7 +139,7 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
         } catch (e) {
           console.error('ImportOAS/OAS_PARSE_ERROR', e);
           try {
-            localParsedOas = YAML.load(oas) as Oas3;
+            localParsedOas = loadYaml(oas) as Oas3;
           } catch (e2) {
             setError('oas', {
               message: 'Invalid spec',
@@ -171,7 +182,7 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
                 size,
                 numberOfOperations: numberOfOperations.toString(),
               },
-            }
+            },
           );
         }
       } catch (e) {
@@ -182,7 +193,7 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
             error.options?.context
               .slice()
               .map((path: string) =>
-                path.replace(/~1/g, '/').replace(/\/\//g, '/')
+                path.replace(/~1/g, '/').replace(/\/\//g, '/'),
               ) ?? [];
           setError('oas', {
             message: `Invalid spec: ${error.message} at ${last(paths)}`,
@@ -197,7 +208,7 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
       setParsedOas(localParsedOas ?? null);
     },
     400,
-    [oas, clearErrors, setError, setValue, url, setValidationErrors]
+    [oas, clearErrors, setError, setValue, url, setValidationErrors],
   );
 
   const createAction = async (operation: string) => {
@@ -219,7 +230,7 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
                   size: JSON.stringify(oas?.length || 0),
                   numberOfOperations: JSON.stringify(operations?.length || 0),
                 },
-              }
+              },
             );
           } else {
             hasuraToast({
@@ -239,10 +250,9 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
           object: 'error',
         });
         // send notification
-        hasuraToast({
-          type: 'error',
+        showErrorNotification({
           title: 'Failed to generate action',
-          message: (e as Error).message,
+          error: e,
         });
         console.error('ImportOAS/CREATE_ACTION_ERROR/', e);
       }
@@ -253,7 +263,7 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
     const files = e.target.files;
     if (files) {
       const reader = new FileReader();
-      reader.onload = loadEvent => {
+      reader.onload = (loadEvent) => {
         if (loadEvent.target) {
           // set isOasTooBig to true if the oas is larger than 512kb
           setValue('oas', loadEvent.target.result);
@@ -271,113 +281,109 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
   };
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex justify-between">
+    <Flex direction="column" gap="4">
+      <Flex justify="between">
         <div>
           <UploadFile onChange={handleFileUpload} />
         </div>
-        <div className="flex w-1/2 pl-[10px]">
+        <Flex className="w-1/2">
           <InputField
-            icon={<FaSearch />}
-            placeholder="Available endpoints..."
+            fieldProps={{
+              placeholder: 'Available endpoints...',
+              icon: FaSearch,
+            }}
             name="search"
-            inputClassName="rounded-r-none"
             className="mb-0"
             noErrorPlaceholder
           />
           <DropdownButton
-            options={{
-              item: {
-                onSelect(e) {
-                  e.preventDefault();
-                },
-              },
-            }}
             className="w-32 rounded-l-none"
             size="md"
+            mode="default"
             data-testid="dropdown-button"
-            items={[
-              Object.keys(badgeColors).map(method => (
-                <div
-                  className="py-1 w-full"
-                  onClick={() => {
-                    if (selectedMethods.includes(method)) {
-                      setSelectedMethods(
-                        selectedMethods.filter(m => m !== method)
-                      );
-                    } else {
-                      setSelectedMethods([...selectedMethods, method]);
-                    }
-                  }}
-                >
-                  <div className="flex items-center">
-                    <div className="mr-2 relative -top-1">
-                      <input
-                        type="checkbox"
-                        className="border border-gray-300 rounded "
-                        checked={selectedMethods.includes(method)}
-                      />
-                    </div>
-                    <div>{method.toUpperCase()}</div>
-                  </div>
-                </div>
-              )),
-            ]}
-          >
-            <FaFilter className="mr-1 w-3 h-3" /> Method{' '}
-            {selectedMethods.length > 0 && `(${selectedMethods.length})`}
-          </DropdownButton>
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-6">
-        <div>
-          <div className="h-[400px] mb-4" data-testid="oas-editor">
-            {!isOasTooBig || showEditor ? (
-              <CodeEditorField
-                noErrorPlaceholder
-                name="oas"
-                placeholder="1. Paste OpenAPI spec in raw text (JSON / YAML) here"
-                editorOptions={editorOptions}
-                editorProps={{
-                  className: 'rounded`-r-none',
+            leftIcon={FaFilter}
+            items={Object.keys(badgeColors).map((method) => (
+              <DropdownMenu.CheckboxItem
+                key={method}
+                checked={selectedMethods.includes(method)}
+                onCheckedChange={() => {
+                  if (selectedMethods.includes(method)) {
+                    setSelectedMethods(
+                      selectedMethods.filter((m) => m !== method),
+                    );
+                  } else {
+                    setSelectedMethods([...selectedMethods, method]);
+                  }
                 }}
-              />
-            ) : (
-              <div className="flex flex-col h-full items-center justify-center gap-2">
-                <div>Editor is disabled because the spec is too large</div>
+              >
+                {method.toUpperCase()}
+              </DropdownMenu.CheckboxItem>
+            ))}
+          >
+            Method {selectedMethods.length > 0 && `(${selectedMethods.length})`}
+          </DropdownButton>
+        </Flex>
+      </Flex>
+      <Grid
+        columns={{
+          initial: '1',
+          md: '2',
+        }}
+        gap="6"
+      >
+        <div data-testid="oas-editor">
+          {!isOasTooBig || showEditor ? (
+            <CodeEditorField
+              noErrorPlaceholder
+              name="oas"
+              placeholder="1. Paste OpenAPI spec in raw text (JSON / YAML) here"
+              editorOptions={editorOptions}
+              editorProps={{
+                width: '100%',
+                mode: 'yaml',
+              }}
+            />
+          ) : (
+            <Flex
+              direction="column"
+              align="center"
+              justify="center"
+              gap="2"
+              className="h-full"
+            >
+              <Text>Editor is disabled because the spec is too large</Text>
 
-                <Button
-                  onClick={() => {
-                    setShowEditor(true);
-                  }}
-                >
-                  Enable Editor
-                </Button>
-              </div>
-            )}
-          </div>
+              <Button
+                onClick={() => {
+                  setShowEditor(true);
+                }}
+              >
+                Enable Editor
+              </Button>
+            </Flex>
+          )}
         </div>
         <div>
           <CardedTable
-            className="h-[400px] relative"
-            showActionCell={false}
+            className="relative"
             columns={[...columns]}
             data={fillToTenRows(
-              filteredOperations.map(op => {
+              filteredOperations.map((op) => {
                 const isActionAlreadyCreated =
                   metadata?.metadata?.actions?.some(
-                    action =>
+                    (action) =>
                       action.name.toLowerCase() ===
-                      normalizeOperationId(op.operationId).toLowerCase()
+                      normalizeOperationId(op.operationId).toLowerCase(),
                   );
                 return [
                   <Badge
+                    key={`method-${op.operationId}`}
                     color={badgeColors[op.method.toUpperCase()]}
                     className="text-xs inline-flex w-16 justify-center mr-2"
                   >
                     {op.method.toUpperCase()}
                   </Badge>,
-                  <div>
+                  <div key={`actions-${op.operationId}`}>
                     <OasGeneratorActions
                       existing={isActionAlreadyCreated}
                       operation={op}
@@ -389,24 +395,25 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
                     />
                   </div>,
                 ];
-              })
+              }),
             )}
           />
         </div>
-      </div>
+      </Grid>
       {isOasTooBig && (
-        <div>
-          <FaExclamationTriangle className="text-yellow-500" /> The spec is
-          larger than 3MB. It won't be saved for future use.
-        </div>
+        <IndicatorCard status="warning" showIcon>
+          The spec is larger than 3MB. It won&apos;t be saved for future use.
+        </IndicatorCard>
       )}
 
       {validationErrors.length > 0 && (
-        <div className="text-red-500">
-          {validationErrors.map(error => (
+        <div>
+          {validationErrors.map((error, index) => (
             <IndicatorCard
+              key={index}
               className="mb-2"
               status="negative"
+              size="1"
               headline="There is a validation error in your spec. Some operations cannot be imported."
             >
               {error}
@@ -415,20 +422,18 @@ export const OasGeneratorForm = (props: OasGeneratorFormProps) => {
         </div>
       )}
       <div>
-        <div className="mt-xs">
-          <h4 className="text-lg font-semibold mb-xs flex items-center mb-0">
-            Base URL
-          </h4>
-          <InputField
-            size="medium"
-            placeholder="http://swagger.io/v2"
-            name="url"
-            inputClassName="rounded-r-none"
-            className="mb-0 mt-xs"
-            noErrorPlaceholder
-          />
-        </div>
+        <InputField
+          label="Base URL"
+          size="medium"
+          fieldProps={{
+            placeholder: 'http://swagger.io/v2',
+            icon: FaSearch,
+          }}
+          name="url"
+          className="mb-0 mt-2"
+          noErrorPlaceholder
+        />
       </div>
-    </div>
+    </Flex>
   );
 };

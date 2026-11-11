@@ -15,7 +15,6 @@ import qualified Data.ByteString.Char8 as Char8
 import Data.Functor(void)
 import qualified Data.IntMap.Strict as IntMap
 import Data.Pool(Pool, withResource, createPool, destroyAllResources)
-import Data.Typeable
 import qualified Data.Time as Time
 import Network.TLS (ClientParams)
 import qualified Network.Socket as NS
@@ -96,7 +95,7 @@ data ConnectInfo = ConnInfo
 
 data ConnectError = ConnectAuthError Reply
                   | ConnectSelectError Reply
-    deriving (Eq, Show, Typeable)
+    deriving (Eq, Show)
 
 instance Exception ConnectError
 
@@ -107,7 +106,7 @@ instance Exception ConnectError
 --  connectPort           = PortNumber 6379 -- Redis default port
 --  connectAuth           = Nothing         -- No password
 --  connectDatabase       = 0               -- SELECT database 0
---  connectMaxConnections = 50              -- Up to 50 connections
+--  connectMaxConnections = 500             -- Up to 500 connections
 --  connectMaxIdleTime    = 30              -- Keep open for 30 seconds
 --  connectTimeout        = Nothing         -- Don't add timeout logic
 --  connectTLSParams      = Nothing         -- Do not use TLS
@@ -120,7 +119,10 @@ defaultConnectInfo = ConnInfo
     , connectAuth           = Nothing
     , connectReadOnly       = False
     , connectDatabase       = 0
-    , connectMaxConnections = 50
+    -- This keeps us several orders of magnitude below default limit, and
+    -- typical limits of managed services AFAICT.  Also see:
+    -- https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/benchmarks/?utm_source=chatgpt.com#factors-impacting-redis-performance
+    , connectMaxConnections = 500
     , connectMaxIdleTime    = 30
     , connectTimeout        = Nothing
     , connectTLSParams      = Nothing
@@ -195,7 +197,7 @@ runRedis (ClusteredConnection _ pool) redis =
     withResource pool $ \conn -> runRedisClusteredInternal conn (refreshShardMap conn) redis
 
 newtype ClusterConnectError = ClusterConnectError Reply
-    deriving (Eq, Show, Typeable)
+    deriving (Eq, Show)
 
 instance Exception ClusterConnectError
 

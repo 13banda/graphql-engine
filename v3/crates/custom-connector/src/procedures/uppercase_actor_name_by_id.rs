@@ -1,45 +1,46 @@
 use std::collections::BTreeMap;
 
-use axum::{http::StatusCode, Json};
+use axum::{Json, http::StatusCode};
 use ndc_models;
 
 use crate::{
-    query::{eval_nested_field, Result},
+    arguments::{check_all_arguments_used, parse_i32_argument},
+    query::{Result, eval_nested_field},
     state::AppState,
 };
 
+pub(crate) fn procedure_info() -> ndc_models::ProcedureInfo {
+    ndc_models::ProcedureInfo {
+        name: "uppercase_actor_name_by_id".into(),
+        description: Some("Uppercase an actor name given the ID".into()),
+        arguments: BTreeMap::from_iter([(
+            "id".into(),
+            ndc_models::ArgumentInfo {
+                description: Some("the id of the actor to update".into()),
+                argument_type: ndc_models::Type::Named { name: "Int".into() },
+            },
+        )]),
+        result_type: ndc_models::Type::Nullable {
+            underlying_type: Box::new(ndc_models::Type::Named {
+                name: "actor".into(),
+            }),
+        },
+    }
+}
+
 pub(crate) fn execute(
-    arguments: &BTreeMap<String, serde_json::Value>,
-    fields: &Option<ndc_models::NestedField>,
-    collection_relationships: &BTreeMap<String, ndc_models::Relationship>,
+    arguments: &BTreeMap<ndc_models::ArgumentName, serde_json::Value>,
+    fields: Option<&ndc_models::NestedField>,
+    collection_relationships: &BTreeMap<ndc_models::RelationshipName, ndc_models::Relationship>,
     state: &mut AppState,
 ) -> Result<serde_json::Value> {
-    let id = arguments.get("id").ok_or((
-        StatusCode::BAD_REQUEST,
-        Json(ndc_models::ErrorResponse {
-            message: "required argument field 'id' is missing".into(),
-            details: serde_json::Value::Null,
-        }),
-    ))?;
-    let id_int = id
-        .as_i64()
-        .ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(ndc_models::ErrorResponse {
-                message: "argument 'id' is not an integer".into(),
-                details: serde_json::Value::Null,
-            }),
-        ))?
-        .try_into()
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ndc_models::ErrorResponse {
-                    message: "argument 'id' is out of range".into(),
-                    details: serde_json::Value::Null,
-                }),
-            )
-        })?;
+    let mut arguments = arguments
+        .iter()
+        .map(|(k, v)| (k.clone(), v))
+        .collect::<BTreeMap<_, _>>();
+    let id_int = parse_i32_argument("id", &mut arguments)?;
+    check_all_arguments_used(&arguments)?;
+
     let current_state = state.actors.clone();
     let old_row = current_state.get(&id_int);
     match &old_row {
@@ -61,7 +62,7 @@ pub(crate) fn execute(
             let actor_name_uppercase = actor_name_str.to_uppercase();
             let actor_name_uppercase_value = serde_json::Value::String(actor_name_uppercase);
             let mut new_row = (*actor_obj).clone();
-            new_row.insert("name".into(), actor_name_uppercase_value.clone());
+            new_row.insert("name".into(), actor_name_uppercase_value);
             state.actors.insert(id_int, new_row);
             let old_row = state.actors.get(&id_int);
             Ok(old_row.map_or(Ok(serde_json::Value::Null), |old_row| {

@@ -1,51 +1,53 @@
 import { useState } from 'react';
+import { Flex } from '@radix-ui/themes';
 import { SchemaRegistryHome } from './SchemaRegistryHome';
 import { FeatureRequest } from './FeatureRequest';
 import globals from '../../../Globals';
 import { SCHEMA_REGISTRY_FEATURE_NAME } from '../constants';
 import { FaBell } from 'react-icons/fa';
-import { IconTooltip } from '../../../new-components/Tooltip';
+import { Button } from '@hasura/shared/ui';
 import { AlertsDialog } from './AlertsDialog';
-import { Analytics, InitializeTelemetry } from '../../Analytics';
+import { Analytics, InitializeTelemetry } from '@hasura/shared/analytics';
 import { useGetV2Info } from '../hooks/useGetV2Info';
 import { telemetryUserEventsTracker } from '../../../telemetry';
+import { useParams } from 'react-router';
 
-const SchemaRegistryHeader: React.VFC = () => {
+export const SchemaRegistryHeader: React.FC = () => {
   const [isAlertModalOpen, setIsAlertModalOpen] = useState(false);
 
   return (
-    <div className="flex flex-col w-full pl-12 mb-2">
-      <div className="flex mb-xs mt-md w-full">
-        <h1 className="inline-block text-xl font-semibold mr-2 text-slate-900">
-          GraphQL Schema Registry
-        </h1>
-        <Analytics name="data-schema-registry-alerts-btn">
-          <div
-            className="flex text-lg mt-2 mx-2 cursor-pointer"
-            role="button"
+    <Flex direction="column" className="w-full mb-6">
+      <Flex align="center" wrap="wrap" gap="3" className="mb-2 w-full">
+        <h1 className="text-xl font-semibold">GraphQL Schema Registry</h1>
+        <Analytics
+          name="data-schema-registry-alerts-btn"
+          passHtmlAttributesToChildren
+        >
+          <Button
+            variant="outline"
+            color="gray"
+            leftIcon={FaBell}
             onClick={() => setIsAlertModalOpen(true)}
           >
-            <IconTooltip
-              message="Alerts on GraphQL schema changes"
-              icon={<FaBell />}
-            />
-          </div>
+            Configure alerts
+          </Button>
         </Analytics>
-      </div>
-      <span className="text-muted text-md mb-2 italic">
-        GraphQL Schema Registry changes will only be retained for 14 days.
+      </Flex>
+      <span className="text-sm" style={{ color: 'var(--gray-11)' }}>
+        Explore published schemas and compare role-based changes. History is
+        retained for 14 days.
       </span>
       {isAlertModalOpen && (
         <AlertsDialog onClose={() => setIsAlertModalOpen(false)} />
       )}
-    </div>
+    </Flex>
   );
 };
 
-const SchemaRegistryBody: React.VFC<{
+const SchemaRegistryBody: React.FC<{
   hasFeatureAccess: boolean;
   schemaId: string | undefined;
-}> = props => {
+}> = (props) => {
   const { hasFeatureAccess, schemaId } = props;
   const projectID = globals.hasuraCloudProjectId || '';
   const v2Info = useGetV2Info(projectID);
@@ -69,28 +71,25 @@ const SchemaRegistryBody: React.VFC<{
   );
 };
 
-type SchemaDetailsViewProps = {
-  params: {
-    id?: string;
-  };
-};
-
-export const SchemaRegistryContainer: React.VFC<
-  SchemaDetailsViewProps
-> = props => {
-  const { id: schemaId } = props.params;
+export const SchemaRegistryContainer: React.FC = () => {
+  const params = useParams();
+  const schemaId = params.id;
   const hasFeatureAccess = globals.allowedLuxFeatures.includes(
-    SCHEMA_REGISTRY_FEATURE_NAME
+    SCHEMA_REGISTRY_FEATURE_NAME,
   );
 
   return (
-    <div className="flex flex-col w-[80%] pl-10 ml-10 justify-center">
+    <Flex
+      direction="column"
+      justify="center"
+      className="w-full min-w-0 p-4 md:p-8"
+    >
       <SchemaRegistryHeader />
       <InitializeTelemetry tracker={telemetryUserEventsTracker} skip={false} />
       <SchemaRegistryBody
         hasFeatureAccess={hasFeatureAccess}
         schemaId={schemaId}
       />
-    </div>
+    </Flex>
   );
 };

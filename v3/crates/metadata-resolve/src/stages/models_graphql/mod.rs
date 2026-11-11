@@ -1,0 +1,209 @@
+mod error;
+mod filter;
+mod graphql;
+mod order_by;
+mod types;
+
+use std::sync::Arc;
+
+use crate::{ArgumentInfo, Warning};
+pub use error::ModelGraphqlError;
+use indexmap::IndexMap;
+use open_dds::query::ArgumentName;
+use open_dds::{commands::CommandName, models::ModelName, types::CustomTypeName};
+use std::collections::BTreeMap;
+
+use crate::helpers::types::TrackGraphQLRootFields;
+use crate::stages::{
+    arguments, boolean_expressions, commands, graphql_config, models, object_relationships,
+    scalar_types,
+};
+use crate::types::subgraph::Qualified;
+
+pub(crate) use types::ModelWithGraphql;
+pub use types::{
+    ModelGraphQlApi, ModelGraphqlIssue, ModelOrderByExpression, ModelsWithGraphqlOutput,
+    SelectAggregateGraphQlDefinition, SelectManyGraphQlDefinition, SelectUniqueGraphQlDefinition,
+    SubscriptionGraphQlDefinition,
+};
+
+use super::order_by_expressions;
+
+/// Intermediate struct holding the resolved graphql parts for a model,
+/// before combining with the owned Model wrapped in Arc.
+struct ResolvedGraphqlParts {
+    filter_expression_type: Option<Arc<boolean_expressions::ResolvedObjectBooleanExpressionType>>,
+    graphql_api: types::ModelGraphQlApi,
+    arguments: IndexMap<ArgumentName, ArgumentInfo>,
+    description: Option<String>,
+}
+
+pub fn resolve(
+    metadata_accessor: &open_dds::accessor::MetadataAccessor,
+    models: IndexMap<Qualified<ModelName>, models::Model>,
+    commands: &IndexMap<Qualified<CommandName>, commands::Command>,
+    object_types: &BTreeMap<
+        Qualified<CustomTypeName>,
+        object_relationships::ObjectTypeWithRelationships,
+    >,
+    arguments: &BTreeMap<arguments::ArgumentSource, IndexMap<ArgumentName, ArgumentInfo>>,
+    boolean_expression_types: &boolean_expressions::BooleanExpressionTypes,
+    track_root_fields: &mut TrackGraphQLRootFields,
+    graphql_config: &graphql_config::GraphqlConfig,
+    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
+    order_by_expressions: &mut order_by_expressions::OrderByExpressions,
+    graphql_types: &mut graphql_config::GraphqlTypeNames,
+) -> Result<ModelsWithGraphqlOutput, Vec<ModelGraphqlError>> {
+    let mut graphql_parts: IndexMap<Qualified<ModelName>, ResolvedGraphqlParts> = IndexMap::new();
+    let mut issues = vec![];
+
+    let mut results = vec![];
+
+    // First pass: resolve graphql settings for each model (borrowing)
+    for (model_name, model) in &models {
+        results.push(resolve_model_graphql_parts(
+            model_name,
+            model,
+            metadata_accessor,
+            object_types,
+            arguments,
+            boolean_expression_types,
+            &models,
+            commands,
+            track_root_fields,
+            graphql_config,
+            scalar_types,
+            order_by_expressions,
+            graphql_types,
+            &mut graphql_parts,
+            &mut issues,
+        ));
+    }
+
+    partition_eithers::collect_any_errors(results)?;
+
+    // Second pass: move models into Arc (avoids cloning each Model)
+    let models_with_graphql = models
+        .into_iter()
+        .filter_map(|(model_name, model)| {
+            graphql_parts.swap_remove(&model_name).map(|parts| {
+                (
+                    model_name,
+                    types::ModelWithGraphql {
+                        inner: Arc::new(model),
+                        filter_expression_type: parts.filter_expression_type,
+                        graphql_api: parts.graphql_api,
+                        arguments: parts.arguments,
+                        description: parts.description,
+                    },
+                )
+            })
+        })
+        .collect();
+
+    Ok(types::ModelsWithGraphqlOutput {
+        models_with_graphql,
+        issues,
+    })
+}
+
+fn resolve_model_graphql_parts(
+    model_name: &Qualified<ModelName>,
+    model: &models::Model,
+    metadata_accessor: &open_dds::accessor::MetadataAccessor,
+    object_types: &BTreeMap<
+        Qualified<CustomTypeName>,
+        object_relationships::ObjectTypeWithRelationships,
+    >,
+    arguments: &BTreeMap<arguments::ArgumentSource, IndexMap<ArgumentName, ArgumentInfo>>,
+    boolean_expression_types: &boolean_expressions::BooleanExpressionTypes,
+    models: &IndexMap<Qualified<ModelName>, models::Model>,
+    commands: &IndexMap<Qualified<CommandName>, commands::Command>,
+    track_root_fields: &mut TrackGraphQLRootFields,
+    graphql_config: &graphql_config::GraphqlConfig,
+    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
+    order_by_expressions: &mut order_by_expressions::OrderByExpressions,
+    graphql_types: &mut graphql_config::GraphqlTypeNames,
+    graphql_parts: &mut IndexMap<Qualified<ModelName>, ResolvedGraphqlParts>,
+    issues: &mut Vec<Warning>,
+) -> Result<(), ModelGraphqlError> {
+    let filter_expression_type = match &model.raw.filter_expression_type {
+        Some(filter_expression_type_name) => {
+            // We can only create a boolean expression if a source is attached to a model,
+            // throw an error if this is not the case
+            let model_source = match &model.source {
+                Some(source) => Ok(source),
+                None => Err(
+                    boolean_expressions::BooleanExpressionError::CannotUseFilterExpressionsWithoutSource {
+                        model: model.name.clone(),
+                    }
+                ),
+            }?;
+
+            let (filter_expression_type, filter_issues) = filter::resolve_filter_expression_type(
+                &model.name,
+                &model.data_type,
+                model_source,
+                filter_expression_type_name,
+                boolean_expression_types,
+                object_types,
+                models,
+                &metadata_accessor.flags,
+            )?;
+
+            issues.extend(filter_issues.into_iter().map(Warning::from));
+
+            Some(filter_expression_type)
+        }
+        None => None,
+    };
+
+    let order_by_expression = order_by::resolve_order_by_expression(
+        model,
+        model.source.as_ref().map(AsRef::as_ref),
+        object_types,
+        models,
+        commands,
+        scalar_types,
+        order_by_expressions,
+        graphql_types,
+        issues,
+    )?;
+
+    let graphql_api = match &model.raw.graphql {
+        Some(model_graphql_definition) => graphql::resolve_model_graphql_api(
+            metadata_accessor,
+            model_graphql_definition,
+            model,
+            track_root_fields,
+            model.raw.description.as_ref(),
+            model.aggregate_expression.as_ref(),
+            order_by_expression.as_ref(),
+            order_by_expressions,
+            graphql_config,
+            graphql_types,
+            issues,
+        )?,
+        None => types::ModelGraphQlApi::default(),
+    };
+
+    // use the resolved arguments
+    let arguments = arguments
+        .get(&arguments::ArgumentSource::Model(model.name.clone()))
+        .cloned()
+        .unwrap_or_default();
+
+    let description = model.raw.description.clone();
+
+    graphql_parts.insert(
+        model_name.clone(),
+        ResolvedGraphqlParts {
+            filter_expression_type,
+            graphql_api,
+            arguments,
+            description,
+        },
+    );
+
+    Ok(())
+}

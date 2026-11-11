@@ -1,6 +1,6 @@
 import React from 'react';
-import { StoryFn, Meta } from '@storybook/react';
-import { ReactQueryDecorator } from '../../../../../storybook/decorators/react-query';
+import { StoryFn, Meta } from '@storybook/react-webpack5';
+import { ReactQueryDecorator } from '@hasura/shared/testing';
 import { CliLog } from './CliLog';
 import { OneClickDeploymentState } from '../../types';
 
@@ -30,7 +30,7 @@ const fallbackApps = [
 
 const StoryWrapper: React.FC = ({ children }) => {
   return (
-    <div className="p-md w-auto bg-black rounded items-center">{children}</div>
+    <div className="p-4 w-auto bg-black rounded items-center">{children}</div>
   );
 };
 
@@ -41,7 +41,9 @@ export const Initializing: StoryFn = () => (
       status={{
         kind: 'in-progress',
       }}
-      retryAction={() => {}}
+      retryAction={() => {
+        /* noop */
+      }}
       fallbackApps={fallbackApps}
     />
   </StoryWrapper>
@@ -54,7 +56,9 @@ export const Initialized: StoryFn = () => (
       status={{
         kind: 'success',
       }}
-      retryAction={() => {}}
+      retryAction={() => {
+        /* noop */
+      }}
       fallbackApps={fallbackApps}
     />
   </StoryWrapper>
@@ -68,7 +72,9 @@ export const ErrorLogWithExpectedError: StoryFn = () => (
         kind: 'error',
         error: { error: { message: 'something went wrong' } },
       }}
-      retryAction={() => {}}
+      retryAction={() => {
+        /* noop */
+      }}
       fallbackApps={fallbackApps}
     />
   </StoryWrapper>
@@ -82,7 +88,9 @@ export const ErrorLogWithUnknownError: StoryFn = () => (
         kind: 'error',
         error: { message: 'something went wrong' },
       }}
-      retryAction={() => {}}
+      retryAction={() => {
+        /* noop */
+      }}
       fallbackApps={fallbackApps}
     />
   </StoryWrapper>

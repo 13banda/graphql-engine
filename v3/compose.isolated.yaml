@@ -1,0 +1,40 @@
+# Self-contained v3-engine stack for Aisura / remote dev infrastructure.
+# Designed for running multiple parallel sessions, each fully isolated.
+#
+# Only two ports are exposed to the host per session:
+#   - engine          (GraphQL engine, default 3000)
+#   - jaeger UI       (trace browser, default 4002)
+#
+# All other services communicate over the project-scoped Docker network.
+#
+# ==========================================================================
+# Usage
+# ==========================================================================
+#
+# Start session 1:
+#   ENGINE_HOST_PORT=3000 JAEGER_HOST_PORT=4002 \
+#     docker compose -p engine-1 -f compose.isolated.yaml up -d --build
+#
+# Start session 2 (parallel):
+#   ENGINE_HOST_PORT=3001 JAEGER_HOST_PORT=4003 \
+#     docker compose -p engine-2 -f compose.isolated.yaml up -d --build
+#
+# Tear down a session (removes containers + volumes):
+#   docker compose -p engine-1 -f compose.isolated.yaml down -v
+#
+# ==========================================================================
+# Port allocation
+# ==========================================================================
+#
+# Pick unique host ports per session to avoid conflicts. Suggested ranges:
+#   ENGINE_HOST_PORT  : 3000, 3001, 3002, ...
+#   JAEGER_HOST_PORT  : 4002, 4003, 4004, ...
+#
+# Check availability: lsof -i :<port>  or  ss -tlnp | grep <port>
+#
+# ==========================================================================
+
+include:
+  - path:
+      - docker-compose.yaml
+      - multi-session-override.yaml

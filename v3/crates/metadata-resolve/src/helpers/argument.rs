@@ -1,36 +1,37 @@
-use crate::helpers::model::resolve_ndc_type;
+use super::ndc_validation::NDCValidationError;
+use crate::data_connectors::DataConnectorContext;
 use crate::helpers::ndc_validation;
 use crate::helpers::type_mappings;
+use crate::helpers::type_validation;
+use crate::helpers::typecheck::{
+    TypecheckError, TypecheckIssue, typecheck_qualified_type_reference,
+};
 use crate::helpers::types::{
-    get_object_type_for_boolean_expression, get_type_representation, mk_name,
-    unwrap_custom_type_name, TypeRepresentation,
+    TypeRepresentation, get_object_type_for_boolean_expression, get_type_representation,
+    unwrap_custom_type_name,
 };
 use crate::stages::{
-    data_connector_scalar_types, data_connectors, model_permissions, models,
-    object_boolean_expressions, object_types, relationships, scalar_types, type_permissions,
+    boolean_expressions, data_connector_scalar_types, data_connectors, model_permissions,
+    models_graphql, object_relationships, object_types, scalar_types, type_permissions,
 };
-use crate::types::error::{
-    Error, RelationshipError, TypeError, TypeMappingValidationError, TypePredicateError,
-};
-use crate::types::permission::ValueExpression;
-use crate::types::subgraph::{ArgumentInfo, Qualified, QualifiedBaseType, QualifiedTypeReference};
+use crate::types::error::ShouldBeAnError;
+use crate::types::error::{Error, TypeError};
+use crate::types::permission::ValueExpressionOrPredicate;
+use crate::types::subgraph::{ArgumentInfo, ArgumentKind, Qualified, QualifiedTypeReference};
 
 use indexmap::IndexMap;
 use ndc_models;
 use open_dds::arguments::ArgumentName;
 use open_dds::data_connector::DataConnectorName;
-use open_dds::data_connector::DataConnectorObjectType;
+use open_dds::identifier::SubgraphName;
 use open_dds::models::ModelName;
-use open_dds::permissions;
-use open_dds::types::{CustomTypeName, FieldName, OperatorName};
-use ref_cast::RefCast;
+use open_dds::permissions::Role;
+use open_dds::types::DataConnectorArgumentName;
+use open_dds::types::{BaseType, CustomTypeName, TypeName, TypeReference};
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 
-use thiserror::Error;
-
-use super::ndc_validation::NDCValidationError;
-
-#[derive(Error, Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ArgumentMappingError {
     #[error(
         "the following arguments referenced in argument mappings are unknown: {}",
@@ -40,10 +41,21 @@ pub enum ArgumentMappingError {
     #[error("argument {argument_name:} is mapped to an unknown argument {ndc_argument_name:}")]
     UnknownNdcArgument {
         argument_name: ArgumentName,
-        ndc_argument_name: models::ConnectorArgumentName,
+        ndc_argument_name: DataConnectorArgumentName,
     },
     #[error("the mapping for argument {argument_name:} has been defined more than once")]
     DuplicateCommandArgumentMapping { argument_name: ArgumentName },
+    #[error("the data connector argument {ndc_argument_name} has been mapped to more than once")]
+    DuplicateNdcArgumentMapping {
+        ndc_argument_name: DataConnectorArgumentName,
+    },
+    #[error(
+        "the argument {argument_name} is mapped to the data connector argument {ndc_argument_name} which is already used as an argument preset in the DataConnectorLink"
+    )]
+    ArgumentAlreadyPresetInDataConnectorLink {
+        argument_name: ArgumentName,
+        ndc_argument_name: DataConnectorArgumentName,
+    },
     #[error("{argument_name:} has the data type {data_type:} that has not been defined")]
     UnknownType {
         argument_name: ArgumentName,
@@ -54,7 +66,7 @@ pub enum ArgumentMappingError {
     )]
     UnknownNdcType {
         argument_name: ArgumentName,
-        ndc_argument_name: models::ConnectorArgumentName,
+        ndc_argument_name: DataConnectorArgumentName,
         type_name: Qualified<CustomTypeName>,
         unknown_ndc_type: String,
     },
@@ -62,34 +74,64 @@ pub enum ArgumentMappingError {
     NDCValidationError(NDCValidationError),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ArgumentMappingIssue {
+    #[error(
+        "the following data connector arguments are not mapped to an argument: {}",
+        ndc_argument_names.join(", ")
+    )]
+    UnmappedNdcArguments {
+        ndc_argument_names: Vec<DataConnectorArgumentName>,
+    },
+    #[error(
+        "the type of argument '{argument_name:}' is not compatible with the type of the data connector argument '{ndc_argument_name:}': {issue:}"
+    )]
+    IncompatibleType {
+        argument_name: ArgumentName,
+        ndc_argument_name: DataConnectorArgumentName,
+        issue: type_validation::TypeCompatibilityIssue,
+    },
+}
+
+impl ShouldBeAnError for ArgumentMappingIssue {
+    fn should_be_an_error(&self, flags: &open_dds::flags::OpenDdFlags) -> bool {
+        match self {
+            ArgumentMappingIssue::UnmappedNdcArguments { .. } => false,
+            ArgumentMappingIssue::IncompatibleType { .. } => {
+                flags.contains(open_dds::flags::Flag::ValidateArgumentMappingTypes)
+            }
+        }
+    }
+}
+
+pub struct ArgumentMappingResults<'a> {
+    pub argument_mappings: BTreeMap<ArgumentName, DataConnectorArgumentName>,
+    pub data_connector_link_argument_presets:
+        BTreeMap<DataConnectorArgumentName, data_connectors::ArgumentPresetValue>,
+    pub argument_type_mappings_to_resolve: Vec<type_mappings::TypeMappingToCollect<'a>>,
+    pub issues: Vec<ArgumentMappingIssue>,
+}
+
 pub fn get_argument_mappings<'a>(
     arguments: &'a IndexMap<ArgumentName, ArgumentInfo>,
-    argument_mapping: &BTreeMap<ArgumentName, String>,
-    ndc_arguments_types: &'a BTreeMap<models::ConnectorArgumentName, ndc_models::Type>,
+    argument_mapping: &BTreeMap<ArgumentName, DataConnectorArgumentName>,
+    ndc_arguments_types: &'a BTreeMap<DataConnectorArgumentName, ndc_models::Type>,
+    data_connector_context: &DataConnectorContext,
+    data_connector_scalars: &'a data_connector_scalar_types::DataConnectorScalars,
     object_types: &'a BTreeMap<
         Qualified<CustomTypeName>,
         type_permissions::ObjectTypeWithPermissions,
     >,
     scalar_types: &'a BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
-    object_boolean_expression_types: &'a BTreeMap<
-        Qualified<CustomTypeName>,
-        object_boolean_expressions::ObjectBooleanExpressionType,
-    >,
-) -> Result<
-    (
-        BTreeMap<ArgumentName, models::ConnectorArgumentName>,
-        Vec<type_mappings::TypeMappingToCollect<'a>>,
-    ),
-    ArgumentMappingError,
-> {
-    let mut unconsumed_argument_mappings: BTreeMap<&ArgumentName, &models::ConnectorArgumentName> =
-        argument_mapping
-            .iter()
-            .map(|(k, v)| (k, models::ConnectorArgumentName::ref_cast(v)))
-            .collect();
+    boolean_expression_types: &'a boolean_expressions::BooleanExpressionTypes,
+) -> Result<ArgumentMappingResults<'a>, ArgumentMappingError> {
+    let mut issues = Vec::new();
+    let mut unconsumed_argument_mappings: BTreeMap<&ArgumentName, &DataConnectorArgumentName> =
+        argument_mapping.iter().collect();
+    let mut unmapped_ndc_arguments: HashSet<&DataConnectorArgumentName> =
+        ndc_arguments_types.keys().collect();
 
-    let mut resolved_argument_mappings =
-        BTreeMap::<ArgumentName, models::ConnectorArgumentName>::new();
+    let mut resolved_argument_mappings = BTreeMap::<ArgumentName, DataConnectorArgumentName>::new();
 
     let mut type_mappings_to_collect = Vec::<type_mappings::TypeMappingToCollect>::new();
 
@@ -101,8 +143,7 @@ pub fn get_argument_mappings<'a>(
         } else {
             // If there's no mapping defined for an argument, assume that it
             // implicitly maps to the same name
-            let ArgumentName(inner) = argument_name;
-            models::ConnectorArgumentName(inner.to_string())
+            DataConnectorArgumentName::from(argument_name.as_str())
         };
 
         let ndc_argument_type = ndc_arguments_types
@@ -111,6 +152,23 @@ pub fn get_argument_mappings<'a>(
                 argument_name: argument_name.clone(),
                 ndc_argument_name: mapped_to_ndc_argument_name.clone(),
             })?;
+        // Validate the type compatibility
+        if let Some(issue) = type_validation::validate_type_compatibility(
+            data_connector_scalars,
+            &argument_type.argument_type,
+            ndc_argument_type,
+        ) {
+            issues.push(ArgumentMappingIssue::IncompatibleType {
+                argument_name: argument_name.clone(),
+                ndc_argument_name: mapped_to_ndc_argument_name.clone(),
+                issue,
+            });
+        }
+        if !unmapped_ndc_arguments.remove(&mapped_to_ndc_argument_name) {
+            return Err(ArgumentMappingError::DuplicateNdcArgumentMapping {
+                ndc_argument_name: mapped_to_ndc_argument_name.clone(),
+            });
+        }
 
         let existing_mapping = resolved_argument_mappings
             .insert(argument_name.clone(), mapped_to_ndc_argument_name.clone());
@@ -127,7 +185,7 @@ pub fn get_argument_mappings<'a>(
                 object_type_name,
                 object_types,
                 scalar_types,
-                object_boolean_expression_types,
+                boolean_expression_types,
             )
             .map_err(|_| ArgumentMappingError::UnknownType {
                 argument_name: argument_name.clone(),
@@ -135,29 +193,23 @@ pub fn get_argument_mappings<'a>(
             })? {
                 TypeRepresentation::Object(_) => {
                     let underlying_ndc_argument_named_type =
-                        ndc_validation::get_underlying_named_type(ndc_argument_type)
-                            .map_err(ArgumentMappingError::NDCValidationError)?;
+                        ndc_validation::get_underlying_named_type(ndc_argument_type);
 
                     type_mappings_to_collect.push(type_mappings::TypeMappingToCollect {
                         type_name: object_type_name,
-                        ndc_object_type_name: DataConnectorObjectType::ref_cast(
-                            underlying_ndc_argument_named_type,
-                        ),
-                    })
+                        ndc_object_type_name: underlying_ndc_argument_named_type,
+                    });
                 }
-                TypeRepresentation::Scalar(_) => (),
-                TypeRepresentation::BooleanExpression(object_boolean_expression_type) => {
+                TypeRepresentation::Scalar(_) | TypeRepresentation::BooleanExpressionScalar(_) => {}
+                TypeRepresentation::BooleanExpressionObject(boolean_expression_type) => {
                     let underlying_ndc_argument_named_type =
-                        ndc_validation::get_underlying_named_type(ndc_argument_type)
-                            .map_err(ArgumentMappingError::NDCValidationError)?;
+                        ndc_validation::get_underlying_named_type(ndc_argument_type);
 
                     // resolve the object type the boolean expression refers to
                     type_mappings_to_collect.push(type_mappings::TypeMappingToCollect {
-                        type_name: &object_boolean_expression_type.object_type,
-                        ndc_object_type_name: DataConnectorObjectType::ref_cast(
-                            underlying_ndc_argument_named_type,
-                        ),
-                    })
+                        type_name: &boolean_expression_type.object_type,
+                        ndc_object_type_name: underlying_ndc_argument_named_type,
+                    });
                 }
             }
         }
@@ -174,7 +226,46 @@ pub fn get_argument_mappings<'a>(
         });
     }
 
-    Ok((resolved_argument_mappings, type_mappings_to_collect))
+    // Mark off any ndc arguments that are preset at the data connector level via
+    // DataConnectorLink argument presets
+    let mut data_connector_link_argument_presets = BTreeMap::new();
+    for argument_preset in &data_connector_context.argument_presets {
+        if let Some((argument_name, ndc_argument_name)) = resolved_argument_mappings
+            .iter()
+            .find(|(_, ndc_argument_name)| *ndc_argument_name == &argument_preset.name)
+        {
+            return Err(
+                ArgumentMappingError::ArgumentAlreadyPresetInDataConnectorLink {
+                    argument_name: argument_name.clone(),
+                    ndc_argument_name: ndc_argument_name.clone(),
+                },
+            );
+        }
+
+        // We don't care if the argument preset is for an argument that doesn't exist.
+        // These presets are set for the whole connector and are skipped when the
+        // function/procedure/collection doesn't take that argument.
+        if unmapped_ndc_arguments.remove(&argument_preset.name) {
+            data_connector_link_argument_presets
+                .insert(argument_preset.name.clone(), argument_preset.value.clone());
+        }
+    }
+
+    // If any unmapped ndc arguments, we have missing arguments or data connector link argument presets
+    // We raise this as an issue because existing projects have this issue and we need to be backwards
+    // compatible. Those existing projects will probably fail at query time, but they do build and start 😭
+    if !unmapped_ndc_arguments.is_empty() {
+        issues.push(ArgumentMappingIssue::UnmappedNdcArguments {
+            ndc_argument_names: unmapped_ndc_arguments.into_iter().cloned().collect(),
+        });
+    }
+
+    Ok(ArgumentMappingResults {
+        argument_mappings: resolved_argument_mappings,
+        data_connector_link_argument_presets,
+        argument_type_mappings_to_resolve: type_mappings_to_collect,
+        issues,
+    })
 }
 
 /// resolve a value expression
@@ -182,33 +273,104 @@ pub fn get_argument_mappings<'a>(
 /// type to validate it against to ensure the fields it refers to
 /// exist etc
 pub(crate) fn resolve_value_expression_for_argument(
+    role: Option<&Role>, // this is only applicable for role-based permissions
+    flags: &open_dds::flags::OpenDdFlags,
     argument_name: &open_dds::arguments::ArgumentName,
-    value_expression: &open_dds::permissions::ValueExpression,
+    value_expression: &open_dds::permissions::ValueExpressionOrPredicate,
     argument_type: &QualifiedTypeReference,
-    source_argument_type: Option<&ndc_models::Type>,
-    data_connector_name: &Qualified<DataConnectorName>,
-    subgraph: &str,
-    object_types: &BTreeMap<Qualified<CustomTypeName>, relationships::ObjectTypeWithRelationships>,
-    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
-    object_boolean_expression_types: &BTreeMap<
+    data_connector_link: &data_connectors::DataConnectorLink,
+    object_types: &BTreeMap<
         Qualified<CustomTypeName>,
-        object_boolean_expressions::ObjectBooleanExpressionType,
+        object_relationships::ObjectTypeWithRelationships,
     >,
-    models: &IndexMap<Qualified<ModelName>, models::Model>,
-    data_connectors: &data_connectors::DataConnectors,
+    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
+    boolean_expression_types: &boolean_expressions::BooleanExpressionTypes,
+    models: &IndexMap<Qualified<ModelName>, models_graphql::ModelWithGraphql>,
+    data_connector_type_mappings: &BTreeMap<Qualified<CustomTypeName>, object_types::TypeMapping>,
     data_connector_scalars: &BTreeMap<
         Qualified<DataConnectorName>,
-        data_connector_scalar_types::ScalarTypeWithRepresentationInfoMap,
+        data_connector_scalar_types::DataConnectorScalars,
     >,
-) -> Result<ValueExpression, Error> {
+    type_error_mapper: impl Fn(TypecheckError) -> Error,
+) -> Result<(ValueExpressionOrPredicate, Vec<TypecheckIssue>), Error> {
     match value_expression {
-        open_dds::permissions::ValueExpression::SessionVariable(session_variable) => {
-            Ok::<ValueExpression, Error>(ValueExpression::SessionVariable(session_variable.clone()))
+        open_dds::permissions::ValueExpressionOrPredicate::SessionVariable(session_variable) => {
+            Ok::<(ValueExpressionOrPredicate, Vec<TypecheckIssue>), Error>((
+                ValueExpressionOrPredicate::SessionVariable(
+                    open_dds::session_variables::SessionVariableReference {
+                        name: session_variable.clone(),
+                        passed_as_json: flags.contains(open_dds::flags::Flag::JsonSessionVariables),
+                        disallow_unknown_fields: flags
+                            .contains(open_dds::flags::Flag::DisallowUnknownValuesInArguments),
+                    },
+                ),
+                vec![],
+            ))
         }
-        open_dds::permissions::ValueExpression::Literal(json_value) => {
-            Ok(ValueExpression::Literal(json_value.clone()))
+        open_dds::permissions::ValueExpressionOrPredicate::Literal(json_value) => {
+            let mut issues = vec![];
+
+            // first typecheck the values
+            typecheck_qualified_type_reference(
+                &object_types
+                    .iter()
+                    .map(|(field_name, object_type)| (field_name, &object_type.object_type))
+                    .collect(), // Convert &BTreeMap<field_name, object_type> to BTreeMap<&field_name, &object_type>
+                &boolean_expression_types.get_type_names(),
+                argument_type,
+                json_value,
+                &mut issues,
+            )
+            .map_err(&type_error_mapper)?;
+
+            // now we have a small problem - our user may be providing us a partial value to fill
+            // it with presets etc
+            // if they do, let's look at the presets and see if they're going to be filled in later
+            let mut filtered_issues = vec![];
+
+            for issue in issues {
+                if match issue {
+                    TypecheckIssue::ObjectTypeField {
+                        error: TypecheckError::NullInNonNullableColumn,
+                        ref field_name,
+                        ref object_type,
+                    } => {
+                        let object_type_representation =
+                            object_types.get(object_type).ok_or_else(|| {
+                                Error::UnknownObjectType {
+                                    data_type: object_type.clone(),
+                                }
+                            })?;
+
+                        // is there a preset for this role and this field?
+                        let has_preset = role.is_some_and(|role| {
+                            object_type_representation
+                                .type_input_permissions
+                                .by_role
+                                .get(role)
+                                .is_some_and(|type_input_permission| {
+                                    type_input_permission.field_presets.contains_key(field_name)
+                                })
+                        });
+
+                        // if the field has no preset, then keep the error as it's legitimate
+                        // TODO: consider making this a warning rather than than error when role ==
+                        // None as we don't have a solid way of knowing which presets will apply
+                        // with rules-based auth
+                        !has_preset
+                    }
+                    _ => true,
+                } {
+                    filtered_issues.push(issue);
+                }
+            }
+
+            Ok((
+                ValueExpressionOrPredicate::Literal(json_value.clone()),
+                filtered_issues,
+            ))
         }
-        open_dds::permissions::ValueExpression::BooleanExpression(bool_exp) => {
+        open_dds::permissions::ValueExpressionOrPredicate::BooleanExpression(bool_exp) => {
             // get underlying object type name from argument type (ie, unwrap
             // array, nullability etc)
             let base_type =
@@ -219,526 +381,69 @@ pub(crate) fn resolve_value_expression_for_argument(
                     },
                 })?;
 
-            // lookup the relevant ObjectBooleanExpressionType
-            let object_boolean_expression_type = object_boolean_expression_types
+            // lookup the relevant boolean expression type and get the underlying object type
+            let boolean_expression_type = boolean_expression_types
+                .objects
                 .get(base_type)
                 .ok_or_else(|| Error::UnknownType {
                     data_type: base_type.clone(),
                 })?;
+            let object_type_representation =
+                get_object_type_for_boolean_expression(boolean_expression_type, object_types)?;
 
-            // get the type that the expression is based on
-            let object_type_representation = get_object_type_for_boolean_expression(
-                object_boolean_expression_type,
-                object_types,
-            )?;
-
-            // get the data_connector_object_type from the NDC command argument type
-            // or explode
-            let data_connector_object_type = match &source_argument_type {
-                Some(ndc_models::Type::Predicate { object_type_name }) => {
-                    Some(DataConnectorObjectType(object_type_name.clone()))
-                }
-                _ => None,
-            }
-            .ok_or_else(|| Error::DataConnectorTypeMappingValidationError {
-                type_name: base_type.clone(),
-                error: TypeMappingValidationError::PredicateTypeNotFound {
-                    argument_name: argument_name.clone(),
-                },
-            })?;
-
-            let data_connector_field_mappings = object_type_representation
-                .type_mappings
-                .get(data_connector_name, &data_connector_object_type)
-                .map(|type_mapping| match type_mapping {
-                    object_types::TypeMapping::Object { field_mappings, .. } => field_mappings,
-                })
-                .ok_or(Error::DataConnectorTypeMappingValidationError {
-                    type_name: base_type.clone(),
-                    error: TypeMappingValidationError::DataConnectorTypeMappingNotFound {
-                        object_type_name: base_type.clone(),
-                        data_connector_name: data_connector_name.clone(),
-                        data_connector_object_type: data_connector_object_type.clone(),
-                    },
-                })?;
-
-            // Get available scalars defined for this data connector
-            let specific_data_connector_scalars = data_connector_scalars
-                .get(data_connector_name)
-                .ok_or(Error::TypePredicateError {
-                type_predicate_error: TypePredicateError::UnknownTypeDataConnector {
-                    type_name: base_type.clone(),
-                    data_connector: data_connector_name.clone(),
-                },
-            })?;
-
-            let resolved_model_predicate = resolve_model_predicate_with_type(
+            let resolved_model_predicate = model_permissions::resolve_model_predicate_with_type(
+                flags,
                 bool_exp,
-                base_type,
+                vec![],
+                &boolean_expression_type.object_type,
                 object_type_representation,
-                data_connector_field_mappings,
-                data_connector_name,
-                subgraph,
-                data_connectors,
-                specific_data_connector_scalars,
+                Some(boolean_expression_type),
+                data_connector_type_mappings,
+                data_connector_link,
+                data_connector_scalars,
                 object_types,
                 scalar_types,
+                boolean_expression_types,
                 models,
-                &object_type_representation.object_type.fields,
             )?;
 
-            Ok(ValueExpression::BooleanExpression(Box::new(
-                resolved_model_predicate,
-            )))
+            Ok((
+                ValueExpressionOrPredicate::BooleanExpression(Box::new(resolved_model_predicate)),
+                vec![],
+            ))
         }
     }
 }
 
-/// a simplified version of resolve_model_predicate that only requires a type rather than an entire
-/// Model for context. It skips relationships for simplicity, this should be simple enough to
-/// re-add in future. Because this function takes the `data_connector_field_mappings` as an input,
-/// many of the errors thrown in `resolve_model_predicate` are pushed out.
-pub(crate) fn resolve_model_predicate_with_type(
-    model_predicate: &permissions::ModelPredicate,
-    type_name: &Qualified<CustomTypeName>,
-    object_type_representation: &relationships::ObjectTypeWithRelationships,
-    data_connector_field_mappings: &BTreeMap<FieldName, object_types::FieldMapping>,
-    data_connector_name: &Qualified<DataConnectorName>,
-    subgraph: &str,
-    data_connectors: &data_connectors::DataConnectors,
-    scalars: &data_connector_scalar_types::ScalarTypeWithRepresentationInfoMap,
-    object_types: &BTreeMap<Qualified<CustomTypeName>, relationships::ObjectTypeWithRelationships>,
-    scalar_types: &BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
-    models: &IndexMap<Qualified<ModelName>, models::Model>,
-    fields: &IndexMap<FieldName, object_types::FieldDefinition>,
-) -> Result<model_permissions::ModelPredicate, Error> {
-    match model_predicate {
-        permissions::ModelPredicate::FieldComparison(permissions::FieldComparisonPredicate {
-            field,
-            operator,
-            value,
-        }) => {
-            // TODO: (anon) typecheck the value expression with the field
-            // TODO: resolve the "in" operator too (ndc_models::BinaryArrayComparisonOperator)
+// in short, should we convert this to an NDC expression before sending it
+pub fn get_argument_kind(
+    type_obj: &TypeReference,
+    subgraph: &SubgraphName,
+    boolean_expression_types: &boolean_expressions::BooleanExpressionTypes,
+) -> ArgumentKind {
+    match &type_obj.underlying_type {
+        BaseType::List(type_obj) => get_argument_kind(type_obj, subgraph, boolean_expression_types),
+        BaseType::Named(type_name) => match type_name {
+            TypeName::Inbuilt(_) => ArgumentKind::Other,
+            TypeName::Custom(type_name) => {
+                let qualified_type_name = Qualified::new(subgraph.clone(), type_name.to_owned());
 
-            // Determine field_mapping for the predicate field
-            let field_mapping = data_connector_field_mappings.get(field).ok_or_else(|| {
-                Error::TypePredicateError {
-                    type_predicate_error: TypePredicateError::UnknownFieldInTypePredicate {
-                        field_name: field.clone(),
-                        type_name: type_name.clone(),
-                    },
+                match get_type_representation::<
+                    type_permissions::ObjectTypesWithPermissions,
+                    scalar_types::ScalarTypeRepresentation,
+                >(
+                    &qualified_type_name,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    boolean_expression_types,
+                ) {
+                    Ok(
+                        TypeRepresentation::BooleanExpressionScalar(_)
+                        | TypeRepresentation::BooleanExpressionObject(_),
+                    ) => ArgumentKind::NDCExpression,
+                    _ => ArgumentKind::Other,
                 }
-            })?;
-            // Determine ndc type of the field
-            let field_ndc_type = &field_mapping.column_type;
-
-            // Get scalar type info from the data connector
-            let (_, scalar_type_info) =
-                data_connector_scalar_types::get_simple_scalar(field_ndc_type.clone(), scalars)
-                    .ok_or_else(|| Error::TypePredicateError {
-                        type_predicate_error: TypePredicateError::UnsupportedFieldInTypePredicate {
-                            field_name: field.clone(),
-                            type_name: type_name.clone(),
-                        },
-                    })?;
-
-            let (resolved_operator, argument_type) = resolve_binary_operator_for_type(
-                operator,
-                type_name,
-                data_connector_name,
-                field,
-                fields,
-                scalars,
-                scalar_type_info.scalar_type,
-                subgraph,
-            )?;
-
-            let value_expression = match value {
-                open_dds::permissions::ValueExpression::Literal(json_value) => {
-                    Ok(ValueExpression::Literal(json_value.clone()))
-                }
-                open_dds::permissions::ValueExpression::SessionVariable(session_variable) => {
-                    Ok(ValueExpression::SessionVariable(session_variable.clone()))
-                }
-                open_dds::permissions::ValueExpression::BooleanExpression(
-                    _inner_model_predicate,
-                ) => Err(Error::TypePredicateError {
-                    type_predicate_error: TypePredicateError::NestedPredicateInTypePredicate {
-                        type_name: type_name.clone(),
-                    },
-                }),
-            }?;
-
-            Ok(model_permissions::ModelPredicate::BinaryFieldComparison {
-                field: field.clone(),
-                ndc_column: field_mapping.column.clone(),
-                operator: resolved_operator,
-                argument_type,
-                value: value_expression,
-            })
-        }
-        permissions::ModelPredicate::FieldIsNull(permissions::FieldIsNullPredicate { field }) => {
-            // Determine field_mapping for the predicate field
-            let field_mapping = data_connector_field_mappings.get(field).ok_or_else(|| {
-                Error::TypePredicateError {
-                    type_predicate_error: TypePredicateError::UnknownFieldInTypePredicate {
-                        field_name: field.clone(),
-                        type_name: type_name.clone(),
-                    },
-                }
-            })?;
-
-            Ok(model_permissions::ModelPredicate::UnaryFieldComparison {
-                field: field.clone(),
-                ndc_column: field_mapping.column.clone(),
-                operator: ndc_models::UnaryComparisonOperator::IsNull,
-            })
-        }
-
-        permissions::ModelPredicate::Relationship(permissions::RelationshipPredicate {
-            name,
-            predicate,
-        }) => {
-            if let Some(nested_predicate) = predicate {
-                let relationship_field_name = mk_name(&name.0)?;
-
-                let relationship = &object_type_representation
-                    .relationships
-                    .get(&relationship_field_name)
-                    .ok_or_else(|| Error::TypePredicateError {
-                        type_predicate_error:
-                            TypePredicateError::UnknownRelationshipInTypePredicate {
-                                relationship_name: name.clone(),
-                                type_name: type_name.clone(),
-                            },
-                    })?;
-
-                match &relationship.target {
-                    relationships::RelationshipTarget::Command { .. } => {
-                        Err(Error::UnsupportedFeature {
-                            message: "Predicate cannot be built using command relationships"
-                                .to_string(),
-                        })
-                    }
-                    relationships::RelationshipTarget::Model {
-                        model_name,
-                        relationship_type,
-                        target_typename,
-                        mappings,
-                    } => {
-                        let target_model = models.get(model_name).ok_or_else(|| {
-                            Error::TypePredicateError { type_predicate_error: TypePredicateError::UnknownModelUsedInRelationshipTypePredicate {
-                                type_name: type_name.clone(),
-                                target_model_name: model_name.clone(),
-                                relationship_name: name.clone(),
-                            }}
-                        })?;
-
-                        // predicates with relationships is currently only supported for local relationships
-                        if let Some(target_model_source) = &target_model.source {
-                            if target_model_source.data_connector.name == *data_connector_name {
-                                let target_source =
-                                    model_permissions::ModelTargetSource::from_model_source(
-                                        target_model_source,
-                                        relationship,
-                                    )
-                                    .map_err(|_| {
-                                        Error::RelationshipError {
-                                    relationship_error:
-                                        RelationshipError::NoRelationshipCapabilitiesDefined {
-                                            relationship_name: relationship.name.clone(),
-                                            type_name: type_name.clone(),
-                                            data_connector_name: target_model_source
-                                                .data_connector
-                                                .name
-                                                .clone(),
-                                        },
-                                }
-                                    })?;
-
-                                let target_object_type_representation = object_types
-                                    .get(&target_model.data_type)
-                                    .ok_or(Error::UnknownType {
-                                        data_type: target_model.data_type.clone(),
-                                    })?;
-
-                                // validate data connector name
-                                let data_connector_context = data_connectors
-                                    .0
-                                    .get(data_connector_name)
-                                    .ok_or_else(|| {
-                                        Error::from(TypePredicateError::UnknownTypeDataConnector {
-                                            data_connector: data_connector_name.clone(),
-                                            type_name: type_name.clone(),
-                                        })
-                                    })?;
-
-                                let data_connector_link = data_connectors::DataConnectorLink::new(
-                                    data_connector_name.clone(),
-                                    &data_connector_context.inner,
-                                )?;
-
-                                // look up this type in the context of it's data connector
-                                // so that we use the correct column names for the data source
-                                let data_connector_field_mappings = target_object_type_representation.type_mappings.get(
-                                    &target_source.model.data_connector.name,
-                                    DataConnectorObjectType::ref_cast(&target_source.model.collection)
-                                )
-                                .map(|type_mapping| match type_mapping {
-                                    object_types::TypeMapping::Object {
-                                        field_mappings, ..
-                                    } => field_mappings,
-                                })
-                                .ok_or(Error::DataConnectorTypeMappingValidationError {
-                                    type_name: target_typename.clone(),
-                                    error: TypeMappingValidationError::DataConnectorTypeMappingNotFound {
-                                        object_type_name: target_typename.clone(),
-                                        data_connector_name: target_source.model.data_connector.name.clone(),
-                                        data_connector_object_type: DataConnectorObjectType(target_source.model.collection
-                                            .clone())
-                                    },
-                                })?;
-
-                                // Collect type mappings.
-                                let mut source_type_mappings = BTreeMap::new();
-
-                                // get names of collections we want to lookup
-                                let collection_types = object_type_representation
-                                    .type_mappings
-                                    .object_types_for_data_connector(data_connector_name);
-
-                                let type_mappings_to_collect: Vec<
-                                    type_mappings::TypeMappingToCollect,
-                                > = collection_types
-                                    .iter()
-                                    .map(|collection_type| type_mappings::TypeMappingToCollect {
-                                        type_name,
-                                        ndc_object_type_name: collection_type,
-                                    })
-                                    .collect();
-
-                                for type_mapping_to_collect in type_mappings_to_collect {
-                                    type_mappings::collect_type_mapping_for_source(
-                                        &type_mapping_to_collect,
-                                        data_connector_name,
-                                        &remove_object_relationships(object_types),
-                                        scalar_types,
-                                        &mut source_type_mappings,
-                                    )
-                                    .map_err(|error| {
-                                        Error::from(
-                                            TypePredicateError::TypeMappingCollectionError {
-                                                type_name: type_name.clone(),
-                                                error,
-                                            },
-                                        )
-                                    })?;
-                                }
-
-                                let annotation = model_permissions::PredicateRelationshipInfo {
-                                    source_type: relationship.source.clone(),
-                                    relationship_name: relationship.name.clone(),
-                                    target_model_name: model_name.clone(),
-                                    target_source: target_source.clone(),
-                                    target_type: target_typename.clone(),
-                                    relationship_type: relationship_type.clone(),
-                                    mappings: mappings.clone(),
-                                    source_data_connector: data_connector_link,
-                                    source_type_mappings,
-                                };
-
-                                let target_object_type =
-                                    object_types.get(&target_model.data_type).ok_or_else(|| {
-                                        Error::from(TypePredicateError::ObjectTypeNotFound {
-                                            type_name: target_model.data_type.clone(),
-                                        })
-                                    })?;
-
-                                let target_model_predicate = resolve_model_predicate_with_type(
-                                    nested_predicate,
-                                    &target_model.data_type,
-                                    target_object_type,
-                                    data_connector_field_mappings,
-                                    data_connector_name,
-                                    subgraph,
-                                    data_connectors,
-                                    scalars,
-                                    object_types,
-                                    scalar_types,
-                                    models,
-                                    &target_model.type_fields,
-                                )?;
-
-                                Ok(model_permissions::ModelPredicate::Relationship {
-                                    relationship_info: annotation,
-                                    predicate: Box::new(target_model_predicate),
-                                })
-                            } else {
-                                Err(Error::UnsupportedFeature {
-                                    message: "Predicate cannot be built using remote relationships"
-                                        .to_string(),
-                                })
-                            }
-                        } else {
-                            Err(Error::from(
-                                TypePredicateError::TargetSourceRequiredForRelationshipPredicate {
-                                    source_type_name: type_name.clone(),
-                                    target_model_name: target_model.name.clone(),
-                                },
-                            ))
-                        }
-                    }
-                }
-            } else {
-                Err(Error::from(
-                    TypePredicateError::NoPredicateDefinedForRelationshipPredicate {
-                        type_name: type_name.clone(),
-                        relationship_name: name.clone(),
-                    },
-                ))
             }
-        }
-
-        permissions::ModelPredicate::Not(predicate) => {
-            let resolved_predicate = resolve_model_predicate_with_type(
-                predicate,
-                type_name,
-                object_type_representation,
-                data_connector_field_mappings,
-                data_connector_name,
-                subgraph,
-                data_connectors,
-                scalars,
-                object_types,
-                scalar_types,
-                models,
-                fields,
-            )?;
-            Ok(model_permissions::ModelPredicate::Not(Box::new(
-                resolved_predicate,
-            )))
-        }
-        permissions::ModelPredicate::And(predicates) => {
-            let mut resolved_predicates = Vec::new();
-            for predicate in predicates {
-                resolved_predicates.push(resolve_model_predicate_with_type(
-                    predicate,
-                    type_name,
-                    object_type_representation,
-                    data_connector_field_mappings,
-                    data_connector_name,
-                    subgraph,
-                    data_connectors,
-                    scalars,
-                    object_types,
-                    scalar_types,
-                    models,
-                    fields,
-                )?);
-            }
-            Ok(model_permissions::ModelPredicate::And(resolved_predicates))
-        }
-        permissions::ModelPredicate::Or(predicates) => {
-            let mut resolved_predicates = Vec::new();
-            for predicate in predicates {
-                resolved_predicates.push(resolve_model_predicate_with_type(
-                    predicate,
-                    type_name,
-                    object_type_representation,
-                    data_connector_field_mappings,
-                    data_connector_name,
-                    subgraph,
-                    data_connectors,
-                    scalars,
-                    object_types,
-                    scalar_types,
-                    models,
-                    fields,
-                )?);
-            }
-            Ok(model_permissions::ModelPredicate::Or(resolved_predicates))
-        }
+        },
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resolve_binary_operator_for_type(
-    operator: &OperatorName,
-    type_name: &Qualified<CustomTypeName>,
-    data_connector: &Qualified<DataConnectorName>,
-    field_name: &FieldName,
-    fields: &IndexMap<FieldName, object_types::FieldDefinition>,
-    scalars: &data_connector_scalar_types::ScalarTypeWithRepresentationInfoMap,
-    ndc_scalar_type: &ndc_models::ScalarType,
-    subgraph: &str,
-) -> Result<(String, QualifiedTypeReference), Error> {
-    let field_definition = fields
-        .get(field_name)
-        .ok_or_else(|| Error::TypePredicateError {
-            type_predicate_error: TypePredicateError::UnknownFieldInTypePredicate {
-                field_name: field_name.clone(),
-                type_name: type_name.clone(),
-            },
-        })?;
-    let comparison_operator_definition = &ndc_scalar_type
-        .comparison_operators
-        .get(&operator.0)
-        .ok_or_else(|| Error::TypePredicateError {
-            type_predicate_error: TypePredicateError::InvalidOperatorInTypePredicate {
-                type_name: type_name.clone(),
-                operator_name: operator.clone(),
-            },
-        })?;
-    match comparison_operator_definition {
-        ndc_models::ComparisonOperatorDefinition::Equal => {
-            Ok((operator.0.clone(), field_definition.field_type.clone()))
-        }
-        ndc_models::ComparisonOperatorDefinition::In => Ok((
-            operator.0.clone(),
-            QualifiedTypeReference {
-                underlying_type: QualifiedBaseType::List(Box::new(
-                    field_definition.field_type.clone(),
-                )),
-                nullable: true,
-            },
-        )),
-        ndc_models::ComparisonOperatorDefinition::Custom { argument_type } => Ok((
-            operator.0.clone(),
-            resolve_ndc_type(data_connector, argument_type, scalars, subgraph)?,
-        )),
-    }
-}
-
-fn remove_object_relationships(
-    object_types_with_relationships: &BTreeMap<
-        Qualified<CustomTypeName>,
-        relationships::ObjectTypeWithRelationships,
-    >,
-) -> BTreeMap<Qualified<CustomTypeName>, type_permissions::ObjectTypeWithPermissions> {
-    object_types_with_relationships
-        .iter()
-        .map(
-            |(
-                object_name,
-                relationships::ObjectTypeWithRelationships {
-                    object_type,
-                    type_mappings,
-                    type_input_permissions,
-                    type_output_permissions,
-                    ..
-                },
-            )| {
-                (
-                    object_name.clone(),
-                    type_permissions::ObjectTypeWithPermissions {
-                        object_type: object_type.clone(),
-                        type_mappings: type_mappings.clone(),
-                        type_input_permissions: type_input_permissions.clone(),
-                        type_output_permissions: type_output_permissions.clone(),
-                    },
-                )
-            },
-        )
-        .collect()
 }

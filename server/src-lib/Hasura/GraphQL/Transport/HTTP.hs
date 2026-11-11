@@ -42,6 +42,8 @@ import Data.Monoid (Any (..))
 import Data.Text qualified as T
 import Data.Text.Extended (toTxt, (<>>))
 import Data.Vector qualified as Vec
+import Hasura.Authentication.Session (SessionVariable, SessionVariableValue, SessionVariables, filterSessionVariables)
+import Hasura.Authentication.User (UserInfo (..))
 import Hasura.Backends.DataConnector.Agent.Client (AgentLicenseKey)
 import Hasura.Backends.Postgres.Instances.Transport (runPGMutationTransaction)
 import Hasura.Base.Error
@@ -95,9 +97,8 @@ import Hasura.Server.Prometheus
     recordGraphqlOperationMetric,
   )
 import Hasura.Server.Telemetry.Counters qualified as Telem
-import Hasura.Server.Types (HeaderPrecedence, ModelInfoLogState (..), MonadGetPolicies (..), ReadOnlyMode (..), RemoteSchemaResponsePriority (..), RequestId (..))
+import Hasura.Server.Types (HeaderPrecedence, ModelInfoLogState (..), MonadGetPolicies (..), ReadOnlyMode (..), RedactActionHandlerLogsStatus, RemoteSchemaResponsePriority (..), RequestId (..), TraceQueryStatus (TraceQueryEnabled))
 import Hasura.Services
-import Hasura.Session (SessionVariable, SessionVariableValue, SessionVariables, UserInfo (..), filterSessionVariables)
 import Hasura.Tracing (MonadTrace, attachMetadata)
 import Hasura.Tracing qualified as Tracing
 import Language.GraphQL.Draft.Syntax qualified as G
@@ -320,6 +321,8 @@ runGQ ::
   ReadOnlyMode ->
   RemoteSchemaResponsePriority ->
   HeaderPrecedence ->
+  RedactActionHandlerLogsStatus ->
+  TraceQueryStatus ->
   PrometheusMetrics ->
   L.Logger L.Hasura ->
   Maybe (CredentialCache AgentLicenseKey) ->
@@ -331,14 +334,15 @@ runGQ ::
   GQLReqUnparsed ->
   ResponseInternalErrorsConfig ->
   m (GQLQueryOperationSuccessLog, HttpResponse (Maybe GQResponse, EncJSON))
-runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence prometheusMetrics logger agentLicenseKey reqId userInfo ipAddress reqHeaders queryType reqUnparsed responseErrorsConfig = do
+runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence redactActionHandlerLogs traceQueryStatus prometheusMetrics logger agentLicenseKey reqId userInfo ipAddress reqHeaders queryType reqUnparsed responseErrorsConfig = do
   granularPrometheusMetricsState <- runGetPrometheusMetricsGranularity
   getModelInfoLogStatus' <- runGetModelInfoLogStatus
   modelInfoLogStatus <- liftIO getModelInfoLogStatus'
   let gqlMetrics = pmGraphQLRequestMetrics prometheusMetrics
 
-  (totalTime, (response, parameterizedQueryHash, gqlOpType, gqlOperationName, modelInfoListForLogging, queryCachedStatus)) <- withElapsedTime $ do
-    (reqParsed, runLimits, queryParts) <- Tracing.newSpan "Parse GraphQL" $ observeGQLQueryError granularPrometheusMetricsState gqlMetrics Nothing (_grOperationName reqUnparsed) Nothing $ do
+  getTimeElapsed <- liftIO startTimer
+  (response, parameterizedQueryHash, gqlOpType, gqlOperationName, modelInfoListForLogging, queryCachedStatus) <- do
+    (reqParsed, runLimits, queryParts) <- Tracing.newSpan "Parse GraphQL" Tracing.SKInternal $ observeGQLQueryError granularPrometheusMetricsState gqlMetrics Nothing Nothing (_grOperationName reqUnparsed) Nothing $ do
       -- 1. Run system authorization on the 'reqUnparsed :: GQLReqUnparsed' query.
       reqParsed <-
         E.checkGQLExecution userInfo (reqHeaders, ipAddress) enableAL sc reqUnparsed reqId
@@ -353,12 +357,14 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
 
     let gqlOpType = G._todType queryParts
     let gqlOperationName = getOpNameFromParsedReq reqParsed
-    observeGQLQueryError granularPrometheusMetricsState gqlMetrics (Just gqlOpType) gqlOperationName Nothing $ do
+    observeGQLQueryError granularPrometheusMetricsState gqlMetrics (Just gqlOpType) (Just getTimeElapsed) gqlOperationName Nothing $ do
       -- 3. Construct the remainder of the execution plan.
       let maybeOperationName = _unOperationName <$> getOpNameFromParsedReq reqParsed
       for_ maybeOperationName $ \nm ->
         -- https://opentelemetry.io/docs/reference/specification/trace/semantic_conventions/instrumentation/graphql/
         attachMetadata [("graphql.operation.name", G.unName nm)]
+      when (traceQueryStatus == TraceQueryEnabled)
+        $ attachMetadata [("graphql.query", _unGQLQueryText (_grQuery reqUnparsed))]
       (parameterizedQueryHash, execPlan, modelInfoList) <-
         E.getResolvedExecPlan
           env
@@ -376,10 +382,14 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
           reqId
           responseErrorsConfig
           headerPrecedence
+          redactActionHandlerLogs
+          traceQueryStatus
 
       -- 4. Execute the execution plan producing a 'AnnotatedResponse'.
       (response, queryCachedStatus, modelInfoFromExecution) <- executePlan reqParsed runLimits execPlan
       return (response, parameterizedQueryHash, gqlOpType, gqlOperationName, ((modelInfoList <> (modelInfoFromExecution))), queryCachedStatus)
+
+  totalTime <- liftIO getTimeElapsed
 
   -- 5. Record telemetry
   recordTimings totalTime response
@@ -389,6 +399,8 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
 
   -- 7. Return the response along with logging metadata.
   let requestSize = LBS.length $ J.encode reqUnparsed
+      -- TODO this is the second encJToLBS, which is wasteful just to get length (246us on huge schema introspection, for instance)
+      -- TODO also this is uncompressed size; not sure how this is used
       responseSize = LBS.length $ encJToLBS $ snd $ _hrBody $ arResponse $ response
   when (modelInfoLogStatus == ModelInfoLogOn) $ do
     for_ (modelInfoListForLogging) $ \(ModelInfoPart modelName modelType modelSourceName modelSourceType modelQueryType) -> do
@@ -512,7 +524,7 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
             \(EB.DBStepInfo _ sourceConfig genSql tx resolvedConnectionTemplate :: EB.DBStepInfo b) ->
               runDBQuery @b reqId reqUnparsed fieldName userInfo logger agentLicenseKey sourceConfig (fmap (statsToAnyBackend @b) tx) genSql resolvedConnectionTemplate
         (finalResponse, modelInfo) <-
-          RJ.processRemoteJoins reqId logger agentLicenseKey env reqHeaders userInfo resp remoteJoins reqUnparsed tracesPropagator
+          RJ.processRemoteJoins reqId logger agentLicenseKey env reqHeaders userInfo resp remoteJoins reqUnparsed tracesPropagator traceQueryStatus
         pure $ (AnnotatedResponsePart telemTimeIO_DT Telem.Local finalResponse [], modelInfo)
       E.ExecStepRemote rsi resultCustomizer gqlReq remoteJoins -> do
         logQueryLog logger $ QueryLog reqUnparsed Nothing reqId QueryLogKindRemoteSchema
@@ -522,7 +534,7 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
         (time, resp, modelInfo) <- doQErr $ do
           (time, (resp, _)) <- EA.runActionExecution userInfo aep
           (finalResponse, modelInfo) <-
-            RJ.processRemoteJoins reqId logger agentLicenseKey env reqHeaders userInfo resp remoteJoins reqUnparsed tracesPropagator
+            RJ.processRemoteJoins reqId logger agentLicenseKey env reqHeaders userInfo resp remoteJoins reqUnparsed tracesPropagator traceQueryStatus
           pure (time, finalResponse, modelInfo)
         pure $ (AnnotatedResponsePart time Telem.Empty resp [], modelInfo)
       E.ExecStepRaw json -> do
@@ -546,7 +558,7 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
             \(EB.DBStepInfo _ sourceConfig genSql tx resolvedConnectionTemplate :: EB.DBStepInfo b) ->
               runDBMutation @b reqId reqUnparsed fieldName userInfo logger agentLicenseKey sourceConfig (fmap EB.arResult tx) genSql resolvedConnectionTemplate
         (finalResponse, modelInfo) <-
-          RJ.processRemoteJoins reqId logger agentLicenseKey env reqHeaders userInfo resp remoteJoins reqUnparsed tracesPropagator
+          RJ.processRemoteJoins reqId logger agentLicenseKey env reqHeaders userInfo resp remoteJoins reqUnparsed tracesPropagator traceQueryStatus
         pure $ (AnnotatedResponsePart telemTimeIO_DT Telem.Local finalResponse responseHeaders, modelInfo)
       E.ExecStepRemote rsi resultCustomizer gqlReq remoteJoins -> do
         logQueryLog logger $ QueryLog reqUnparsed Nothing reqId QueryLogKindRemoteSchema
@@ -556,7 +568,7 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
         (time, (resp, hdrs), modelInfo) <- doQErr $ do
           (time, (resp, hdrs)) <- EA.runActionExecution userInfo aep
           (finalResponse, modelInfo) <-
-            RJ.processRemoteJoins reqId logger agentLicenseKey env reqHeaders userInfo resp remoteJoins reqUnparsed tracesPropagator
+            RJ.processRemoteJoins reqId logger agentLicenseKey env reqHeaders userInfo resp remoteJoins reqUnparsed tracesPropagator traceQueryStatus
           pure (time, (finalResponse, hdrs), modelInfo)
         pure $ (AnnotatedResponsePart time Telem.Empty resp $ fromMaybe [] hdrs, modelInfo)
       E.ExecStepRaw json -> do
@@ -568,7 +580,7 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
         let (allResponses, allModelInfo) = unzip _all
         pure $ (AnnotatedResponsePart 0 Telem.Local (encJFromList (map arpResponse allResponses)) [], concat allModelInfo)
 
-    runRemoteGQ fieldName rsi resultCustomizer gqlReq remoteJoins = Tracing.newSpan ("Remote schema query for root field " <>> fieldName) $ do
+    runRemoteGQ fieldName rsi resultCustomizer gqlReq remoteJoins = Tracing.newSpan ("Remote schema query for root field " <>> fieldName) Tracing.SKInternal $ do
       (telemTimeIO_DT, remoteResponseHeaders, resp) <-
         doQErr $ E.execRemoteGQ env tracesPropagator userInfo reqHeaders (rsDef rsi) gqlReq
       value <- extractFieldFromResponse remoteSchemaResponsePriority fieldName resultCustomizer resp
@@ -586,6 +598,7 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
             remoteJoins
             reqUnparsed
             tracesPropagator
+            traceQueryStatus
       let filteredHeaders = filter ((== "Set-Cookie") . fst) remoteResponseHeaders
       pure $ (AnnotatedResponsePart telemTimeIO_DT Telem.Remote finalResponse filteredHeaders, modelInfo)
 
@@ -611,11 +624,12 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
       IO GranularPrometheusMetricsState ->
       GraphQLRequestMetrics ->
       Maybe G.OperationType ->
+      Maybe (IO DiffTime) ->
       Maybe OperationName ->
       Maybe ParameterizedQueryHash ->
       n a ->
       n a
-    observeGQLQueryError granularPrometheusMetricsState gqlMetrics mOpType mOpName mQHash action =
+    observeGQLQueryError granularPrometheusMetricsState gqlMetrics mOpType mGetTimeElapsed mOpName mQHash action =
       catchError (fmap Right action) (pure . Left) >>= \case
         Right result ->
           pure result
@@ -627,6 +641,14 @@ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority header
             mOpName
             mQHash
             (Prometheus.CounterVector.inc $ gqlRequests gqlMetrics)
+          -- Make a best effort to record latency timings, like in recordGQLQuerySuccess,
+          -- even in the event of failure. Important for monitoring.
+          case (mOpType, mGetTimeElapsed) of
+            (Just G.OperationTypeQuery, Just getTimeElapsed) ->
+              liftIO $ getTimeElapsed >>= Prometheus.Histogram.observe (gqlExecutionTimeSecondsQuery gqlMetrics) . realToFrac
+            (Just G.OperationTypeMutation, Just getTimeElapsed) ->
+              liftIO $ getTimeElapsed >>= Prometheus.Histogram.observe (gqlExecutionTimeSecondsMutation gqlMetrics) . realToFrac
+            _ -> pure () -- we failed before opType was available
           throwError err
 
     -- Tally and record execution times for successful GraphQL requests.
@@ -765,11 +787,10 @@ extractFieldFromResponse remoteSchemaResponsePriority fieldName resultCustomizer
     do400 = withExceptT Right . throw400 RemoteSchemaError
     doGQExecError = withExceptT Left . throwError . GQExecError . fmap J.toEncoding
 
-buildRaw :: (Applicative m) => JO.Value -> m AnnotatedResponsePart
-buildRaw json = do
-  let obj = encJFromOrderedValue json
-      telemTimeIO_DT = 0
-  pure $ AnnotatedResponsePart telemTimeIO_DT Telem.Local obj []
+buildRaw :: (Applicative m) => EncJSON -> m AnnotatedResponsePart
+buildRaw encJson = do
+  let telemTimeIO_DT = 0
+  pure $ AnnotatedResponsePart telemTimeIO_DT Telem.Local encJson []
 
 encodeAnnotatedResponseParts :: RootFieldMap AnnotatedResponsePart -> EncJSON
 encodeAnnotatedResponseParts = encodeEncJSONResults . fmap arpResponse
@@ -809,6 +830,8 @@ runGQBatched ::
   ResponseInternalErrorsConfig ->
   RemoteSchemaResponsePriority ->
   HeaderPrecedence ->
+  RedactActionHandlerLogsStatus ->
+  TraceQueryStatus ->
   UserInfo ->
   Wai.IpAddress ->
   [HTTP.Header] ->
@@ -816,10 +839,10 @@ runGQBatched ::
   -- | the batched request with unparsed GraphQL query
   GQLBatchedReqs (GQLReq GQLQueryText) ->
   m (HttpLogGraphQLInfo, HttpResponse EncJSON)
-runGQBatched env sqlGenCtx sc enableAL readOnlyMode prometheusMetrics logger agentLicenseKey reqId responseErrorsConfig remoteSchemaResponsePriority headerPrecedence userInfo ipAddress reqHdrs queryType query =
+runGQBatched env sqlGenCtx sc enableAL readOnlyMode prometheusMetrics logger agentLicenseKey reqId responseErrorsConfig remoteSchemaResponsePriority headerPrecedence redactActionHandlerLogs traceQueryStatus userInfo ipAddress reqHdrs queryType query =
   case query of
     GQLSingleRequest req -> do
-      (gqlQueryOperationLog, httpResp) <- runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence prometheusMetrics logger agentLicenseKey reqId userInfo ipAddress reqHdrs queryType req responseErrorsConfig
+      (gqlQueryOperationLog, httpResp) <- runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence redactActionHandlerLogs traceQueryStatus prometheusMetrics logger agentLicenseKey reqId userInfo ipAddress reqHdrs queryType req responseErrorsConfig
       let httpLoggingGQInfo = (CommonHttpLogMetadata L.RequestModeSingle (Just (GQLSingleRequest (GQLQueryOperationSuccess gqlQueryOperationLog))), (PQHSetSingleton (gqolParameterizedQueryHash gqlQueryOperationLog)))
       pure (httpLoggingGQInfo, snd <$> httpResp)
     GQLBatchedReqs reqs -> do
@@ -832,7 +855,7 @@ runGQBatched env sqlGenCtx sc enableAL readOnlyMode prometheusMetrics logger age
             flip HttpResponse []
               . encJFromList
               . map (either (encJFromJEncoding . encodeGQErr includeInternal) _hrBody)
-      responses <- for reqs \req -> fmap (req,) $ try $ (fmap . fmap . fmap) snd $ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence prometheusMetrics logger agentLicenseKey reqId userInfo ipAddress reqHdrs queryType req responseErrorsConfig
+      responses <- for reqs \req -> fmap (req,) $ try $ (fmap . fmap . fmap) snd $ runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence redactActionHandlerLogs traceQueryStatus prometheusMetrics logger agentLicenseKey reqId userInfo ipAddress reqHdrs queryType req responseErrorsConfig
       let requestsOperationLogs = map fst $ rights $ map snd responses
           batchOperationLogs =
             map

@@ -1,6 +1,5 @@
-import React from 'react';
-import { StoryFn, Meta } from '@storybook/react';
-import { ReactQueryDecorator } from '../../../../../storybook/decorators/react-query';
+import { StoryFn, Meta } from '@storybook/react-webpack5';
+import { ReactQueryDecorator } from '@hasura/shared/testing';
 import { EnvVarsForm, EnvVarsFormProps } from './EnvVarsForm';
 import { RequiredEnvVar } from '../../types';
 
@@ -33,14 +32,6 @@ const sampleEnvVars: RequiredEnvVar[] = [
     Mandatory: false,
     Description: 'Postgres database URL 2',
     Position: 1,
-  },
-  {
-    Kind: 'ENV_TYPE_DATABASE',
-    Name: 'MYSQL_DATABASE_URL',
-    SubKind: 'mysql',
-    Mandatory: true,
-    Description: 'MYSQL database URL',
-    Position: 2,
   },
   {
     Kind: 'ENV_TYPE_DATABASE',
@@ -109,9 +100,15 @@ export const Default: StoryFn<EnvVarsFormProps> = () => (
   <EnvVarsForm
     envVars={sampleEnvVars}
     formState="default"
-    setFormState={() => {}}
-    successCb={() => {}}
-    errorCb={() => {}}
+    setFormState={() => {
+      /* noop */
+    }}
+    successCb={() => {
+      /* noop */
+    }}
+    errorCb={() => {
+      /* noop */
+    }}
   />
 );
 
@@ -119,9 +116,15 @@ export const Loading: StoryFn<EnvVarsFormProps> = () => (
   <EnvVarsForm
     envVars={sampleEnvVarsMinimal}
     formState="loading"
-    setFormState={() => {}}
-    successCb={() => {}}
-    errorCb={() => {}}
+    setFormState={() => {
+      /* noop */
+    }}
+    successCb={() => {
+      /* noop */
+    }}
+    errorCb={() => {
+      /* noop */
+    }}
   />
 );
 
@@ -129,8 +132,14 @@ export const Error: StoryFn<EnvVarsFormProps> = () => (
   <EnvVarsForm
     envVars={sampleEnvVarsMinimal}
     formState="error"
-    setFormState={() => {}}
-    successCb={() => {}}
-    errorCb={() => {}}
+    setFormState={() => {
+      /* noop */
+    }}
+    successCb={() => {
+      /* noop */
+    }}
+    errorCb={() => {
+      /* noop */
+    }}
   />
 );

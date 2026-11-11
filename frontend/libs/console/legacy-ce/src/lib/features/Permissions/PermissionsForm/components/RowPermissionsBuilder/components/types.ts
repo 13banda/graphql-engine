@@ -1,8 +1,7 @@
-import { Source, Table } from '../../../../../hasura-metadata-types';
+import { ComputedField, Source, Table } from '@hasura/shared/types';
 import { GraphQLType } from 'graphql';
 import { Relationship } from '../../../../../DatabaseRelationships';
-import { TableColumn } from '../../../../../DataSource';
-import { ComputedField } from '../../../../../../metadata/types';
+import { TableColumn } from '@hasura/metadata/data-source';
 
 export type Operators = Record<
   string,
@@ -54,7 +53,7 @@ export type RowPermissionsState = {
   permissions: Permissions;
   comparators: Comparators;
   setValue: (path: string[], value: any) => void;
-  setKey: (props: { path: string[]; key: any; type: PermissionType }) => void;
+  setKey: (props: { path: string[]; key: any; type?: PermissionType }) => void;
   setPermissions: (permissions: Permissions) => void;
   loadRelationships?: (relationships: Relationships) => void;
   isLoading?: boolean;
@@ -75,6 +74,13 @@ export type TypesContext = {
 
 export type TableContext = {
   table: Table;
+  /** the source of the table */
+  source?: string;
+  /**
+   * the table is the target of a remote database relationship, where the
+   * server only accepts a column with a few comparators
+   */
+  isRemote?: boolean;
   setTable: (table: Table) => void;
   comparator?: string | undefined;
   setComparator: (comparator: string | undefined) => void;

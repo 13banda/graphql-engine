@@ -16,6 +16,7 @@ module Hasura.Backends.MSSQL.DDL.EventTrigger
     unlockEventsInSource,
     getMaintenanceModeVersion,
     qualifyTableName,
+    mssqlFmtLit,
     createMissingSQLTriggers,
     checkIfTriggerExists,
     addCleanupSchedules,
@@ -49,6 +50,7 @@ import Data.Time.Format.ISO8601 (iso8601Show)
 import Database.MSSQL.Transaction (TxE, TxET, multiRowQueryE, singleRowQueryE, unitQueryE)
 import Database.ODBC.SQLServer (Datetime2 (..), Datetimeoffset (..), rawUnescapedText, toSql)
 import Database.ODBC.TH qualified as ODBC
+import Hasura.Authentication.User (UserInfo)
 import Hasura.Backends.MSSQL.Connection
 import Hasura.Backends.MSSQL.DDL.Source.Version
 import Hasura.Backends.MSSQL.SQL.Error qualified as HGE
@@ -66,20 +68,19 @@ import Hasura.RQL.Types.Eventing (EventId (..), OpVar (..))
 import Hasura.RQL.Types.Source
 import Hasura.SQL.Types
 import Hasura.Server.Types
-import Hasura.Session
 import Hasura.Table.Cache (PrimaryKey (..))
 import Hasura.Tracing qualified as Tracing
 import Text.Builder qualified as TB
 import Text.Shakespeare.Text qualified as ST
 
 -- | creates a SQL Values list from haskell list  (('123-abc'), ('456-vgh'), ('234-asd'))
-generateSQLValuesFromList :: (ToTxt a) => [a] -> Text
+generateSQLValuesFromList :: (Functor f, Foldable f, ToTxt a) => f a -> Text
 generateSQLValuesFromList = generateSQLValuesFromListWith (\t -> "'" <> toTxt t <> "'")
 
-generateSQLValuesFromListWith :: (a -> Text) -> [a] -> Text
+generateSQLValuesFromListWith :: (Functor f, Foldable f) => (a -> Text) -> f a -> Text
 generateSQLValuesFromListWith f events = commaSeparated values
   where
-    values = map (\e -> "(" <> f e <> ")") events
+    values = fmap (\e -> "(" <> f e <> ")") events
 
 fetchUndeliveredEvents ::
   (MonadIO m, MonadError QErr m) =>
@@ -460,7 +461,7 @@ fetchEvents source triggerNames (FetchBatchSize fetchBatchSize) = do
     -- We cannot use 'commaseperated()' because it creates the Text as
     -- 'insert_test_books, et_test_bigint' which is not useful to compare values in
     -- 'IN' MSSQL operator.
-    triggerNamesTxt = "(" <> commaSeparated (map (\t -> "'" <> toTxt t <> "'") triggerNames) <> ")"
+    triggerNamesTxt = "(" <> commaSeparated (map (mssqlFmtLit . toTxt) triggerNames) <> ")"
 
     uncurryEvent (eventId, sn, tn, trn, payload :: Text, tries, createdAt :: B.ByteString, nextRetryAt :: Maybe B.ByteString) = do
       -- see Note [Encode Event Trigger Payload to JSON in SQL Server]
@@ -621,6 +622,17 @@ mssqlFmtIdentifier :: Text -> Text
 mssqlFmtIdentifier x =
   "[" <> T.replace "]" "]]" x <> "]"
 
+-- | Quote and escape a piece of text for use as a SQL Server string literal,
+-- i.e. double up any single quotes so the value can't break out of the
+-- surrounding @'...'@.
+--
+-- >>> mssqlFmtLit "foo" == "'foo'"
+--
+-- >>> mssqlFmtLit "o'brien" == "'o''brien'"
+mssqlFmtLit :: Text -> Text
+mssqlFmtLit x =
+  "'" <> T.replace "'" "''" x <> "'"
+
 -- | A Representation of SQL Trigger name for an event trigger in MSSQL.
 newtype SQLTriggerName = SQLTriggerName {getSQLTriggerName :: Text}
 
@@ -776,8 +788,10 @@ qualifyTableName = toTxt . toQueryFlat . fromTableName
 mkInsertTriggerQuery :: TableName -> TriggerName -> [ColumnInfo 'MSSQL] -> TriggerOnReplication -> LT.Text
 mkInsertTriggerQuery table@(TableName tableName schema@(SchemaName schemaName)) triggerName columns triggerOnReplication =
   let qualifiedTriggerName = qualifiedTriggerNameToText $ QualifiedTriggerName schema $ mkSQLTriggerName triggerName INSERT
-      triggerNameText = triggerNameToTxt triggerName
+      triggerNameLit = mssqlFmtLit $ triggerNameToTxt triggerName
       qualifiedTableName = qualifyTableName table
+      schemaNameLit = mssqlFmtLit schemaName
+      tableNameLit = mssqlFmtLit tableName
       operation = tshow INSERT
       replicationClause :: String = if triggerOnReplication /= TOREnableTrigger then "NOT FOR REPLICATION" else ""
       deliveryColsSQLExpression :: Text =
@@ -787,8 +801,10 @@ mkInsertTriggerQuery table@(TableName tableName schema@(SchemaName schemaName)) 
 mkDeleteTriggerQuery :: TableName -> TriggerName -> [ColumnInfo 'MSSQL] -> TriggerOnReplication -> LT.Text
 mkDeleteTriggerQuery table@(TableName tableName schema@(SchemaName schemaName)) triggerName columns triggerOnReplication =
   let qualifiedTriggerName = qualifiedTriggerNameToText $ QualifiedTriggerName schema $ mkSQLTriggerName triggerName DELETE
-      triggerNameText = triggerNameToTxt triggerName
+      triggerNameLit = mssqlFmtLit $ triggerNameToTxt triggerName
       qualifiedTableName = qualifyTableName table
+      schemaNameLit = mssqlFmtLit schemaName
+      tableNameLit = mssqlFmtLit tableName
       operation = tshow DELETE
       replicationClause :: String = if triggerOnReplication /= TOREnableTrigger then "NOT FOR REPLICATION" else ""
       deliveryColsSQLExpression :: Text = commaSeparated $ map (unSQLFragment . generateColumnTriggerAlias OLD Nothing) columns
@@ -878,8 +894,10 @@ mkUpdateTriggerQuery
   primaryKey
   triggerOnReplication =
     let qualifiedTriggerName = qualifiedTriggerNameToText $ QualifiedTriggerName schema $ mkSQLTriggerName triggerName UPDATE
-        triggerNameText = triggerNameToTxt triggerName
+        triggerNameLit = mssqlFmtLit $ triggerNameToTxt triggerName
         qualifiedTableName = qualifyTableName table
+        schemaNameLit = mssqlFmtLit schemaName
+        tableNameLit = mssqlFmtLit tableName
         operation = tshow UPDATE
         replicationClause :: String = if triggerOnReplication /= TOREnableTrigger then "NOT FOR REPLICATION" else ""
 
@@ -905,16 +923,16 @@ mkUpdateTriggerQuery
 addCleanupSchedules ::
   (MonadIO m, MonadError QErr m) =>
   MSSQLSourceConfig ->
-  [(TriggerName, AutoTriggerLogCleanupConfig)] ->
+  NonEmpty (TriggerName, AutoTriggerLogCleanupConfig) ->
   m ()
-addCleanupSchedules sourceConfig triggersWithcleanupConfig =
-  unless (null triggersWithcleanupConfig) $ do
+addCleanupSchedules sourceConfig triggersWithCleanupConfig =
+  unless (null triggersWithCleanupConfig) $ do
     currTimeUTC <- liftIO getCurrentTime
     let currTime = utcToZonedTime utc currTimeUTC
-        triggerNames = map fst triggersWithcleanupConfig
+        triggerNames = fmap fst triggersWithCleanupConfig
     allScheduledCleanupsInDB <- liftEitherM $ liftIO $ runMSSQLSourceWriteTx sourceConfig $ selectLastCleanupScheduledTimestamp triggerNames
     let triggerMap = HashMap.fromList $ allScheduledCleanupsInDB
-        scheduledTriggersAndTimestamps =
+        scheduledTriggersAndTimestampsMaybe =
           mapMaybe
             ( \(tName, cConfig) ->
                 let lastScheduledTime = case HashMap.lookup tName triggerMap of
@@ -926,15 +944,18 @@ addCleanupSchedules sourceConfig triggersWithcleanupConfig =
                       )
                       lastScheduledTime
             )
-            triggersWithcleanupConfig
-    unless (null scheduledTriggersAndTimestamps)
-      $ liftEitherM
-      $ liftIO
-      $ runMSSQLSourceWriteTx sourceConfig
-      $ insertEventTriggerCleanupLogsTx scheduledTriggersAndTimestamps
+            (toList triggersWithCleanupConfig)
+    fmap (fromMaybe ())
+      $ for
+        (nonEmpty scheduledTriggersAndTimestampsMaybe)
+        ( liftEitherM
+            . liftIO
+            . runMSSQLSourceWriteTx sourceConfig
+            . insertEventTriggerCleanupLogsTx
+        )
 
 -- | Insert the cleanup logs for the given trigger name and schedules
-insertEventTriggerCleanupLogsTx :: [(TriggerName, [Datetimeoffset])] -> TxET QErr IO ()
+insertEventTriggerCleanupLogsTx :: NonEmpty (TriggerName, [Datetimeoffset]) -> TxET QErr IO ()
 insertEventTriggerCleanupLogsTx triggerNameWithSchedules =
   unitQueryE
     HGE.defaultMSSQLTxErrorHandler
@@ -951,14 +972,14 @@ insertEventTriggerCleanupLogsTx triggerNameWithSchedules =
           ( \(triggerName, schedules) ->
               generateSQLValuesFromListWith
                 ( \schedule ->
-                    "'" <> triggerNameToTxt triggerName <> "', '" <> (T.pack . iso8601Show . unDatetimeoffset) schedule <> "', 'scheduled'"
+                    mssqlFmtLit (triggerNameToTxt triggerName) <> ", " <> mssqlFmtLit ((T.pack . iso8601Show . unDatetimeoffset) schedule) <> ", 'scheduled'"
                 )
                 schedules
           )
-          triggerNameWithSchedules
+          (toList triggerNameWithSchedules)
 
 -- | Get the last scheduled timestamp for a given event trigger name
-selectLastCleanupScheduledTimestamp :: [TriggerName] -> TxET QErr IO [(TriggerName, (Int, ZonedTime))]
+selectLastCleanupScheduledTimestamp :: NonEmpty TriggerName -> TxET QErr IO [(TriggerName, (Int, ZonedTime))]
 selectLastCleanupScheduledTimestamp triggerNames =
   map
     ( \(triggerName, count, lastScheduledTime) ->
@@ -976,7 +997,7 @@ selectLastCleanupScheduledTimestamp triggerNames =
         |]
       )
   where
-    triggerNamesValues = generateSQLValuesFromList $ map triggerNameToTxt triggerNames
+    triggerNamesValues = generateSQLValuesFromListWith (mssqlFmtLit . triggerNameToTxt) triggerNames
 
 deleteAllScheduledCleanupsTx :: TriggerName -> TxE QErr ()
 deleteAllScheduledCleanupsTx triggerName = do
@@ -1154,7 +1175,7 @@ deleteEventTriggerLogsTx TriggerLogCleanupConfig {..} = do
             else
               [ST.st|
                 UPDATE hdb_catalog.event_invocation_logs
-                SET trigger_name = '#{qTriggerName}'
+                SET trigger_name = #{qTriggerNameLit}
                 WHERE event_id = ANY ( SELECT id from  (VALUES #{eventIdsValues}) AS X(id));
                 |]
       --  Finally delete the event logs.
@@ -1176,6 +1197,7 @@ deleteEventTriggerLogsTx TriggerLogCleanupConfig {..} = do
   where
     qTimeout = tlccTimeout * 1000
     qTriggerName = triggerNameToTxt tlccEventTriggerName
+    qTriggerNameLit = mssqlFmtLit qTriggerName
     qRetentionPeriod = tlccClearOlderThan
     qBatchSize = tlccBatchSize
 

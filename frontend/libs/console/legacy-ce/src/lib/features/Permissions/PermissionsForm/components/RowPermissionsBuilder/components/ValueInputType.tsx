@@ -1,4 +1,4 @@
-import { useContext } from 'react';
+import { useContext, useState } from 'react';
 import { rowPermissionsContext } from './RowPermissionsProvider';
 import { tableContext } from './TableProvider';
 import isEmpty from 'lodash/isEmpty';
@@ -7,11 +7,12 @@ import { ObjectValueInput } from './ObjectValueInput';
 import { BooleanValueInput } from './BooleanValueInput';
 import { Operator } from './types';
 import { rootTableContext } from './RootTableProvider';
-import { areTablesEqual } from '../../../../../hasura-metadata-api';
+import { findTable } from './utils/tables';
+import { Input } from '@hasura/shared/ui';
 
 export const checkUseObjectInput = (
   comparatorName: string,
-  operator: Operator | undefined
+  operator: Operator | undefined,
 ) => {
   if (operator?.type === 'json' || operator?.type === 'jsonb') return true;
   if (
@@ -43,9 +44,10 @@ export const ValueInputType = ({
 }) => {
   const { setValue, isLoading } = useContext(rowPermissionsContext);
   const { tables } = useContext(rootTableContext);
-  const { table } = useContext(tableContext);
+  const { table, source } = useContext(tableContext);
+  const [draft, setDraft] = useState<string | null>(null);
   const operators = useOperators({ path });
-  const operator = operators.find(o => o.name === comparatorName);
+  const operator = operators.find((o) => o.name === comparatorName);
 
   if (operator?.inputType === 'boolean') {
     return (
@@ -67,40 +69,42 @@ export const ValueInputType = ({
     );
   }
 
+  const scalarType = findTable(tables, table, source)?.columns.find(
+    (c) => c.name === path[path.length - 2],
+  )?.graphQLProperties?.scalarType;
+
+  // a partly typed number (e.g. `1.`) is shown as typed, as long as it
+  // still stands for the value
+  const displayedValue =
+    draft !== null && toColumnValue(draft, scalarType) === value
+      ? draft
+      : value;
+
   return (
-    <input
+    <Input
       data-testid={componentLevelId}
       disabled={isLoading || (comparatorName === '_where' && isEmpty(table))}
-      className={`border border-gray-200 rounded-md p-2 !mr-4 ${
-        isLoading ? 'bg-gray-100' : ''
-      }`}
+      className={`p-2 mr-4!`}
       type="text"
-      value={value}
-      onChange={e => {
-        let value = e.target.value as any;
-        const foundTable = tables.find(t => areTablesEqual(t.table, table));
-        const column = foundTable?.columns.find(
-          c => c.name === path[path.length - 2]
-        );
-        if (!isNaN(value) && value !== '') {
-          try {
-            if (column?.graphQLProperties?.scalarType === 'Int') {
-              value = parseInt(value);
-            } else if (column?.graphQLProperties?.scalarType === 'Float') {
-              value = parseFloat(value);
-            }
-          } catch (e) {
-            console.error(e);
-            // If there is an error it means it's a string
-            // This can happen, users can set values like X-Hasura-User-Id
-            // We catch so we use the value as is
-          }
-        }
-        setValue(
-          path,
-          operator?.inputType === 'boolean' ? Boolean(e.target.value) : value
-        );
+      value={displayedValue}
+      onChange={(e) => {
+        setDraft(e.target.value);
+        setValue(path, toColumnValue(e.target.value, scalarType));
       }}
     />
   );
+};
+
+const INT_PATTERN = /^-?\d+$/;
+const FLOAT_PATTERN = /^-?\d+(\.\d+)?([eE][-+]?\d+)?$/;
+
+/**
+ * Numbers are stored as numbers once they're complete, anything else (e.g.
+ * `X-Hasura-User-Id`, or `1.` while typing `1.5`) as text.
+ */
+export const toColumnValue = (text: string, scalarType: string | undefined) => {
+  if (scalarType === 'Int' && INT_PATTERN.test(text)) return parseInt(text, 10);
+  if (scalarType === 'Float' && FLOAT_PATTERN.test(text))
+    return parseFloat(text);
+  return text;
 };

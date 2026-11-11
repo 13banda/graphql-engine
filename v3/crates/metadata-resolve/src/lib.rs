@@ -2,49 +2,105 @@
 //! and building structures that contain all of the relevant information
 //! necessary for the engine to function.
 //!
-//! `stages::resolve` is the function responsible for resolving the metadata,
+//! `stages::resolve` is the function responsible for resolving the metadata,src/lie
 //! and it returns a resolved and validated `stages::Metadata` object.
 
 // No modules outside this should know about its internal structure.
 
 mod helpers;
+mod ndc_migration;
 mod stages;
 mod types;
 
+pub use helpers::http;
 pub use helpers::ndc_validation::NDCValidationError;
+pub use helpers::to_fancy_errors;
 pub use helpers::types::{
-    get_type_representation, mk_name, object_type_exists, unwrap_custom_type_name,
-    NdcColumnForComparison, TypeRepresentation,
+    NdcColumnForComparison, TypeRepresentation, get_type_representation, mk_name,
+    object_type_exists, unwrap_custom_type_name,
 };
-pub use stages::command_permissions::CommandWithPermissions;
-pub use stages::commands::Command;
-pub use stages::data_connectors::DataConnectorLink;
+pub use open_dds::sql_schema_aliases::{SqlCatalogName, SqlSchemaName};
+pub use stages::aggregates::{
+    AggregatableFieldInfo, AggregateExpression, AggregateExpressionGraphqlConfig, AggregateOperand,
+    AggregationFunctionInfo, DataConnectorAggregationFunctionInfo,
+};
+pub use stages::arguments::ArgumentInfo;
+pub use stages::boolean_expressions::{
+    BooleanExpressionComparableRelationship, BooleanExpressionError,
+    BooleanExpressionGraphqlConfig, BooleanExpressionGraphqlFieldConfig,
+    BooleanExpressionTypeIdentifier, ComparableRelationshipExecutionStrategy,
+    ComparisonExpressionInfo, IncludeLogicalOperators, ObjectBooleanExpressionGraphqlConfig,
+    ObjectComparisonExpressionInfo, ObjectComparisonKind, OperatorMapping,
+    ResolvedObjectBooleanExpressionType, ScalarBooleanExpressionGraphqlConfig,
+    ScalarComparisonKind, get_comparable_relationship_execution_strategy,
+};
+pub use stages::data_connectors::{
+    ArgumentPresetValue, DataConnectorLink, DataConnectorRelationalQueryCapabilities,
+    HttpHeadersPreset, NdcVersion,
+};
+pub use stages::graphql_config::{GlobalGraphqlConfig, MultipleOrderByInputObjectFields};
 pub use stages::model_permissions::{
-    FilterPermission, ModelPredicate, ModelTargetSource, ModelWithPermissions,
+    FilterPermission, ModelAuthorizationRule, ModelPredicate, ModelTargetSource,
+    ModelWithPermissions, PredicateRelationshipInfo, RelationalDeletePermission,
+    RelationalInsertPermission, RelationalOperation, RelationalUpdatePermission, SelectPermission,
+    UnaryComparisonOperator,
 };
-pub use stages::models::{
-    ConnectorArgumentName, Model, ModelOrderByExpression, ModelSource, SelectManyGraphQlDefinition,
-    SelectUniqueGraphQlDefinition,
+pub use stages::models::Model;
+pub use stages::models::{ModelSource, ModelsError};
+pub use stages::models_graphql::{
+    ModelGraphqlError, ModelOrderByExpression, SelectAggregateGraphQlDefinition,
+    SelectManyGraphQlDefinition, SelectUniqueGraphQlDefinition, SubscriptionGraphQlDefinition,
 };
-pub use stages::object_boolean_expressions::{
-    BooleanExpressionGraphqlConfig, ComparisonExpressionInfo, ObjectBooleanExpressionDataConnector,
-    ObjectBooleanExpressionType,
+pub use stages::object_relationships::{
+    AggregateRelationship, CommandRelationshipTarget, FieldNestedness, ModelRelationshipTarget,
+    ObjectTypeWithRelationships, RelationshipCapabilities, RelationshipCommandMapping,
+    RelationshipExecutionCategory, RelationshipField, RelationshipModelMapping,
+    RelationshipModelMappingFieldTarget, RelationshipModelMappingTarget, RelationshipTarget,
+    field_selection_relationship_execution_category,
 };
 pub use stages::object_types::{
-    FieldMapping, ObjectTypeRepresentation, ResolvedObjectApolloFederationConfig, TypeMapping,
+    AggregateFunctions, ComparisonOperators, ExtractionFunctions, FieldArgumentInfo,
+    FieldDefinition, FieldMapping, ObjectTypeRepresentation, ResolvedObjectApolloFederationConfig,
+    TypeMapping,
 };
-pub use stages::relationships::{
-    relationship_execution_category, ObjectTypeWithRelationships, Relationship,
-    RelationshipCapabilities, RelationshipCommandMapping, RelationshipExecutionCategory,
-    RelationshipModelMapping, RelationshipTarget,
+pub use stages::order_by_expressions::{
+    ObjectOrderByExpression, OrderByExpressionGraphqlConfig, OrderByExpressionIdentifier,
+    OrderByExpressions, OrderableField, OrderableFieldNestedness, OrderableObjectField,
+    OrderableRelationship, OrderableRelationshipError, OrderableScalarField,
+    validate_orderable_relationship,
 };
-pub use stages::type_permissions::TypeInputPermission;
-pub use stages::{resolve, Metadata};
-pub use types::error::{BooleanExpressionError, Error};
-pub use types::internal_flags::MetadataResolveFlagsInternal;
-pub use types::permission::ValueExpression;
+pub use stages::plugins::{
+    LifecyclePluginConfigs, ResolvedLifecyclePreNdcRequestPluginHook,
+    ResolvedLifecyclePreNdcResponsePluginHook,
+    types::{
+        ResolvedLifecyclePreResponseAsyncPluginHook, ResolvedLifecyclePreResponsePluginHooks,
+        ResolvedLifecyclePreResponseSyncPluginHook,
+    },
+};
+pub use stages::scalar_boolean_expressions::{
+    LogicalOperators, LogicalOperatorsGraphqlConfig, ResolvedScalarBooleanExpressionType,
+};
+pub use stages::scalar_type_representations::ScalarTypeRepresentation;
+pub use stages::sql_schema_aliases::{SqlSchemaAlias, SqlSchemaAliases};
+pub use stages::type_permissions::{
+    FieldAuthorizationRule, FieldPresetInfo, TypeInputAuthorizationRule, TypeInputPermission,
+};
+pub use stages::view_permissions::{ViewAuthorizationRule, ViewPermissions, ViewWithPermissions};
+pub use stages::views::ResolvedView;
+pub use stages::{
+    Metadata,
+    command_permissions::{AllowOrDeny, Command, CommandAuthorizationRule, CommandWithPermissions},
+    commands::CommandSource,
+    data_connectors, resolve,
+};
+pub use types::condition::{BinaryOperation, Condition, ConditionHash, Conditions, UnaryOperation};
+pub use types::configuration;
+pub use types::error::{Error, WithContext};
+pub use types::flags::{self, RuntimeFlags};
+pub use types::permission::{ValueExpression, ValueExpressionOrPredicate};
 pub use types::subgraph::{
-    deserialize_non_string_key_btreemap, deserialize_qualified_btreemap,
-    serialize_non_string_key_btreemap, serialize_qualified_btreemap, ArgumentInfo, Qualified,
-    QualifiedBaseType, QualifiedTypeName, QualifiedTypeReference,
+    ArgumentKind, Qualified, QualifiedBaseType, QualifiedTypeName, QualifiedTypeReference,
+    UnTaggedQualifiedTypeName, deserialize_non_string_key_btreemap, deserialize_qualified_btreemap,
+    serialize_non_string_key_btreemap, serialize_qualified_btreemap,
 };
+pub use types::warning::Warning;

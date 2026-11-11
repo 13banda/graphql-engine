@@ -37,7 +37,7 @@ import Data.Map.Strict qualified as Map
 import Data.SerializableBlob qualified as SB
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Text.Extended (dquote, dquoteList, (<<>))
+import Data.Text.Extended (dquoteList, (<<>))
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.Eventing.Backend (BackendEventTrigger (..))
@@ -88,7 +88,6 @@ import Hasura.SQL.BackendMap qualified as BackendMap
 import Hasura.Server.Logging (MetadataLog (..))
 import Hasura.Server.Types (MonadGetPolicies (..))
 import Hasura.StoredProcedure.API (dropStoredProcedureInMetadata)
-import Hasura.Table.Metadata (TableMetadata (..))
 import Network.HTTP.Client.Transformable qualified as HTTP
 import Network.Types.Extended
 
@@ -320,28 +319,26 @@ runReplaceMetadataV2' ReplaceMetadataV2 {..} = do
 
   let (oldSources, newSources) = (_metaSources oldMetadata, _metaSources metadata)
 
-  -- Check for duplicate and illegal trigger names in the new source metadata
-  for_ (InsOrdHashMap.toList newSources) $ \(source, newBackendSourceMetadata) -> do
-    for_ (InsOrdHashMap.lookup source oldSources) $ \oldBackendSourceMetadata ->
-      AB.dispatchAnyBackend @BackendEventTrigger (unBackendSourceMetadata newBackendSourceMetadata) \(newSourceMetadata :: SourceMetadata b) -> do
-        let newTriggerNames = concatMap (InsOrdHashMap.keys . _tmEventTriggers) (InsOrdHashMap.elems $ _smTables newSourceMetadata)
-            duplicateTriggerNamesInNewMetadata = newTriggerNames \\ (L.uniques newTriggerNames)
-        unless (null duplicateTriggerNamesInNewMetadata) $ do
-          throw400 NotSupported ("Event trigger with duplicate names not allowed: " <> dquoteList (map triggerNameToTxt duplicateTriggerNamesInNewMetadata))
-        dispatch oldBackendSourceMetadata \oldSourceMetadata -> do
-          let oldTriggersMap = getTriggersMap oldSourceMetadata
-              addedTriggerNames = filter (\(_, n) -> not (InsOrdHashMap.member n oldTriggersMap)) $ getSourceTableAndTriggers newSourceMetadata
-              newIllegalTriggerNamesInNewMetadata = filter (isIllegalTriggerName . snd) addedTriggerNames
-              mkEventTriggerObjID tableName triggerName = MOSourceObjId source $ AB.mkAnyBackend $ SMOTableObj @b tableName $ MTOTrigger triggerName
-              mkIllegalEventTriggerNameWarning (tableName, triggerName) =
-                -- TODO: capture the path as well
-                MetadataWarning WCIllegalEventTriggerName (mkEventTriggerObjID tableName triggerName)
-                  $ "The event trigger with name "
-                  <> dquote (triggerNameToTxt triggerName)
-                  <> " may not work as expected, hasura suggests to use only alphanumeric, underscore and hyphens in an event trigger name"
-
-          unless (null newIllegalTriggerNamesInNewMetadata) $ do
-            traverse_ (warn . mkIllegalEventTriggerNameWarning) newIllegalTriggerNamesInNewMetadata
+  -- Check for duplicate and illegal trigger names in the new source metadata.
+  -- Illegal names are hard-rejected (matching create_event_trigger) rather than
+  -- merely warned about, because the name is interpolated into the SQL of the
+  -- generated trigger function. This validates every trigger name present in
+  -- the incoming metadata, old or new, so upgrading with a pre-existing illegal
+  -- name already in storage keeps working -- decoding stored metadata doesn't
+  -- go through this check, only a fresh replace_metadata call does -- but
+  -- re-submitting that same metadata will fail until the name is fixed.
+  for_ (InsOrdHashMap.toList newSources) $ \(_source, newBackendSourceMetadata) ->
+    AB.dispatchAnyBackend @BackendEventTrigger (unBackendSourceMetadata newBackendSourceMetadata) \(newSourceMetadata :: SourceMetadata b) -> do
+      let sourceTableAndTriggers = getSourceTableAndTriggers newSourceMetadata
+          newTriggerNames = map snd sourceTableAndTriggers
+          duplicateTriggerNamesInNewMetadata = newTriggerNames \\ (L.uniques newTriggerNames)
+      unless (null duplicateTriggerNamesInNewMetadata) $ do
+        throw400 NotSupported ("Event trigger with duplicate names not allowed: " <> dquoteList (map triggerNameToTxt duplicateTriggerNamesInNewMetadata))
+      for_ sourceTableAndTriggers $ \(_, triggerName) -> do
+        when (isIllegalTriggerName triggerName)
+          $ throw400 NotSupported "Starting in v2.50 only alphanumeric and underscore and hyphens allowed for name"
+        unless (T.length (triggerNameToTxt triggerName) <= maxTriggerNameLength)
+          $ throw400 NotSupported "event trigger name can be at most 42 characters"
 
   -- Throw a warning if the API time limit exceeds the system limit
   let userTimeLimitAPILimit = _lGlobal <$> _alTimeLimit (_metaApiLimits metadata)
@@ -466,8 +463,17 @@ runReplaceMetadataV2' ReplaceMetadataV2 {..} = do
             dispatch oldBackendSourceMetadata \oldSourceMetadata -> do
               let oldTriggersMap = getTriggersMap oldSourceMetadata
                   newTriggersMap = getTriggersMap newSourceMetadata
+                  -- Get table mapping for new triggers (we use schema cache for old tables)
+                  newTriggerTableMap = getTriggerTableMap newSourceMetadata
                   droppedEventTriggers = InsOrdHashMap.keys $ oldTriggersMap `InsOrdHashMap.difference` newTriggersMap
                   retainedNewTriggers = newTriggersMap `InsOrdHashMap.intersection` oldTriggersMap
+                  -- Helper to check if a retained trigger has moved to a different table
+                  -- We compare the old table (from schema cache) with the new table (from new metadata)
+                  hasTriggerMoved :: TriggerName -> Bool
+                  hasTriggerMoved triggerName =
+                    case (getTableNameFromTrigger @b oldSchemaCache source triggerName, InsOrdHashMap.lookup triggerName newTriggerTableMap) of
+                      (Just oldTable, Just newTable) -> oldTable /= newTable
+                      _ -> False
                   catcher e@QErr {qeCode}
                     | qeCode == Unexpected = pure () -- NOTE: This information should be returned by the inconsistent_metadata response, so doesn't need additional logging.
                     | otherwise = throwError e -- rethrow other errors
@@ -496,6 +502,7 @@ runReplaceMetadataV2' ReplaceMetadataV2 {..} = do
                         warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
                         logger $ MetadataLog HL.LevelWarn message J.Null
                     Just sourceConfig -> do
+                      -- First, drop triggers that have been completely removed
                       for_ droppedEventTriggers \triggerName -> do
                         -- TODO: The `tableName` parameter could be computed while building
                         -- the triggers map and avoid the cache lookup.
@@ -506,28 +513,45 @@ runReplaceMetadataV2' ReplaceMetadataV2 {..} = do
                             logger $ MetadataLog HL.LevelWarn message J.Null
                           Just tableName ->
                             dropTriggerAndArchiveEvents @b sourceConfig triggerName tableName
-                      for_ (InsOrdHashMap.toList retainedNewTriggers) $ \(retainedNewTriggerName, retainedNewTriggerConf) ->
-                        case InsOrdHashMap.lookup retainedNewTriggerName oldTriggersMap of
+
+                      -- Second, drop triggers that have moved to a different table
+                      -- We need to drop the SQL triggers from the OLD table, but NOT archive the events
+                      -- (since the trigger still exists, just on a different table)
+                      for_ (filter hasTriggerMoved $ InsOrdHashMap.keys retainedNewTriggers) \triggerName -> do
+                        case getTableNameFromTrigger @b oldSchemaCache source triggerName of
                           Nothing -> do
-                            let message = sqlTriggerError retainedNewTriggerName
+                            let message = sqlTriggerError triggerName
                             warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
                             logger $ MetadataLog HL.LevelWarn message J.Null
-                          Just oldTriggerConf -> do
-                            let newTriggerOps = etcDefinition retainedNewTriggerConf
-                                oldTriggerOps = etcDefinition oldTriggerConf
-                                isDroppedOp old new = isJust old && isNothing new
-                                droppedOps =
-                                  [ (bool Nothing (Just INSERT) (isDroppedOp (tdInsert oldTriggerOps) (tdInsert newTriggerOps))),
-                                    (bool Nothing (Just UPDATE) (isDroppedOp (tdUpdate oldTriggerOps) (tdUpdate newTriggerOps))),
-                                    (bool Nothing (Just ET.DELETE) (isDroppedOp (tdDelete oldTriggerOps) (tdDelete newTriggerOps)))
-                                  ]
-                            case getTableNameFromTrigger @b oldSchemaCache source retainedNewTriggerName of
-                              Nothing -> do
-                                let message = sqlTriggerError retainedNewTriggerName
-                                warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
-                                logger $ MetadataLog HL.LevelWarn message J.Null
-                              Just tableName ->
-                                dropDanglingSQLTrigger @b sourceConfig retainedNewTriggerName tableName (HS.fromList $ catMaybes droppedOps)
+                          Just oldTableName ->
+                            -- Drop all operations from the old table since the trigger is moving
+                            dropDanglingSQLTrigger @b sourceConfig triggerName oldTableName (HS.fromList [INSERT, UPDATE, ET.DELETE])
+
+                      -- Third, handle retained triggers where operations were dropped (but table stayed same)
+                      for_ (InsOrdHashMap.toList retainedNewTriggers) $ \(retainedNewTriggerName, retainedNewTriggerConf) ->
+                        -- Skip triggers that moved tables (already handled above)
+                        unless (hasTriggerMoved retainedNewTriggerName)
+                          $ case InsOrdHashMap.lookup retainedNewTriggerName oldTriggersMap of
+                            Nothing -> do
+                              let message = sqlTriggerError retainedNewTriggerName
+                              warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
+                              logger $ MetadataLog HL.LevelWarn message J.Null
+                            Just oldTriggerConf -> do
+                              let newTriggerOps = etcDefinition retainedNewTriggerConf
+                                  oldTriggerOps = etcDefinition oldTriggerConf
+                                  isDroppedOp old new = isJust old && isNothing new
+                                  droppedOps =
+                                    [ (bool Nothing (Just INSERT) (isDroppedOp (tdInsert oldTriggerOps) (tdInsert newTriggerOps))),
+                                      (bool Nothing (Just UPDATE) (isDroppedOp (tdUpdate oldTriggerOps) (tdUpdate newTriggerOps))),
+                                      (bool Nothing (Just ET.DELETE) (isDroppedOp (tdDelete oldTriggerOps) (tdDelete newTriggerOps)))
+                                    ]
+                              case getTableNameFromTrigger @b oldSchemaCache source retainedNewTriggerName of
+                                Nothing -> do
+                                  let message = sqlTriggerError retainedNewTriggerName
+                                  warn $ MetadataWarning WCSourceCleanupFailed sourceObjID message
+                                  logger $ MetadataLog HL.LevelWarn message J.Null
+                                Just tableName ->
+                                  dropDanglingSQLTrigger @b sourceConfig retainedNewTriggerName tableName (HS.fromList $ catMaybes droppedOps)
       where
         compose ::
           SourceName ->

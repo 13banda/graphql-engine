@@ -1,10 +1,5 @@
-import { RequestTransformMethod } from '../../../../metadata/types';
 import { createGraphQLSchema } from '@hasura/open-api-to-graphql';
-import z from 'zod';
-import { formSchema } from './OASGeneratorPage';
-
-export type SchemaType = z.infer<typeof formSchema>;
-
+import { RequestTransformMethod } from '@hasura/shared/types';
 export type RequestTransform =
   | {
       type: 'json';

@@ -1,15 +1,4 @@
 import globals from '../Globals';
-
-const filterEventsBlockList = [
-  'App/ONGOING_REQUEST',
-  'App/DONE_REQUEST',
-  'App/FAILED_REQUEST',
-  'App/ERROR_REQUEST',
-  'RNS_SHOW_NOTIFICATION',
-  'RNS_HIDE_NOTIFICATION',
-  'RNS_REMOVE_ALL_NOTIFICATIONS',
-];
-
 const DATA_PATH = '/data';
 const REMOTE_SCHEMAS_PATH = '/remote-schemas';
 const EVENTS_PATH = '/events';
@@ -55,4 +44,4 @@ const sanitiseUrl = (rawPath: string) => {
   return path;
 };
 
-export { filterEventsBlockList, sanitiseUrl };
+export { sanitiseUrl };

@@ -1,15 +1,17 @@
 import React from 'react';
-import { StoryObj, Meta } from '@storybook/react';
+import { StoryObj, Meta } from '@storybook/react-webpack5';
 import { z } from 'zod';
-import { SimpleForm } from '../../../../new-components/Form';
-import { ReactQueryDecorator } from '../../../../storybook/decorators/react-query';
+import { SimpleForm } from '@hasura/shared/ui';
+import { ReactQueryDecorator } from '@hasura/shared/testing';
 
 import {
   ColumnPermissionsSection,
   ColumnPermissionsSectionProps,
 } from './ColumnPermissions';
 
-const schema = z.object({ columns: z.record(z.optional(z.boolean())) });
+const schema = z.object({
+  columns: z.record(z.string(), z.optional(z.boolean())),
+});
 
 export default {
   component: ColumnPermissionsSection,
@@ -18,7 +20,9 @@ export default {
     (StoryComponent: React.FC) => (
       <SimpleForm
         schema={schema}
-        onSubmit={() => {}}
+        onSubmit={() => {
+          /* noop */
+        }}
         options={{
           defaultValues: {
             columns: { id: false, name: false, description: false },
@@ -77,7 +81,9 @@ export const PartiallySelected: StoryObj<ColumnPermissionsSectionProps> = {
     (S: React.FC) => (
       <SimpleForm
         schema={schema}
-        onSubmit={() => {}}
+        onSubmit={() => {
+          /* noop */
+        }}
         options={{
           defaultValues: {
             columns: { id: true, name: false, description: true },
@@ -100,7 +106,9 @@ export const AllSelected: StoryObj<ColumnPermissionsSectionProps> = {
     (S: React.FC) => (
       <SimpleForm
         schema={schema}
-        onSubmit={() => {}}
+        onSubmit={() => {
+          /* noop */
+        }}
         options={{
           defaultValues: {
             columns: { id: true, name: true, description: true },

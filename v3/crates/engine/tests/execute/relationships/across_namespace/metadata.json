@@ -2,14 +2,14 @@
   "version": "v2",
   "subgraphs": [
     {
-      "name": "author_namespace",
+      "name": "connector_1",
       "objects": [
         {
           "kind": "DataConnectorScalarRepresentation",
           "version": "v1",
           "definition": {
             "dataConnectorName": "db",
-            "dataConnectorScalarType": "String",
+            "dataConnectorScalarType": "text",
             "representation": "String",
             "graphql": {
               "comparisonExpressionTypeName": "String_Comparison_Exp_2"
@@ -21,7 +21,7 @@
           "version": "v1",
           "definition": {
             "dataConnectorName": "db",
-            "dataConnectorScalarType": "Int",
+            "dataConnectorScalarType": "int4",
             "representation": "Int"
           }
         },
@@ -182,14 +182,14 @@
       ]
     },
     {
-      "name": "article_namespace",
+      "name": "connector_2",
       "objects": [
         {
           "kind": "DataConnectorScalarRepresentation",
           "version": "v1",
           "definition": {
             "dataConnectorName": "db",
-            "dataConnectorScalarType": "String",
+            "dataConnectorScalarType": "text",
             "representation": "String",
             "graphql": {
               "comparisonExpressionTypeName": "String_Comparison_Exp"
@@ -201,7 +201,7 @@
           "version": "v1",
           "definition": {
             "dataConnectorName": "db",
-            "dataConnectorScalarType": "Int",
+            "dataConnectorScalarType": "int4",
             "representation": "Int"
           }
         },
@@ -363,7 +363,7 @@
             "target": {
               "model": {
                 "name": "Authors",
-                "subgraph": "author_namespace",
+                "subgraph": "connector_1",
                 "relationshipType": "Object"
               }
             },

@@ -1,7 +1,6 @@
 import * as React from 'react';
-import { useQuery } from 'react-query';
-import { programmaticallyTraceError } from '../../../../Analytics';
-import { Dispatch } from '../../../../../types';
+import { useQuery } from '@tanstack/react-query';
+import { programmaticallyTraceError } from '@hasura/shared/analytics';
 import {
   staleTime,
   templateSummaryRunQueryClickVariables,
@@ -9,16 +8,11 @@ import {
 } from '../../../constants';
 import { QueryScreen } from '../../../components/QueryScreen/QueryScreen';
 import { fetchTemplateDataQueryFn } from '../../utils';
-import {
-  runQueryInGraphiQL,
-  fillSampleQueryInGraphiQL,
-  emitOnboardingEvent,
-} from '../../../utils';
+import { runQueryInGraphiQL, emitOnboardingEvent } from '../../../utils';
 
 type Props = {
   templateUrl: string;
   dismiss: VoidFunction;
-  dispatch: Dispatch;
 };
 
 const defaultQuery = `
@@ -50,32 +44,32 @@ query lookupCustomerOrder {
 `;
 
 export function TemplateSummary(props: Props) {
-  const { templateUrl, dismiss, dispatch } = props;
+  const { templateUrl, dismiss } = props;
   const schemaImagePath = `${templateUrl}/diagram.png`;
   const sampleQueriesPath = `${templateUrl}/sample.graphql`;
 
-  const [sampleQuery, setSampleQuery] = React.useState(defaultQuery);
-
-  const { data: sampleQueriesData } = useQuery({
-    queryKey: sampleQueriesPath,
+  const { data: sampleQueriesData, error: sampleQueriesError } = useQuery({
+    queryKey: [sampleQueriesPath],
     queryFn: () => fetchTemplateDataQueryFn(sampleQueriesPath, {}),
     staleTime,
-    onError: (e: any) => {
+  });
+
+  // The sample query shown in GraphiQL is fully derived from the fetched data:
+  // until the request resolves (or if it is not a string) we fall back to the
+  // default query. Deriving during render keeps the query filled in as soon as
+  // the data is available without an extra render pass.
+  const sampleQuery =
+    typeof sampleQueriesData === 'string' ? sampleQueriesData : defaultQuery;
+
+  React.useEffect(() => {
+    if (sampleQueriesError) {
       // this is unexpected; so get alerted
       programmaticallyTraceError({
         error: 'failed to get a sample query in template summary',
-        cause: e,
+        cause: sampleQueriesError,
       });
-    },
-  });
-
-  // this effect makes sure that the query is filled in GraphiQL as soon as possible
-  React.useEffect(() => {
-    if (typeof sampleQueriesData === 'string') {
-      setSampleQuery(sampleQueriesData);
-      fillSampleQueryInGraphiQL(sampleQueriesData, dispatch);
     }
-  }, [sampleQueriesData]);
+  }, [sampleQueriesError]);
 
   // this runs the query that is prefilled in graphiql
   const onRunHandler = () => {

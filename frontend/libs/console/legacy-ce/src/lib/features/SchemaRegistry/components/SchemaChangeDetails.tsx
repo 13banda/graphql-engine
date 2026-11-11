@@ -1,152 +1,174 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import LZString from 'lz-string';
+import { useHref } from 'react-router';
 import { useGetSchema } from '../hooks/useGetSchema';
-import { Tabs } from '../../../new-components/Tabs';
-import { IconTooltip } from '../../../new-components/Tooltip';
-import { SchemaRow } from './SchemaRow';
-import {
-  findIfSubStringExists,
-  schemaTransformFn,
-  getPublishTime,
-} from '../utils';
+import { Tabs, Input, Button, AceEditor } from '@hasura/shared/ui';
+import { schemaTransformFn, getPublishTime } from '../utils';
 import { RoleBasedSchema, Schema } from '../types';
 import { FaSearch, FaShareAlt } from 'react-icons/fa';
-import { Input } from '../../../new-components/Form';
-import AceEditor from 'react-ace';
-import { SearchableSelect } from '../../../components/Common';
-import { Analytics } from '../../Analytics';
+import { Analytics } from '@hasura/shared/analytics';
 
 interface SchemaChangeDetailsProps {
   schemaId: string;
 }
 
-export const SchemaChangeDetails: React.FC<
-  SchemaChangeDetailsProps
-> = props => {
-  const { schemaId } = props;
-  const fetchSchemaResponse = useGetSchema(schemaId);
-  const { kind } = fetchSchemaResponse;
+export const SchemaChangeDetails = ({ schemaId }: SchemaChangeDetailsProps) => {
+  const response = useGetSchema(schemaId);
 
-  switch (kind) {
+  switch (response.kind) {
     case 'loading':
-      return <p>Loading...</p>;
+      return <p role="status">Loading schema details…</p>;
     case 'error':
-      return <p>Error: {fetchSchemaResponse.message}</p>;
+      return <p role="alert">Unable to load schema: {response.message}</p>;
     case 'success': {
-      const transformedData = schemaTransformFn(fetchSchemaResponse.response);
-      return (
-        <div className="w-full">
-          <SchemasDetails schema={transformedData} />
-        </div>
+      const schema = schemaTransformFn(response.response);
+      return schema ? (
+        <SchemaDetailsPanel key={schemaId} schema={schema} />
+      ) : (
+        <p role="status">Schema not found. Select another published schema.</p>
       );
     }
   }
 };
 
-const SchemasDetails: React.VFC<{
-  schema: Schema;
-}> = props => {
-  const { schema } = props;
+const changeLevels = [
+  { level: 'BREAKING', label: 'Breaking', color: 'var(--red-11)' },
+  { level: 'DANGEROUS', label: 'Dangerous', color: 'var(--amber-11)' },
+  { level: 'NON_BREAKING', label: 'Safe', color: 'var(--green-11)' },
+] as const;
 
-  const [tabState, setTabState] = React.useState('changes');
-
-  // We know for sure only one roleBasedSchema exists
+/** The fetched detail view, kept separate so all comparison states can be previewed. */
+export const SchemaDetailsPanel = ({ schema }: { schema: Schema }) => {
+  const [tabState, setTabState] = useState('changes');
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>(
+    'idle',
+  );
   const roleBasedSchema = schema.roleBasedSchemas[0];
-  const [isCopied, toggle] = useState(false);
-  const onCopy = () => {
-    const currentURL = `${window.location.origin}${window.location.pathname}`; // Get the current URL
-    const urlToCopy = `${currentURL}/${roleBasedSchema.id}`;
+  const sharePath = useHref(`/api/schema-registry/${roleBasedSchema.id}`);
+  const { changes, role } = roleBasedSchema;
+
+  const onCopy = async () => {
     try {
-      navigator.clipboard.writeText(urlToCopy).then(() => {
-        toggle(true);
-        setTimeout(() => {
-          toggle(false);
-        }, 2000);
-      });
-    } catch (error) {
-      alert(`Failed to copy URL!`);
+      await navigator.clipboard.writeText(
+        new URL(sharePath, window.location.origin).toString(),
+      );
+      setCopyState('copied');
+    } catch {
+      setCopyState('error');
     }
   };
 
   return (
-    <div className="flex flex-col border-neutral-200 bg-white border rounded-md">
-      <div className="flex bg-gray-100 px-4 py-2 w-full">
-        <div className="flex text-base justify-between w-[15%]">
-          <span className="text-sm font-bold">ROLE</span>
+    <section
+      aria-label="Schema details"
+      className="min-w-0 rounded-lg border"
+      style={{
+        background: 'var(--color-panel-solid)',
+        borderColor: 'var(--gray-6)',
+        color: 'var(--gray-12)',
+      }}
+    >
+      <div className="flex flex-wrap items-start justify-between gap-4 p-5">
+        <div className="min-w-0">
+          <p className="text-sm mb-1" style={{ color: 'var(--gray-11)' }}>
+            Schema for role
+          </p>
+          <h2 className="text-lg font-semibold break-all">{role}</h2>
         </div>
-        <div className="flex text-base justify-around w-[30%]">
-          <span className="text-sm font-bold mx-2">BREAKING</span>
-          <span className="text-sm font-bold mx-2">DANGEROUS</span>
-          <span className="text-sm font-bold mr-4">SAFE</span>
-        </div>
-        <div className="flex text-base items-center justify-around w-[55%]">
-          <span className="text-sm font-bold mx-2">TOTAL</span>
-        </div>
-      </div>
-      <SchemaRow
-        role={roleBasedSchema.role || ''}
-        changes={roleBasedSchema.changes}
-      />
-      <div className="px-4 mb-2">
-        <div className="flex mt-4">
-          <div className="flex items-center ">
-            <p className="font-bold text-gray-500 py-2">Published: </p>
-
-            <div className="flex items-center ml-2 font-semibold text-gray-600">
-              <span>{getPublishTime(schema.created_at)}</span>
-              <IconTooltip message="The time at which this GraphQL schema was generated" />
-            </div>
-          </div>
-          <div className="flex items-center justify-around ml-auto w-1/2">
-            <div className="flex-col">
-              <div className="flex items-center mt-4">
-                <p className="font-bold text-gray-500 py-2">Hash</p>
-                <IconTooltip message="Hash of the GraphQL Schema SDL. Hash for two identical schema is identical." />
-              </div>
-              <span className="font-bold bg-gray-100 px-1 rounded text-sm">
-                {roleBasedSchema.hash}
-              </span>
-            </div>
-            <div className="flex flex-col items-center">
-              <Analytics name="schema-registry-share-btn">
-                <button
-                  className="flex items-center mx-auto  rounded-lg transition-colors duration-300"
-                  onClick={onCopy}
-                >
-                  <FaShareAlt
-                    color={isCopied ? '#3182ce' : '#718096'}
-                    size={18}
-                  />
-                  <span
-                    className={`font-bold ${
-                      isCopied ? 'text-blue-500' : 'text-gray-500'
-                    } py-2 pl-2 text-md mr-2 hover:text-blue-500`}
-                  >
-                    Share
-                  </span>
-                </button>
-              </Analytics>
-              {isCopied ? <p className="ml-2 text-gray-500">Copied!</p> : ''}
-            </div>
-          </div>
+        <div className="flex flex-col items-end gap-1">
+          <Analytics
+            name="schema-registry-share-btn"
+            passHtmlAttributesToChildren
+          >
+            <Button
+              variant="outline"
+              color="gray"
+              leftIcon={FaShareAlt}
+              onClick={onCopy}
+            >
+              {copyState === 'copied' ? 'Link copied' : 'Share schema'}
+            </Button>
+          </Analytics>
+          <span
+            role="status"
+            className="text-sm"
+            style={{ color: 'var(--gray-11)' }}
+          >
+            {copyState === 'copied' && 'Schema link copied to clipboard.'}
+            {copyState === 'error' && 'Unable to copy link. Please try again.'}
+          </span>
         </div>
       </div>
 
-      <div className="h-full px-4">
+      <dl
+        aria-label="Change summary"
+        className="grid grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-3 px-5 pb-5"
+      >
+        {[
+          ...changeLevels.map(({ level, label, color }) => ({
+            label,
+            color,
+            count: changes?.filter(
+              (change) => change.criticality.level === level,
+            ).length,
+          })),
+          { label: 'Total', color: 'var(--gray-12)', count: changes?.length },
+        ].map(({ label, color, count }) => (
+          <div
+            key={label}
+            className="min-w-0 rounded-md p-3"
+            style={{ background: 'var(--gray-3)' }}
+          >
+            <dt
+              className="text-sm font-medium"
+              style={{ color: 'var(--gray-12)' }}
+            >
+              {label}
+            </dt>
+            <dd className="mt-1 text-xl font-semibold" style={{ color }}>
+              {count ?? <span className="text-sm">Unavailable</span>}
+            </dd>
+          </div>
+        ))}
+      </dl>
+
+      <dl
+        className="flex flex-wrap gap-x-8 gap-y-3 border-y px-5 py-4 text-sm"
+        style={{ borderColor: 'var(--gray-6)' }}
+      >
+        <div>
+          <dt
+            className="flex items-center gap-1 mb-1"
+            style={{ color: 'var(--gray-11)' }}
+          >
+            Published
+          </dt>
+          <dd>
+            <time dateTime={schema.created_at}>
+              {getPublishTime(schema.created_at)}
+            </time>
+          </dd>
+        </div>
+        <div className="min-w-0 flex-1 basis-64">
+          <dt
+            className="flex items-center gap-1 mb-1"
+            style={{ color: 'var(--gray-11)' }}
+          >
+            Schema hash
+          </dt>
+          <dd className="font-mono break-all">{roleBasedSchema.hash}</dd>
+        </div>
+      </dl>
+
+      <div className="min-w-0 px-5 pb-5 pt-3">
         <Tabs
           value={tabState}
-          onValueChange={state => setTabState(state)}
-          headerTabBackgroundColor="white"
+          onValueChange={setTabState}
           items={[
             {
               value: 'changes',
               label: 'Changes',
-              content: (
-                <ChangesView
-                  changes={roleBasedSchema.changes}
-                  role={roleBasedSchema.role}
-                />
-              ),
+              content: <ChangesView changes={changes} role={role} />,
             },
             {
               value: 'graphql',
@@ -156,218 +178,174 @@ const SchemasDetails: React.VFC<{
           ]}
         />
       </div>
-    </div>
+    </section>
   );
 };
 
-export const SchemaView: React.VFC<{ schema: string }> = props => {
-  const { schema } = props;
-  const decompressedSchema = LZString.decompressFromBase64(schema);
-  return (
-    <div className="w-full p-sm">
-      <AceEditor
-        mode="graphqlschema"
-        fontSize={14}
-        width="100%"
-        theme="chrome"
-        name={`schema-registry-schema-modal-view-schema`}
-        value={decompressedSchema}
-        editorProps={{ $blockScrolling: true }}
-        setOptions={{ useWorker: false }}
-      />
-    </div>
-  );
-};
-type Option = {
-  value: string;
-  label: string;
-  description?: string;
-  key?: number;
-  colIdentifier?: number;
-};
+const SchemaView = ({ schema }: { schema: string }) => (
+  <div className="min-w-0 py-4">
+    <AceEditor
+      mode="graphqlschema"
+      fontSize={14}
+      width="100%"
+      name="schema-registry-schema-modal-view-schema"
+      value={LZString.decompressFromBase64(schema) ?? ''}
+      disabled
+      editorProps={{ $blockScrolling: true }}
+      setOptions={{ useWorker: false }}
+    />
+  </div>
+);
 
-export const ChangesView: React.VFC<{
+const ChangesView = ({
+  changes,
+  role,
+}: {
   changes: RoleBasedSchema['changes'];
   role: string;
-}> = props => {
-  const { changes, role } = props;
-
-  const [searchText, setSearchText] = React.useState('');
-  const [selectedChangeLevel, setSelectedChangeLevel] = useState<string | null>(
-    null
+}) => {
+  const [searchText, setSearchText] = useState('');
+  const [selectedChangeLevel, setSelectedChangeLevel] = useState('all');
+  const filteredChanges = useMemo(
+    () =>
+      changes?.filter(
+        (change) =>
+          (selectedChangeLevel === 'all' ||
+            change.criticality.level === selectedChangeLevel) &&
+          change.message
+            .toLowerCase()
+            .includes(searchText.trim().toLowerCase()),
+      ) ?? [],
+    [changes, searchText, selectedChangeLevel],
   );
-  const handleSearch = (e: React.ChangeEvent<HTMLInputElement>) =>
-    setSearchText(e.target.value);
+  const clearFilters = () => {
+    setSearchText('');
+    setSelectedChangeLevel('all');
+  };
 
-  const changesList = useMemo(() => {
-    if (!searchText) return changes;
-
-    return changes?.filter(change =>
-      findIfSubStringExists(change.message, searchText)
-    );
-  }, [searchText, changes]);
-
-  if (!changes) {
+  if (!changes || !changes.length) {
     return (
-      <div className="p-4">
-        <span className="text-muted">
-          Could not compute changes in this GraphQL schema with respect to the
-          previous schema for role <b>{role}</b>. This typically happens if
-          there is no previous schema for role <b>{role}</b> or if your GraphQL
-          schema is erroneous.
-        </span>
+      <div className="rounded-md py-8 text-center" role="status">
+        <h3 className="font-semibold mb-2">
+          {changes ? 'No changes detected' : 'Comparison unavailable'}
+        </h3>
+        <p className="text-sm" style={{ color: 'var(--gray-11)' }}>
+          {changes ? (
+            <>
+              This schema matches the previous schema for role{' '}
+              <strong className="break-all">{role}</strong>.
+            </>
+          ) : (
+            <>
+              Changes could not be computed for role{' '}
+              <strong className="break-all">{role}</strong>. A previous schema
+              may not exist, or a schema may contain errors.
+            </>
+          )}
+        </p>
       </div>
     );
   }
 
-  if (!changes.length) {
-    return (
-      <div className="p-4">
-        <span className="text-muted">
-          No changes in this GraphQL schema with respect to the previous schema
-          for role <b>{role}</b>.
-        </span>
-      </div>
-    );
-  }
-
-  const breakingChanges =
-    changesList && changesList.filter(c => c.criticality.level === 'BREAKING');
-  const dangerousChanges =
-    changesList && changesList.filter(c => c.criticality.level === 'DANGEROUS');
-  const safeChanges =
-    changesList &&
-    changesList.filter(c => c.criticality.level === 'NON_BREAKING');
-
-  const showBreakingChanges =
-    (!selectedChangeLevel || selectedChangeLevel === 'breaking') &&
-    !!breakingChanges?.length;
-  const showDangerousChanges =
-    (!selectedChangeLevel || selectedChangeLevel === 'dangerous') &&
-    !!dangerousChanges?.length;
-  const showSafeChanges =
-    (!selectedChangeLevel || selectedChangeLevel === 'safe') &&
-    !!safeChanges?.length;
-
-  const onFilterChange = (op: Option) => {
-    setSelectedChangeLevel(op.value);
-  };
   return (
-    <div className="flex-col">
-      <div className="flex w-full mt-4 mb-4 justify-between items-center">
-        <div className="flex font-semibold text-lg text-gray-500">Changes</div>
-        <div className="flex w-[50%]">
-          <div className="flex  w-full">
-            <div className="px-2 w-1/2">
-              <Analytics name="schema-registry-schema-change-details-filter">
-                <SearchableSelect
-                  options={[
-                    {
-                      value: 'breaking',
-                      label: 'Breaking',
-                    },
-                    {
-                      value: 'dangerous',
-                      label: 'Dangerous',
-                    },
-                    {
-                      value: 'safe',
-                      label: 'Safe',
-                    },
-                  ]}
-                  onChange={op => {
-                    onFilterChange(op as Option);
-                  }}
-                  filterOption="prefix"
-                  placeholder="Filter"
-                  isClearable={true}
-                />
-              </Analytics>
-            </div>
-
-            <div className="pr-2 w-1/2">
-              <Analytics name="schema-registry-schema-change-details-search">
-                <label>
-                  <Input
-                    type="text"
-                    placeholder="Search"
-                    name="search"
-                    icon={<FaSearch />}
-                    iconPosition="start"
-                    onChange={handleSearch}
-                  />
-                </label>
-              </Analytics>
-            </div>
-          </div>
-        </div>
+    <div className="py-4">
+      <p className="text-sm mb-4" style={{ color: 'var(--gray-11)' }}>
+        Compared with the previous schema for role{' '}
+        <strong className="break-all">{role}</strong>.
+      </p>
+      <div className="flex flex-wrap items-end gap-3 mb-4">
+        <label className="flex flex-col gap-1 text-sm">
+          Change severity
+          <Analytics
+            name="schema-registry-schema-change-details-filter"
+            passHtmlAttributesToChildren
+          >
+            <select
+              className="rounded-md border px-3 py-2"
+              style={{
+                background: 'var(--color-panel-solid)',
+                borderColor: 'var(--gray-7)',
+              }}
+              value={selectedChangeLevel}
+              onChange={(event) => setSelectedChangeLevel(event.target.value)}
+            >
+              <option value="all">All changes</option>
+              {changeLevels.map(({ level, label }) => (
+                <option key={level} value={level}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </Analytics>
+        </label>
+        <label className="flex min-w-0 flex-1 basis-56 flex-col gap-1 text-sm">
+          Search changes
+          <Analytics
+            name="schema-registry-schema-change-details-search"
+            passHtmlAttributesToChildren
+          >
+            <Input
+              type="search"
+              placeholder="Search change descriptions"
+              name="search"
+              icon={FaSearch}
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+            />
+          </Analytics>
+        </label>
+        {(searchText || selectedChangeLevel !== 'all') && (
+          <Button variant="ghost" color="gray" onClick={clearFilters}>
+            Clear filters
+          </Button>
+        )}
       </div>
-
-      {showBreakingChanges && (
-        <div>
-          <div className="flex items-center font-semibold text-md text-gray-500 mt-4">
-            Breaking
-            <IconTooltip message="Breaking changes due the schema change" />
-          </div>
-          <ChangesTable changes={breakingChanges} level="breaking" />
+      <p
+        role="status"
+        className="text-sm mb-3"
+        style={{ color: 'var(--gray-11)' }}
+      >
+        Showing {filteredChanges.length} of {changes.length} changes
+      </p>
+      {!filteredChanges.length ? (
+        <div className="py-6 text-center">
+          <h3 className="font-semibold">No matching changes</h3>
+          <p className="text-sm mt-1" style={{ color: 'var(--gray-11)' }}>
+            Try another search or clear the filters to see all changes.
+          </p>
         </div>
-      )}
-      {showDangerousChanges && dangerousChanges && (
-        <div>
-          <div className="flex items-center font-semibold text-md text-gray-500 mt-4">
-            Dangerous
-            <IconTooltip message="Dangerous changes due the schema change" />
-          </div>
-          <ChangesTable changes={dangerousChanges} level="dangerous" />
-        </div>
-      )}
-      {showSafeChanges && safeChanges && (
-        <div>
-          <div className="flex items-center font-semibold text-md text-gray-500 mt-4">
-            Safe
-            <IconTooltip message="Safe changes due the schema change" />
-          </div>
-          <ChangesTable changes={safeChanges} level="safe" />
-        </div>
-      )}
-    </div>
-  );
-};
-interface ChangesTableProps {
-  changes: RoleBasedSchema['changes'];
-  level: 'breaking' | 'dangerous' | 'safe';
-}
-
-const ChangesTable: React.FC<ChangesTableProps> = ({ changes, level }) => {
-  const textColor = {
-    breaking: 'text-red-600',
-    dangerous: 'text-yellow-600',
-    safe: 'text-green-600',
-  };
-  return (
-    <div className="flex flex-col rounded border-neutral-200 border my-2">
-      <table className="w-full border-neutral-200 rounded">
-        <thead>
-          <tr style={{ textAlign: 'left' }}>
-            <th className="text-base w-[69%] bg-[#F8FAFC] border pl-2">
-              <span className="text-sm text-color-[#AEB7C3]">
-                AFFECTED OPERATIONS
-              </span>
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {changes &&
-            changes.map((change, index) => (
-              <tr
-                className={`${textColor[level]} border border-neutral-200 p-2`}
-                key={index}
+      ) : (
+        changeLevels.map(({ level, label, color }) => {
+          const group = filteredChanges.filter(
+            (change) => change.criticality.level === level,
+          );
+          return group.length ? (
+            <section
+              key={level}
+              aria-label={`${label} changes`}
+              className="mb-4"
+            >
+              <h3 className="text-sm font-semibold mb-2" style={{ color }}>
+                {label} ({group.length})
+              </h3>
+              <ul
+                className="rounded-md border divide-y"
+                style={{ borderColor: 'var(--gray-6)' }}
               >
-                <td className="pl-2">{change.message}</td>
-              </tr>
-            ))}
-        </tbody>
-      </table>
+                {group.map((change, index) => (
+                  <li
+                    key={`${change.type}-${change.path}-${index}`}
+                    className="px-3 py-3 text-sm break-words"
+                    style={{ borderColor: 'var(--gray-6)' }}
+                  >
+                    {change.message}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null;
+        })
+      )}
     </div>
   );
 };

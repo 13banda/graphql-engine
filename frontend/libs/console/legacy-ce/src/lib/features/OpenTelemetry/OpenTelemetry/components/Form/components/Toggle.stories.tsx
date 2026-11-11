@@ -1,12 +1,11 @@
 import type { ComponentPropsWithoutRef } from 'react';
-import type { StoryObj, Meta } from '@storybook/react';
+import type { StoryObj, Meta } from '@storybook/react-webpack5';
 
 import * as React from 'react';
 
 import { z } from 'zod';
-import { expect } from '@storybook/jest';
-import { SimpleForm } from '../../../../../../new-components/Form';
-import { userEvent, within } from '@storybook/testing-library';
+import { expect, userEvent, within } from 'storybook/test';
+import { SimpleForm } from '@hasura/shared/ui';
 
 import { Toggle } from './Toggle';
 
@@ -36,11 +35,16 @@ const basicStoryArgs: ComponentPropsWithoutRef<typeof Toggle> = {
 };
 
 export const Basic: StoryObj<typeof Toggle> = {
-  render: args => {
+  render: (args) => {
     const schema = z.object({ status: z.boolean() });
 
     return (
-      <SimpleForm schema={schema} onSubmit={() => {}}>
+      <SimpleForm
+        schema={schema}
+        onSubmit={() => {
+          /* noop */
+        }}
+      >
         <Toggle {...args} />
       </SimpleForm>
     );
@@ -61,11 +65,16 @@ const withoutLabelStoryArgs: ComponentPropsWithoutRef<typeof Toggle> = {
 };
 
 export const WithoutLabel: StoryObj<typeof Toggle> = {
-  render: args => {
+  render: (args) => {
     const schema = z.object({ status: z.boolean() });
 
     return (
-      <SimpleForm schema={schema} onSubmit={() => {}}>
+      <SimpleForm
+        schema={schema}
+        onSubmit={() => {
+          /* noop */
+        }}
+      >
         <Toggle {...args} />
       </SimpleForm>
     );
@@ -88,11 +97,16 @@ const disabledStoryArgs: ComponentPropsWithoutRef<typeof Toggle> = {
 };
 
 export const Disabled: StoryObj<typeof Toggle> = {
-  render: args => {
+  render: (args) => {
     const schema = z.object({ status: z.boolean() });
 
     return (
-      <SimpleForm schema={schema} onSubmit={() => {}}>
+      <SimpleForm
+        schema={schema}
+        onSubmit={() => {
+          /* noop */
+        }}
+      >
         <Toggle {...args} />
       </SimpleForm>
     );
@@ -115,11 +129,16 @@ const writtenStatusStoryArgs: ComponentPropsWithoutRef<typeof Toggle> = {
 };
 
 export const WrittenStatus: StoryObj<typeof Toggle> = {
-  render: args => {
+  render: (args) => {
     const schema = z.object({ status: z.boolean() });
 
     return (
-      <SimpleForm schema={schema} onSubmit={() => {}}>
+      <SimpleForm
+        schema={schema}
+        onSubmit={() => {
+          /* noop */
+        }}
+      >
         <Toggle {...args} />
       </SimpleForm>
     );
@@ -151,11 +170,16 @@ const testingScalabilityStoryArgs: ComponentPropsWithoutRef<typeof Toggle> = {
 };
 
 export const TestingScalability: StoryObj<typeof Toggle> = {
-  render: args => {
+  render: (args) => {
     const schema = z.object({ status: z.boolean() });
 
     return (
-      <SimpleForm schema={schema} onSubmit={() => {}}>
+      <SimpleForm
+        schema={schema}
+        onSubmit={() => {
+          /* noop */
+        }}
+      >
         <Toggle {...args} />
         <span>
           <i>After-toggle text</i>
@@ -181,11 +205,16 @@ const happyPathStoryArgs: ComponentPropsWithoutRef<typeof Toggle> = {
 };
 
 export const HappyPath: StoryObj<typeof Toggle> = {
-  render: args => {
+  render: (args) => {
     const schema = z.object({ status: z.boolean() });
 
     return (
-      <SimpleForm schema={schema} onSubmit={() => {}}>
+      <SimpleForm
+        schema={schema}
+        onSubmit={() => {
+          /* noop */
+        }}
+      >
         <Toggle {...args} />
       </SimpleForm>
     );

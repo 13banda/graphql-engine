@@ -27,6 +27,7 @@ def ws_conn_init_graphql_ws(hge_key, ws_client_graphql_ws):
 
 # This is used in other test files! Be careful when modifying it.
 def init_ws_conn(hge_key, ws_client, payload = None):
+    ws_client.create_conn()
     init_msg = {
         'type': 'connection_init',
         'payload': payload or ws_payload(hge_key),
@@ -36,6 +37,7 @@ def init_ws_conn(hge_key, ws_client, payload = None):
     assert ev['type'] == 'connection_ack', ev
 
 def init_graphql_ws_conn(hge_key, ws_client_graphql_ws):
+    ws_client_graphql_ws.create_conn()
     init_msg = {
         'type': 'connection_init',
         'payload': ws_payload(hge_key),
@@ -67,7 +69,6 @@ def get_explain_graphql_query_response(hge_ctx, hge_key, query, variables, user_
 @pytest.mark.no_admin_secret
 class TestSubscriptionCtrlWithoutSecret(object):
     def test_connection(self, ws_client):
-        ws_client.recreate_conn()
         init_ws_conn(None, ws_client)
 
         obj = {
@@ -86,7 +87,6 @@ class TestSubscriptionCtrl(object):
     '''
 
     def test_connection(self, hge_key, ws_client):
-        ws_client.recreate_conn()
         init_ws_conn(hge_key, ws_client)
 
         obj = {
@@ -104,6 +104,7 @@ class TestSubscriptionBasicNoAuth:
 
     def test_closed_connection_apollo(self, ws_client):
         # sends empty header so that there is not authentication present in the test
+        ws_client.create_conn()
         init_msg = {
             'type': 'connection_init',
             'payload':{'headers':{}}
@@ -115,6 +116,7 @@ class TestSubscriptionBasicNoAuth:
 
     def test_closed_connection_graphql_ws(self, ws_client_graphql_ws):
         # sends empty header so that there is not authentication present in the test
+        ws_client_graphql_ws.create_conn()
         init_msg = {
             'type': 'connection_init',
             'payload':{'headers':{}}
@@ -249,7 +251,6 @@ class TestSubscriptionBasicGraphQLWS:
 
     def test_connection_error(self, hge_key, ws_client_graphql_ws):
         if ws_client_graphql_ws.get_conn_close_state():
-            ws_client_graphql_ws.create_conn()
             if hge_key == None:
                 ws_client_graphql_ws.init()
             else:
@@ -261,7 +262,6 @@ class TestSubscriptionBasicGraphQLWS:
 
     def test_start(self, hge_key, ws_client_graphql_ws):
         if ws_client_graphql_ws.get_conn_close_state():
-            ws_client_graphql_ws.create_conn()
             if hge_key == None:
                 ws_client_graphql_ws.init()
             else:
@@ -290,7 +290,6 @@ class TestSubscriptionBasicGraphQLWS:
     @pytest.mark.skip(reason="refer to https://github.com/hasura/graphql-engine/pull/387#issuecomment-421343098")
     def test_start_duplicate(self, hge_key, ws_client_graphql_ws):
         if ws_client_graphql_ws.get_conn_close_state():
-            ws_client_graphql_ws.create_conn()
             if hge_key == None:
                 ws_client_graphql_ws.init()
             else:
@@ -299,7 +298,6 @@ class TestSubscriptionBasicGraphQLWS:
 
     def test_stop_without_id(self, hge_key, ws_client_graphql_ws):
         if ws_client_graphql_ws.get_conn_close_state():
-            ws_client_graphql_ws.create_conn()
             if hge_key == None:
                 ws_client_graphql_ws.init()
             else:
@@ -314,7 +312,6 @@ class TestSubscriptionBasicGraphQLWS:
 
     def test_stop(self, hge_key, ws_client_graphql_ws):
         if ws_client_graphql_ws.get_conn_close_state():
-            ws_client_graphql_ws.create_conn()
             if hge_key == None:
                 ws_client_graphql_ws.init()
             else:
@@ -330,7 +327,6 @@ class TestSubscriptionBasicGraphQLWS:
 
     def test_start_after_stop(self, hge_key, hge_ctx, ws_client_graphql_ws):
         if ws_client_graphql_ws.get_conn_close_state():
-            ws_client_graphql_ws.create_conn()
             if hge_key == None:
                 ws_client_graphql_ws.init()
             else:
@@ -344,7 +340,6 @@ class TestSubscriptionBasicGraphQLWS:
     def test_complete(self, hge_key, ws_client_graphql_ws):
         id = str(uuid.uuid4())
         if ws_client_graphql_ws.get_conn_close_state():
-            ws_client_graphql_ws.create_conn()
             if hge_key == None:
                 ws_client_graphql_ws.init()
             else:
@@ -383,7 +378,10 @@ class TestSubscriptionLiveQueries:
         '''
             Create connection using connection_init
         '''
-        ws_client.init_as_admin()
+        headers={}
+        if hge_key is not None:
+            headers['X-Hasura-Admin-Secret'] = hge_key
+        ws_client.init(headers=headers)
 
         with open(self.dir() + "/steps.yaml") as c:
             conf = yaml.load(c)
@@ -401,11 +399,8 @@ class TestSubscriptionLiveQueries:
         liveQs = []
         for i, resultLimit in queries:
             query = queryTmplt.replace('{0}',str(i))
-            headers={}
-            if hge_key is not None:
-                headers['X-Hasura-Admin-Secret'] = hge_key
             subscrPayload = { 'query': query, 'variables': { 'result_limit': resultLimit } }
-            respLive = ws_client.send_query(subscrPayload, query_id='live_'+str(i), headers=headers, timeout=15)
+            respLive = ws_client.send_query(subscrPayload, query_id='live_'+str(i), timeout=15)
             liveQs.append(respLive)
             ev = next(respLive)
             assert ev['type'] == 'data', ev
@@ -466,7 +461,10 @@ class TestStreamingSubscription:
         '''
             Create connection using connection_init
         '''
-        ws_client.init_as_admin()
+        headers={}
+        if hge_key is not None:
+            headers['X-Hasura-Admin-Secret'] = hge_key
+        ws_client.init(headers=headers)
 
         query = """
         subscription ($batch_size: Int!) {
@@ -478,15 +476,12 @@ class TestStreamingSubscription:
         """
 
         liveQs = []
-        headers={}
         articles_to_insert = []
         for i in range(10):
             articles_to_insert.append({"id": i + 1, "title": "Article title {}".format(i + 1)})
         insert_many(hge_ctx, {"schema": "hge_tests", "name": "articles"}, articles_to_insert)
-        if hge_key is not None:
-            headers['X-Hasura-Admin-Secret'] = hge_key
         subscrPayload = { 'query': query, 'variables': { 'batch_size': 2 } }
-        respLive = ws_client.send_query(subscrPayload, query_id='stream_1', headers=headers, timeout=15)
+        respLive = ws_client.send_query(subscrPayload, query_id='stream_1', timeout=15)
         liveQs.append(respLive)
         for idx in range(5):
           ev = next(respLive)
@@ -511,7 +506,6 @@ class TestStreamingSubscription:
             Create connection using connection_init
         '''
         ws_client.init_as_admin()
-        headers={}
         query = """
         subscription ($batch_size: Int!, $initial_created_at: timestamptz!) {
           hge_tests_stream_query: hge_tests_test_t2_stream(cursor: [{initial_value: {created_at: $initial_created_at}, ordering: ASC}], batch_size: $batch_size) {
@@ -525,7 +519,7 @@ class TestStreamingSubscription:
             conf = yaml.load(c)
 
         subscrPayload = { 'query': query, 'variables': { 'batch_size': 2, 'initial_created_at': "2020-01-01" } }
-        respLive = ws_client.send_query(subscrPayload, query_id='stream_1', headers=headers, timeout=15)
+        respLive = ws_client.send_query(subscrPayload, query_id='stream_1', timeout=15)
 
         assert isinstance(conf, list) == True, 'Not an list'
         for index, step in enumerate(conf):
@@ -566,7 +560,10 @@ class TestStreamingSubscription:
         '''
             Create connection using connection_init
         '''
-        ws_client.init_as_admin()
+        headers={}
+        if hge_key is not None:
+            headers['X-Hasura-Admin-Secret'] = hge_key
+        ws_client.init(headers=headers)
 
         query = """
         subscription ($batch_size: Int!) {
@@ -578,11 +575,8 @@ class TestStreamingSubscription:
         """
 
         liveQs = []
-        headers={}
-        if hge_key is not None:
-            headers['X-Hasura-Admin-Secret'] = hge_key
         subscrPayload = { 'query': query, 'variables': { 'batch_size': 1 } }
-        respLive = ws_client.send_query(subscrPayload, query_id='stream_1', headers=headers, timeout=15)
+        respLive = ws_client.send_query(subscrPayload, query_id='stream_1', timeout=15)
         liveQs.append(respLive)
         for idx in range(2):
           ev = next(respLive)
@@ -614,7 +608,10 @@ class TestSubscriptionLiveQueriesForGraphQLWS:
         '''
             Create connection using connection_init
         '''
-        ws_client_graphql_ws.init_as_admin()
+        headers={}
+        if hge_key is not None:
+            headers['X-Hasura-Admin-Secret'] = hge_key
+        ws_client_graphql_ws.init(headers=headers)
 
         with open(self.dir() + "/steps.yaml") as c:
             conf = yaml.load(c)
@@ -632,11 +629,8 @@ class TestSubscriptionLiveQueriesForGraphQLWS:
         liveQs = []
         for i, resultLimit in queries:
             query = queryTmplt.replace('{0}',str(i))
-            headers={}
-            if hge_key is not None:
-                headers['X-Hasura-Admin-Secret'] = hge_key
             subscrPayload = { 'query': query, 'variables': { 'result_limit': resultLimit } }
-            respLive = ws_client_graphql_ws.send_query(subscrPayload, query_id='live_'+str(i), headers=headers, timeout=15)
+            respLive = ws_client_graphql_ws.send_query(subscrPayload, query_id='live_'+str(i), timeout=15)
             liveQs.append(respLive)
             ev = next(respLive)
             assert ev['type'] == 'next', ev
@@ -761,12 +755,12 @@ class TestSubscriptionUDFWithSessionArg:
         return 'queries/subscriptions/udf_session_args'
 
     def test_user_defined_function_with_session_argument(self, hge_key, ws_client):
-        ws_client.init_as_admin()
         headers = {'x-hasura-role': 'user', 'x-hasura-user-id': '42'}
         if hge_key is not None:
             headers['X-Hasura-Admin-Secret'] = hge_key
+        ws_client.init(headers=headers)
         payload = {'query': self.query}
-        resp = ws_client.send_query(payload, headers=headers, timeout=15)
+        resp = ws_client.send_query(payload, timeout=15)
         ev = next(resp)
         assert ev['type'] == 'data', ev
         assert ev['payload']['data'] == {'me': [{'id': '42', 'name': 'Charlie'}]}, ev['payload']['data']
@@ -908,3 +902,237 @@ class TestSubscriptionMSSQLChunkedResults:
         ev = ws_client.get_ws_query_event('1',15)
         assert ev['type'] == 'data' and ev['id'] == '1', ev
         assert not "errors" in ev['payload'], ev
+
+
+@pytest.mark.backend('mssql', 'postgres')
+@usefixtures('per_class_tests_db_state', 'ws_conn_init')
+@pytest.mark.admin_secret
+class TestSubscriptionCohortIsolationMSSQLPostgres:
+    '''
+    Regression test for a SQL Server-only bug: live query plans on MSSQL are
+    built with a hardcoded `dummyCohortId` instead of a freshly generated one
+    per cohort (see `dummyCohortId` in
+    Hasura.GraphQL.Execute.Subscription.Plan, used by
+    Hasura.Backends.MSSQL.Instances.Execute), whereas Postgres correctly
+    generates a fresh id per cohort. A poller routes DB response rows back to
+    the originating cohort (and its subscribers) by matching on this id, so
+    on MSSQL, whenever more than one distinct cohort lands in the same poll
+    batch, they collapse onto the same id and results get delivered to the
+    wrong subscriber -- or not delivered at all.
+
+    This multiplexes two subscriptions that differ only by a query variable
+    (so they share one poller but are distinct cohorts) and checks that each
+    one only ever observes the row it actually asked for. Parameterized over
+    both backends: expected to pass on postgres and fail on mssql.
+    '''
+
+    # separate schema (DB) and metadata setup/teardown files, needed for the
+    # mssql source and harmless for postgres
+    setup_metadata_api_version = "v2"
+
+    @classmethod
+    def dir(cls):
+        return 'queries/subscriptions/cohort_isolation'
+
+    query = '''
+    subscription ($id: Int!) {
+      hge_tests_cohort_isolation_probe(where: {id: {_eq: $id}}) {
+        id
+        val
+      }
+    }
+    '''
+
+    def start(self, ws_client, query_id, id_value):
+        ws_client.send({
+            'id': query_id,
+            'payload': {
+                'query': self.query,
+                'variables': {'id': id_value},
+            },
+            'type': 'start',
+        })
+
+    def assert_cohort_event(self, ws_client, query_id, expected_id, expected_val):
+        ev = ws_client.get_ws_query_event(query_id, 15)
+        assert ev['type'] == 'data' and ev['id'] == query_id, ev
+        rows = ev['payload']['data']['hge_tests_cohort_isolation_probe']
+        assert rows == [{'id': expected_id, 'val': expected_val}], \
+            f"subscription {query_id} (expecting only id={expected_id}) got cross-cohort data: {rows}"
+
+    def update_row(self, hge_ctx, id_value, val):
+        sql = f"update hge_tests.cohort_isolation_probe set val = '{val}' where id = {id_value}"
+        if hge_ctx.backend == 'mssql':
+            hge_ctx.v2q({
+                'type': 'mssql_run_sql',
+                'args': {'source': 'mssql', 'sql': sql},
+            })
+        else:
+            hge_ctx.v1q({
+                'type': 'run_sql',
+                'args': {'sql': sql},
+            })
+
+    def assert_no_cross_cohort_leak(self, ws_client, query_id, forbidden_id, per_event_timeout=5, max_events=4):
+        '''
+        Drains whatever is pushed to `query_id`'s subscription for a short
+        while and fails if any of it contains a row for `forbidden_id` --
+        i.e. data belonging to a *different* cohort than the one this
+        subscription actually asked for. Stops early once the queue goes
+        quiet, since that's the normal (bug-free) steady state.
+        '''
+        for _ in range(max_events):
+            try:
+                ev = ws_client.get_ws_query_event(query_id, per_event_timeout)
+            except queue.Empty:
+                return
+            assert ev['type'] == 'data' and ev['id'] == query_id, ev
+            rows = ev['payload']['data']['hge_tests_cohort_isolation_probe']
+            leaked = [row for row in rows if row['id'] == forbidden_id]
+            assert not leaked, \
+                f"subscription {query_id} received another cohort's data (id={forbidden_id}): {rows}"
+
+    def test_cohorts_are_not_confused(self, hge_ctx, ws_client):
+        # Two subscriptions sharing the same query shape -- and therefore the
+        # same multiplexed poller -- differing only in the `$id` variable, so
+        # they become two distinct cohorts of that one poller.
+        self.start(ws_client, 'cohort-1', 1)
+        self.start(ws_client, 'cohort-2', 2)
+
+        self.assert_cohort_event(ws_client, 'cohort-1', 1, 'row-1')
+        self.assert_cohort_event(ws_client, 'cohort-2', 2, 'row-2')
+
+        # Force another poll cycle to notice a change for just one cohort.
+        # The bug reproduces on every poll where both cohorts are batched
+        # together, not only the first, so check again after a mutation.
+        self.update_row(hge_ctx, 1, 'updated-1')
+
+        # The sharper, data-leak shape of the bug: cohort-2 never asked for
+        # id=1, and should never see it on its own channel, no matter what
+        # happens to cohort-1's row.
+        self.assert_no_cross_cohort_leak(ws_client, 'cohort-2', forbidden_id=1)
+
+        # The flip side of the same collision: cohort-1 can stop hearing
+        # about its own updates entirely, having "lost" the collision.
+        self.assert_cohort_event(ws_client, 'cohort-1', 1, 'updated-1')
+
+        self.update_row(hge_ctx, 2, 'updated-2')
+        self.assert_cohort_event(ws_client, 'cohort-2', 2, 'updated-2')
+
+        ws_client.stop('cohort-1')
+        ws_client.stop('cohort-2')
+
+
+@usefixtures('per_method_tests_db_state', 'ws_conn_init')
+@pytest.mark.hge_env('HASURA_GRAPHQL_EXPERIMENTAL_FEATURES', 'streaming_subscriptions')
+# Only citus and vanilla PG have this bugfix/behavior:
+@pytest.mark.backend('citus', 'postgres')
+class TestStreamingSubscriptionWithTies:
+    """
+    Test the WITH TIES functionality for streaming subscriptions with duplicate
+    cursor values.
+
+    This addresses the issue where formerly non-unique cursor columns can cause
+    data loss in streaming subscriptions due to the 
+
+        WHERE col > last_cursor_value LIMIT batch_size
+
+    pattern skipping rows with duplicate cursor values when they can't all fit in
+    batch_size.
+    """
+
+    @classmethod
+    def dir(cls):
+        return 'queries/subscriptions/streaming'
+
+    def test_streaming_subscription_with_duplicate_cursor_values(self, hge_ctx, hge_key, ws_client):
+        """
+        Test that streaming subscriptions with duplicate cursor values return all rows
+        using WITH TIES functionality on Postgres and Citus.
+
+        This test:
+        1. Uses existing articles table but adds priority column for testing
+        2. Inserts data with duplicate cursor values on priority column
+        3. Verifies that WITH TIES returns all rows with duplicate cursor values
+        """
+        # Add priority column to existing articles table for our test. Existing
+        # teardown should still work fine.
+        #
+        # Note that while in theory the engine could be using `id` as a
+        # tiebreaker here, implementing things this way would have been much
+        # more difficult and furthermore we can't always be sure that a table
+        # (that the customer has already tracked) has any unique columns
+        setup_sql = '''
+            ALTER TABLE hge_tests.articles ADD COLUMN IF NOT EXISTS priority INT;
+
+            -- Clear existing data and insert test data with duplicate priority values
+            DELETE FROM hge_tests.articles;
+            INSERT INTO hge_tests.articles (id, priority) VALUES
+                -- batch 1 (oversized, excercising WITH TIES)
+                (7, 1),
+                (6, 2),
+                (5, 2),
+                (4, 2),
+                -- batch 2 (full batch)
+                (1, 3),
+                (2, 4),
+                -- batch 3 (undersized, not enough data to fill batch)
+                (3, 5);
+        '''
+
+        hge_ctx.v1q({
+            'type': 'run_sql',
+            'args': {'sql': setup_sql}
+        })
+
+        ## Debugging:
+        # verify_result = hge_ctx.v1q({
+        #     'type': 'run_sql',
+        #     'args': {'sql': 'SELECT id, priority FROM hge_tests.articles ORDER BY priority, id;'}
+        # })
+        # print(f"Inserted data: {verify_result}")
+
+        # Initialize WebSocket connection
+        ws_client.init_as_admin()
+
+        # Start streaming subscription with batch_size=2 and cursor on priority column
+        query = """
+        subscription ($batch_size: Int!) {
+          stream_data: hge_tests_articles_stream(
+            cursor: [{initial_value: {priority: 0}, ordering: ASC}],
+            batch_size: $batch_size
+          ) {
+            id
+            priority
+          }
+        }
+        """
+
+        subscrPayload = {'query': query, 'variables': {'batch_size': 2}}
+        respLive = ws_client.send_query(subscrPayload, query_id='stream_test', timeout=15)
+
+        # Test WITH TIES functionality: With batch_size=2, we should get more than 2 rows
+        # when there are duplicate cursor values due to WITH TIES
+        ev = next(respLive)
+        assert ev['type'] == 'data', f"Expected data event, got {ev['type']}. Full event: {ev}"
+        assert ev['id'] == 'stream_test', ev
+
+        first_batch = ev['payload']['data']['stream_data']
+        # With batch size 2 we return [1,2] plus all remaining "ties" of priority 2
+        assert [row['priority'] for row in first_batch] == [1, 2, 2, 2], first_batch
+        # The order wrt id is undefined
+        assert sorted([row['id'] for row in first_batch]) == [4, 5, 6, 7], first_batch
+
+        ev = next(respLive)
+        second_batch = ev['payload']['data']['stream_data']
+        assert [row['priority'] for row in second_batch] == [3, 4], second_batch
+        assert sorted([row['id'] for row in second_batch]) == [1, 2], second_batch
+         
+        ev = next(respLive)
+        third_batch = ev['payload']['data']['stream_data']
+        assert [row['priority'] for row in third_batch] == [5], third_batch
+        assert sorted([row['id'] for row in third_batch]) == [3], third_batch
+
+        # Clean stop
+        frame = {'id': 'stream_test', 'type': 'stop'}
+        ws_client.send(frame)

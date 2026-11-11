@@ -53,6 +53,7 @@ import Data.Aeson qualified as J
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.Aeson.Lens qualified as JL
+import Data.Either (isRight)
 import Data.Has
 import Data.HashMap.Strict qualified as HashMap
 import Data.SerializableBlob qualified as SB
@@ -94,6 +95,7 @@ import System.Metrics.Prometheus.CounterVector (CounterVector)
 import System.Metrics.Prometheus.CounterVector qualified as CounterVector
 import System.Metrics.Prometheus.Gauge qualified as Prometheus.Gauge
 import System.Metrics.Prometheus.Histogram qualified as Prometheus.Histogram
+import System.Metrics.Prometheus.HistogramVector qualified as HistogramVector
 import System.Timeout.Lifted (timeout)
 
 newtype EventInternalErr
@@ -192,11 +194,8 @@ saveLockedEventTriggerEvents :: (MonadIO m) => SourceName -> [EventId] -> TVar (
 saveLockedEventTriggerEvents sourceName eventIds lockedEvents =
   liftIO
     $ atomically
-    $ do
-      lockedEventsVals <- readTVar lockedEvents
-      case HashMap.lookup sourceName lockedEventsVals of
-        Nothing -> writeTVar lockedEvents $! HashMap.singleton sourceName (Set.fromList eventIds)
-        Just _ -> writeTVar lockedEvents $! HashMap.insertWith Set.union sourceName (Set.fromList eventIds) lockedEventsVals
+    $ modifyTVar' lockedEvents
+    $ HashMap.insertWith Set.union sourceName (Set.fromList eventIds)
 
 removeEventTriggerEventFromLockedEvents ::
   (MonadIO m) => SourceName -> EventId -> TVar (HashMap SourceName (Set.Set EventId)) -> m ()
@@ -205,7 +204,12 @@ removeEventTriggerEventFromLockedEvents sourceName eventId lockedEvents =
     $ atomically
     $ do
       lockedEventsVals <- readTVar lockedEvents
-      writeTVar lockedEvents $! HashMap.adjust (Set.delete eventId) sourceName lockedEventsVals
+      -- delete eventId from set, maintaining no-empty-sets invariant
+      writeTVar lockedEvents $! HashMap.update deleteEventIdNE sourceName lockedEventsVals
+  where
+    deleteEventIdNE s =
+      let sDeleted = Set.delete eventId s
+       in sDeleted <$ guard (not $ null sDeleted)
 
 type BackendEventWithSource = AB.AnyBackend EventWithSource
 
@@ -311,8 +315,9 @@ processEventQueue ::
   EventTriggerMetrics ->
   MaintenanceMode () ->
   TriggersErrorLogLevelStatus ->
+  RedactEventTriggerLogsStatus ->
   m (Forever m)
-processEventQueue logger statsLogger httpMgr getSchemaCache getEventEngineCtx activeEventProcessingThreads LockedEventsCtx {leEvents} serverMetrics eventTriggerMetrics maintenanceMode triggersErrorLogLevelStatus = do
+processEventQueue logger statsLogger httpMgr getSchemaCache getEventEngineCtx activeEventProcessingThreads LockedEventsCtx {leEvents} serverMetrics eventTriggerMetrics maintenanceMode triggersErrorLogLevelStatus redactEventTriggerLogs = do
   events0 <- popEventsBatch
   return $ Forever (events0, 0, False) go
   where
@@ -346,29 +351,59 @@ processEventQueue logger statsLogger httpMgr getSchemaCache getEventEngineCtx ac
             -- only process events for this source if at least one event trigger exists
             if eventTriggerCount > 0
               then do
-                eventPollStartTime <- getCurrentTime
-                runExceptT (fetchUndeliveredEvents @b _siConfiguration sourceName triggerNames maintenanceMode (FetchBatchSize fetchBatchSize)) >>= \case
-                  Right events -> do
-                    let eventFetchCount = fromIntegral $ length events
-                    Prometheus.Gauge.set (eventsFetchedPerBatch eventTriggerMetrics) eventFetchCount
-                    if (null events)
-                      then return []
-                      else do
-                        eventsFetchedTime <- getCurrentTime -- This is also the poll end time
-                        let eventPollTime = realToFrac $ diffUTCTime eventsFetchedTime eventPollStartTime
-                        _ <- EKG.Distribution.add (smEventFetchTimePerBatch serverMetrics) eventPollTime
-                        Prometheus.Histogram.observe (eventsFetchTimePerBatch eventTriggerMetrics) eventPollTime
-                        _ <- EKG.Distribution.add (smNumEventsFetchedPerBatch serverMetrics) (fromIntegral $ length events)
-                        saveLockedEventTriggerEvents sourceName (eId <$> events) leEvents
-                        return $ map (\event -> AB.mkAnyBackend @b $ EventWithSource event _siConfiguration sourceName eventsFetchedTime) events
-                  Left err -> do
-                    L.unLogger logger $ EventInternalErr err
-                    pure []
+                collectMetrics
+                  (observeFetchQuery sourceName)
+                  (runExceptT $ fetchUndeliveredEvents @b _siConfiguration sourceName triggerNames maintenanceMode (FetchBatchSize fetchBatchSize))
+                  >>= \case
+                    Right events -> do
+                      if (null events)
+                        then return []
+                        else do
+                          saveLockedEventTriggerEvents sourceName (eId <$> events) leEvents
+                          eventsFetchedTime <- getCurrentTime -- This is also the poll end time
+                          return $ map (\event -> AB.mkAnyBackend @b $ EventWithSource event _siConfiguration sourceName eventsFetchedTime) events
+                    Left err -> do
+                      L.unLogger logger $ EventInternalErr err
+                      pure []
               else pure []
 
       -- Log the statistics of events fetched
       logFetchedEventsStatistics statsLogger events
       pure events
+
+    observeFetchQuery :: SourceName -> DiffTime -> Either a [Event b] -> IO ()
+    observeFetchQuery sourceName fetchQueryTime result = do
+      let status = either (const Failed) (const Success) result
+          eventsCount = either (const 0) length result
+
+      -- time taken by event fetch query with the status label
+      HistogramVector.observe
+        (eventsFetchQueryTime eventTriggerMetrics)
+        (EventsFetchQueryStatusLabel sourceName status)
+        (realToFrac fetchQueryTime)
+
+      -- metrics total events fetched by source
+      when (isRight result)
+        $ Prometheus.Gauge.set
+          (eventsFetchedPerBatch eventTriggerMetrics)
+          (fromIntegral eventsCount)
+
+      when (eventsCount > 0) $ do
+        _ <-
+          EKG.Distribution.add
+            (smEventFetchTimePerBatch serverMetrics)
+            (realToFrac fetchQueryTime)
+        Prometheus.Histogram.observe
+          (eventsFetchTimePerBatch eventTriggerMetrics)
+          (realToFrac fetchQueryTime)
+        _ <-
+          EKG.Distribution.add
+            (smNumEventsFetchedPerBatch serverMetrics)
+            (fromIntegral eventsCount)
+        CounterVector.add
+          (eventsFetchedTotal eventTriggerMetrics)
+          (EventTriggerSourceLabel sourceName)
+          (fromIntegral eventsCount)
 
     -- !!! CAREFUL !!!
     --     The logic here in particular is subtle and has been fixed, broken,
@@ -548,7 +583,7 @@ processEventQueue logger statsLogger httpMgr getSchemaCache getEventEngineCtx ac
                           let request = extractRequest reqDetails
                               tracesPropagator = getOtelTracesPropagator $ scOpenTelemetryConfig cache
                               logger' res details = do
-                                logHTTPForET res extraLogCtx details (_envVarName webhook) logHeaders triggersErrorLogLevelStatus
+                                logHTTPForET res extraLogCtx details (_envVarName webhook) logHeaders triggersErrorLogLevelStatus redactEventTriggerLogs
                                 liftIO $ do
                                   case res of
                                     Left _err -> pure ()
@@ -738,6 +773,9 @@ retryOrSetError e retryConf eventTriggerMetrics err = do
           (eventProcessedTotal eventTriggerMetrics)
           (EventStatusWithTriggerLabel eventFailedLabel (Just (DynamicEventTriggerLabel (tmName (eTrigger e)) (eSource e))))
       pure PESetError
+    -- TODO: the webhook setting Retry-After can indefinitely bypass our retry limit mechanism.
+    -- I find our docs ambiguous ("the event will be delivered once more") as to correct behavior.
+    -- This might be causing problems for people AND be something we can no longer change.
     else do
       currentTime <- liftIO getCurrentTime
       let delay = fromMaybe (rcIntervalSec retryConf) mretryHeaderSeconds
@@ -808,3 +846,9 @@ incEventTriggerCounterWithLabel getMetricState alwaysObserve counterVector (Even
     alwaysObserve
     (liftIO $ CounterVector.inc counterVector (EventStatusWithTriggerLabel status tl))
     (liftIO $ CounterVector.inc counterVector (EventStatusWithTriggerLabel status Nothing))
+
+collectMetrics :: (MonadIO m) => (DiffTime -> a -> m ()) -> m a -> m a
+collectMetrics metricsFunc action = do
+  (duration, result) <- withElapsedTime action
+  metricsFunc duration result
+  pure result

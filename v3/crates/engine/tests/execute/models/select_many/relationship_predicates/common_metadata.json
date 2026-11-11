@@ -5,6 +5,8 @@
       "name": "default",
       "objects": [
         {
+          "kind": "ObjectType",
+          "version": "v1",
           "definition": {
             "name": "Album",
             "fields": [
@@ -47,44 +49,54 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "ObjectType"
+          }
         },
         {
-          "kind": "ObjectBooleanExpressionType",
+          "kind": "BooleanExpressionType",
           "version": "v1",
           "definition": {
             "name": "album_bool_exp",
-            "objectType": "Album",
-            "dataConnectorName": "db",
-            "dataConnectorObjectType": "Album",
-            "comparableFields": [
-              {
-                "fieldName": "AlbumId",
-                "operators": {
-                  "enableAll": true
-                }
-              },
-              {
-                "fieldName": "ArtistId",
-                "operators": {
-                  "enableAll": true
-                }
-              },
-              {
-                "fieldName": "Title",
-                "operators": {
-                  "enableAll": true
-                }
+            "operand": {
+              "object": {
+                "type": "Album",
+                "comparableFields": [
+                  {
+                    "fieldName": "AlbumId",
+                    "booleanExpressionType": "int_bool_exp"
+                  },
+                  {
+                    "fieldName": "ArtistId",
+                    "booleanExpressionType": "int_bool_exp"
+                  },
+                  {
+                    "fieldName": "Title",
+                    "booleanExpressionType": "string_bool_exp"
+                  }
+                ],
+                "comparableRelationships": [
+                  {
+                    "relationshipName": "Tracks"
+                  },
+                  {
+                    "relationshipName": "Artist"
+                  }
+                ]
               }
-            ],
+            },
+            "logicalOperators": {
+              "enable": true
+            },
+            "isNull": {
+              "enable": true
+            },
             "graphql": {
               "typeName": "Album_Where_Exp"
             }
           }
         },
         {
+          "kind": "ObjectType",
+          "version": "v1",
           "definition": {
             "name": "Track",
             "fields": [
@@ -136,50 +148,61 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "ObjectType"
+          }
         },
         {
-          "kind": "ObjectBooleanExpressionType",
+          "kind": "BooleanExpressionType",
           "version": "v1",
           "definition": {
             "name": "track_bool_exp",
-            "objectType": "Track",
-            "dataConnectorName": "db",
-            "dataConnectorObjectType": "Track",
-            "comparableFields": [
-              {
-                "fieldName": "AlbumId",
-                "operators": {
-                  "enableAll": true
-                }
-              },
-              {
-                "fieldName": "TrackId",
-                "operators": {
-                  "enableAll": true
-                }
-              },
-              {
-                "fieldName": "Name",
-                "operators": {
-                  "enableAll": true
-                }
-              },
-              {
-                "fieldName": "GenreId",
-                "operators": {
-                  "enableAll": true
-                }
+            "operand": {
+              "object": {
+                "type": "Track",
+                "comparableFields": [
+                  {
+                    "fieldName": "AlbumId",
+                    "booleanExpressionType": "int_bool_exp"
+                  },
+                  {
+                    "fieldName": "TrackId",
+                    "booleanExpressionType": "int_bool_exp"
+                  },
+                  {
+                    "fieldName": "Name",
+                    "booleanExpressionType": "string_bool_exp"
+                  },
+                  {
+                    "fieldName": "GenreId",
+                    "booleanExpressionType": "int_bool_exp"
+                  }
+                ],
+                "comparableRelationships": [
+                  {
+                    "relationshipName": "Album"
+                  },
+                  {
+                    "relationshipName": "TrackAlbums"
+                  },
+                  {
+                    "relationshipName": "Genre"
+                  }
+                ]
               }
-            ],
+            },
+            "logicalOperators": {
+              "enable": true
+            },
+            "isNull": {
+              "enable": true
+            },
             "graphql": {
               "typeName": "Track_Where_Exp"
             }
           }
         },
         {
+          "kind": "ObjectType",
+          "version": "v1",
           "definition": {
             "name": "Genre",
             "fields": [
@@ -213,46 +236,37 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "ObjectType"
-        },
-        {
-          "kind": "ObjectBooleanExpressionType",
-          "version": "v1",
-          "definition": {
-            "name": "genre_bool_exp",
-            "objectType": "Genre",
-            "dataConnectorName": "db",
-            "dataConnectorObjectType": "Genre",
-            "comparableFields": [
-              {
-                "fieldName": "Name",
-                "operators": {
-                  "enableAll": true
-                }
-              },
-              {
-                "fieldName": "GenreId",
-                "operators": {
-                  "enableAll": true
-                }
-              }
-            ],
-            "graphql": {
-              "typeName": "Genre_Where_Exp"
-            }
           }
         },
         {
-          "kind": "DataConnectorScalarRepresentation",
+          "kind": "BooleanExpressionType",
           "version": "v1",
           "definition": {
-            "dataConnectorName": "db",
-            "dataConnectorScalarType": "String",
-            "representation": "String",
+            "name": "genre_bool_exp",
+            "operand": {
+              "object": {
+                "type": "Genre",
+                "comparableFields": [
+                  {
+                    "fieldName": "Name",
+                    "booleanExpressionType": "string_bool_exp"
+                  },
+                  {
+                    "fieldName": "GenreId",
+                    "booleanExpressionType": "int_bool_exp"
+                  }
+                ],
+                "comparableRelationships": []
+              }
+            },
+            "logicalOperators": {
+              "enable": true
+            },
+            "isNull": {
+              "enable": true
+            },
             "graphql": {
-              "comparisonExpressionTypeName": "String_Comparison_Exp"
+              "typeName": "Genre_Where_Exp"
             }
           }
         },
@@ -267,6 +281,8 @@
           }
         },
         {
+          "kind": "Model",
+          "version": "v1",
           "definition": {
             "name": "Albums",
             "objectType": "Album",
@@ -307,11 +323,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Model"
+          }
         },
         {
+          "kind": "Model",
+          "version": "v1",
           "definition": {
             "name": "Tracks",
             "objectType": "Track",
@@ -358,11 +374,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Model"
+          }
         },
         {
+          "kind": "Model",
+          "version": "v1",
           "definition": {
             "name": "Genres",
             "objectType": "Genre",
@@ -397,11 +413,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Model"
+          }
         },
         {
+          "kind": "TypePermissions",
+          "version": "v1",
           "definition": {
             "typeName": "Album",
             "permissions": [
@@ -418,11 +434,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "TypePermissions"
+          }
         },
         {
+          "kind": "TypePermissions",
+          "version": "v1",
           "definition": {
             "typeName": "Track",
             "permissions": [
@@ -439,11 +455,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "TypePermissions"
+          }
         },
         {
+          "kind": "TypePermissions",
+          "version": "v1",
           "definition": {
             "typeName": "Genre",
             "permissions": [
@@ -460,11 +476,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "TypePermissions"
+          }
         },
         {
+          "kind": "Relationship",
+          "version": "v1",
           "definition": {
             "sourceType": "Album",
             "name": "Tracks",
@@ -492,11 +508,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Relationship"
+          }
         },
         {
+          "kind": "Relationship",
+          "version": "v1",
           "definition": {
             "sourceType": "Track",
             "name": "Album",
@@ -524,11 +540,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Relationship"
+          }
         },
         {
+          "kind": "Relationship",
+          "version": "v1",
           "definition": {
             "sourceType": "Track",
             "name": "Genre",
@@ -556,11 +572,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Relationship"
+          }
         },
         {
+          "kind": "Relationship",
+          "version": "v1",
           "definition": {
             "sourceType": "Track",
             "name": "TrackAlbums",
@@ -588,11 +604,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Relationship"
+          }
         },
         {
+          "kind": "ObjectType",
+          "version": "v1",
           "definition": {
             "name": "Artist",
             "fields": [
@@ -626,38 +642,119 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "ObjectType"
+          }
         },
         {
-          "kind": "ObjectBooleanExpressionType",
+          "kind": "BooleanExpressionType",
+          "version": "v1",
+          "definition": {
+            "name": "string_bool_exp",
+            "operand": {
+              "scalar": {
+                "type": "String",
+                "comparisonOperators": [
+                  {
+                    "name": "_eq",
+                    "argumentType": "String!"
+                  },
+                  {
+                    "name": "_ilike",
+                    "argumentType": "String!"
+                  }
+                ],
+                "dataConnectorOperatorMapping": [
+                  {
+                    "dataConnectorName": "db",
+                    "dataConnectorScalarType": "text",
+                    "operatorMapping": {}
+                  }
+                ]
+              }
+            },
+            "logicalOperators": {
+              "enable": true
+            },
+            "isNull": {
+              "enable": true
+            },
+            "graphql": {
+              "typeName": "String_Comparison_Exp"
+            }
+          }
+        },
+        {
+          "kind": "BooleanExpressionType",
+          "version": "v1",
+          "definition": {
+            "name": "int_bool_exp",
+            "operand": {
+              "scalar": {
+                "type": "Int",
+                "comparisonOperators": [
+                  {
+                    "name": "_eq",
+                    "argumentType": "Int!"
+                  }
+                ],
+                "dataConnectorOperatorMapping": [
+                  {
+                    "dataConnectorName": "db",
+                    "dataConnectorScalarType": "int4",
+                    "operatorMapping": {}
+                  }
+                ]
+              }
+            },
+            "logicalOperators": {
+              "enable": true
+            },
+            "isNull": {
+              "enable": true
+            },
+            "graphql": {
+              "typeName": "Int_Comparison_Exp"
+            }
+          }
+        },
+        {
+          "kind": "BooleanExpressionType",
           "version": "v1",
           "definition": {
             "name": "artist_bool_exp",
-            "objectType": "Artist",
-            "dataConnectorName": "db",
-            "dataConnectorObjectType": "Artist",
-            "comparableFields": [
-              {
-                "fieldName": "ArtistId",
-                "operators": {
-                  "enableAll": true
-                }
-              },
-              {
-                "fieldName": "Name",
-                "operators": {
-                  "enableAll": true
-                }
+            "operand": {
+              "object": {
+                "type": "Artist",
+                "comparableFields": [
+                  {
+                    "fieldName": "ArtistId",
+                    "booleanExpressionType": "int_bool_exp"
+                  },
+                  {
+                    "fieldName": "Name",
+                    "booleanExpressionType": "string_bool_exp"
+                  }
+                ],
+                "comparableRelationships": [
+                  {
+                    "relationshipName": "Albums"
+                  }
+                ]
               }
-            ],
+            },
+            "logicalOperators": {
+              "enable": true
+            },
+            "isNull": {
+              "enable": true
+            },
             "graphql": {
               "typeName": "Artist_Where_Exp"
             }
           }
         },
         {
+          "kind": "Model",
+          "version": "v1",
           "definition": {
             "name": "Artists",
             "objectType": "Artist",
@@ -692,11 +789,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Model"
+          }
         },
         {
+          "kind": "TypePermissions",
+          "version": "v1",
           "definition": {
             "typeName": "Artist",
             "permissions": [
@@ -713,11 +810,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "TypePermissions"
+          }
         },
         {
+          "kind": "Relationship",
+          "version": "v1",
           "definition": {
             "sourceType": "Artist",
             "name": "Albums",
@@ -745,11 +842,11 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Relationship"
+          }
         },
         {
+          "kind": "Relationship",
+          "version": "v1",
           "definition": {
             "sourceType": "Album",
             "name": "Artist",
@@ -777,20 +874,6 @@
                 }
               }
             ]
-          },
-          "version": "v1",
-          "kind": "Relationship"
-        },
-        {
-          "kind": "DataConnectorScalarRepresentation",
-          "version": "v1",
-          "definition": {
-            "dataConnectorName": "db",
-            "dataConnectorScalarType": "Int",
-            "representation": "Int",
-            "graphql": {
-              "comparisonExpressionTypeName": "Int_comparison"
-            }
           }
         }
       ]

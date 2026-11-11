@@ -1,62 +1,57 @@
-import React from 'react';
-import { useFireNotification } from '../../../../new-components/Notifications';
-
-import { useAddOperationsToQueryCollection } from '../../hooks';
+import { hasuraToast, showErrorNotification } from '@hasura/shared/ui';
 import { QueryCollectionOperationDialog } from './QueryCollectionOperationDialog';
+import { useAddOperationsToQueryCollection } from '@hasura/metadata/api';
 
 interface QueryCollectionOperationAddProps {
   queryCollectionName: string;
   onClose: () => void;
 }
 export const QueryCollectionOperationAdd = (
-  props: QueryCollectionOperationAddProps
+  props: QueryCollectionOperationAddProps,
 ) => {
   const { onClose, queryCollectionName } = props;
-  const { addOperationToQueryCollection, isLoading } =
+  const { addOperationToQueryCollection, isPending } =
     useAddOperationsToQueryCollection();
-  const { fireNotification } = useFireNotification();
   return (
     <QueryCollectionOperationDialog
       title="Add Operation"
       callToAction="Add Operation"
-      isLoading={isLoading}
-      onSubmit={values => {
+      isLoading={isPending}
+      onSubmit={(values) => {
         if (values.option === 'write operation') {
           addOperationToQueryCollection(
             queryCollectionName,
             [{ name: values.name, query: values.query }],
             {
-              onError: e => {
-                fireNotification({
-                  type: 'error',
-                  title: 'Error',
-                  message: `Failed to add operation to query collection: ${e.message}`,
+              onError: (e) => {
+                showErrorNotification({
+                  title: 'Failed to add operation to query collection',
+                  error: e,
                 });
               },
               onSuccess: () => {
-                fireNotification({
+                hasuraToast({
                   type: 'success',
                   title: 'Success',
                   message: `Successfully added operation to query collection`,
                 });
                 onClose();
               },
-            }
+            },
           );
 
           return;
         }
 
         addOperationToQueryCollection(queryCollectionName, values.gqlFile, {
-          onError: e => {
-            fireNotification({
-              type: 'error',
-              title: 'Error',
-              message: `Failed to add operation to query collection: ${e.message}`,
+          onError: (e) => {
+            showErrorNotification({
+              title: 'Failed to add operation to query collection',
+              error: e,
             });
           },
           onSuccess: () => {
-            fireNotification({
+            hasuraToast({
               type: 'success',
               title: 'Success',
               message: `Successfully added operation to query collection`,

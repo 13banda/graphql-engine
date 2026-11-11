@@ -1,0 +1,5 @@
+{
+  "flags": {
+    "fix_exists_in_nested_arrays": true
+  }
+}

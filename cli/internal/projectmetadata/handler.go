@@ -6,24 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"maps"
 	"os"
 	"path/filepath"
-
-	internalerrors "github.com/hasura/graphql-engine/cli/v2/internal/errors"
-	"github.com/hasura/graphql-engine/cli/v2/internal/metadataobject"
-	"github.com/hasura/graphql-engine/cli/v2/internal/metadatautil"
+	"slices"
+	"strings"
 
 	"github.com/hasura/graphql-engine/cli/v2"
-
+	internalerrors "github.com/hasura/graphql-engine/cli/v2/internal/errors"
 	"github.com/hasura/graphql-engine/cli/v2/internal/hasura"
+	"github.com/hasura/graphql-engine/cli/v2/internal/metadataobject"
+	"github.com/hasura/graphql-engine/cli/v2/internal/metadatautil"
 	"github.com/mitchellh/mapstructure"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/afero"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
-// Handler will be responsible for interaction between a hasura instance and Objects
+// Handler will be responsible for interaction between a hasura instance and Objects.
 type Handler struct {
 	objects       metadataobject.Objects
 	v1MetadataOps hasura.CommonMetadataOperations
@@ -32,45 +32,233 @@ type Handler struct {
 	logger *logrus.Logger
 }
 
-func NewHandler(objects metadataobject.Objects, v1MetadataOps hasura.CommonMetadataOperations, v2MetadataOps hasura.V2CommonMetadataOperations, logger *logrus.Logger) *Handler {
+func NewHandler(
+	objects metadataobject.Objects,
+	v1MetadataOps hasura.CommonMetadataOperations,
+	v2MetadataOps hasura.V2CommonMetadataOperations,
+	logger *logrus.Logger,
+) *Handler {
 	return &Handler{objects, v1MetadataOps, v2MetadataOps, logger}
 }
 
 func NewHandlerFromEC(ec *cli.ExecutionContext) *Handler {
 	metadataObjects := GetMetadataObjectsWithDir(ec)
-	return NewHandler(metadataObjects, cli.GetCommonMetadataOps(ec), ec.APIClient.V1Metadata, ec.Logger)
+
+	return NewHandler(
+		metadataObjects,
+		cli.GetCommonMetadataOps(ec),
+		ec.APIClient.V1Metadata,
+		ec.Logger,
+	)
 }
 
 func (h *Handler) SetMetadataObjects(objects metadataobject.Objects) {
 	h.objects = objects
 }
 
-// WriteMetadata writes the files in the metadata folder
+// WriteMetadata writes the files in the metadata folder.
 func (h *Handler) WriteMetadata(files map[string][]byte) error {
 	var op internalerrors.Op = "projectmetadata.Handler.WriteMetadata"
-	for name, content := range files {
-		fs := afero.NewOsFs()
-		if err := fs.MkdirAll(filepath.Dir(name), os.ModePerm); err != nil {
-			return internalerrors.E(op, err)
-		}
-		err := afero.WriteFile(fs, name, content, 0644)
-		if err != nil {
-			return internalerrors.E(op, fmt.Errorf("creating metadata file %s failed: %w", name, err))
+
+	if len(files) == 0 {
+		return nil
+	}
+
+	fs := afero.NewOsFs()
+
+	// written holds every file and directory that is part of this export,
+	// filesByDir groups the files so that each directory is listed only once
+	written := make(map[string]struct{})
+	filesByDir := make(map[string][]string)
+
+	for name := range files {
+		clean := filepath.Clean(name)
+		dir := filepath.Dir(clean)
+		written[clean] = struct{}{}
+
+		filesByDir[dir] = append(filesByDir[dir], name)
+	}
+
+	root := commonDir(filesByDir)
+
+	dirs := make([]string, 0, len(filesByDir))
+	for dir := range filesByDir {
+		for d := dir; d != root && isSubPath(root, d); d = filepath.Dir(d) {
+			if _, ok := written[d]; !ok {
+				written[d] = struct{}{}
+				dirs = append(dirs, d)
+			}
 		}
 	}
+
+	// fix parents before their children, as a rename changes the children's paths
+	slices.SortFunc(dirs, func(a, b string) int {
+		return strings.Count(
+			a,
+			string(filepath.Separator),
+		) - strings.Count(
+			b,
+			string(filepath.Separator),
+		)
+	})
+
+	for _, dir := range dirs {
+		if err := renameCaseVariantDir(fs, dir, written); err != nil {
+			return internalerrors.E(op, err)
+		}
+	}
+
+	for dir, names := range filesByDir {
+		if err := fs.MkdirAll(dir, os.ModePerm); err != nil {
+			return internalerrors.E(op, err)
+		}
+
+		if err := removeCaseVariantFiles(fs, dir, names, written); err != nil {
+			return internalerrors.E(op, err)
+		}
+
+		for _, name := range names {
+			err := afero.WriteFile(fs, name, files[name], 0o644)
+			if err != nil {
+				return internalerrors.E(
+					op,
+					fmt.Errorf("creating metadata file %s failed: %w", name, err),
+				)
+			}
+		}
+	}
+
 	return nil
+}
+
+// On case insensitive file systems (Windows, macOS) writing
+// databases/default/tables/public_user.yaml would reuse an existing
+// databases/Default/tables/public_User.yaml and keep the stale casing, which
+// breaks the project on case sensitive file systems. The helpers below fix
+// the casing of directories and files before the export is written. Entries
+// that are themselves part of the export are left alone, as e.g. tables
+// "User" and "user" can coexist in postgres.
+
+// renameCaseVariantDir renames a directory whose name differs from dir only
+// in letter case to dir, keeping its contents. It does nothing if dir already
+// exists with the exact casing.
+func renameCaseVariantDir(fs afero.Fs, dir string, written map[string]struct{}) error {
+	parent, base := filepath.Split(dir)
+
+	entries, err := afero.ReadDir(fs, parent)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+
+	if err != nil {
+		return fmt.Errorf("reading metadata directory %s failed: %w", parent, err)
+	}
+
+	var variant string
+
+	for _, entry := range entries {
+		if entry.Name() == base {
+			return nil
+		}
+
+		if variant != "" || !entry.IsDir() || !strings.EqualFold(entry.Name(), base) {
+			continue
+		}
+
+		if _, ok := written[filepath.Join(parent, entry.Name())]; !ok {
+			variant = filepath.Join(parent, entry.Name())
+		}
+	}
+
+	if variant == "" {
+		return nil
+	}
+
+	if err := fs.Rename(variant, dir); err != nil {
+		return fmt.Errorf("renaming metadata directory %s to %s failed: %w", variant, dir, err)
+	}
+
+	return nil
+}
+
+// removeCaseVariantFiles deletes the files in dir whose names differ from one
+// of names only in letter case.
+func removeCaseVariantFiles(
+	fs afero.Fs,
+	dir string,
+	names []string,
+	written map[string]struct{},
+) error {
+	entries, err := afero.ReadDir(fs, dir)
+	if err != nil {
+		return fmt.Errorf("reading metadata directory %s failed: %w", dir, err)
+	}
+
+	folded := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		folded[strings.ToLower(filepath.Base(name))] = struct{}{}
+	}
+
+	for _, entry := range entries {
+		variant := filepath.Join(dir, entry.Name())
+		if _, ok := written[variant]; ok || entry.IsDir() {
+			continue
+		}
+
+		if _, ok := folded[strings.ToLower(entry.Name())]; !ok {
+			continue
+		}
+
+		if err := fs.Remove(variant); err != nil {
+			return fmt.Errorf("removing stale metadata file %s failed: %w", variant, err)
+		}
+	}
+
+	return nil
+}
+
+// commonDir returns the deepest directory containing all of dirs. Directory
+// casing is only fixed below it, so that the project directory and its
+// parents are never renamed.
+func commonDir(dirs map[string][]string) string {
+	root := ""
+	for dir := range dirs {
+		if root == "" {
+			root = dir
+
+			continue
+		}
+
+		for !isSubPath(root, dir) && root != filepath.Dir(root) {
+			root = filepath.Dir(root)
+		}
+	}
+
+	return root
+}
+
+func isSubPath(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (h *Handler) ExportMetadata() (map[string][]byte, error) {
 	var op internalerrors.Op = "projectmetadata.Handler.ExportMetadata"
+
 	metadataFiles := make(map[string][]byte)
-	var resp io.Reader
-	var err error
+
+	var (
+		resp io.Reader
+		err  error
+	)
+
 	resp, err = h.v1MetadataOps.ExportMetadata()
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
-	jsonmdbs, err := ioutil.ReadAll(resp)
+
+	jsonmdbs, err := io.ReadAll(resp)
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
@@ -83,59 +271,83 @@ func (h *Handler) ExportMetadata() (map[string][]byte, error) {
 	}
 
 	var c map[string]yaml.Node
+
 	err = yaml.NewDecoder(bytes.NewReader(yamlmdbs)).Decode(&c)
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	for _, object := range h.objects {
 		files, err := object.Export(c)
 		if err != nil {
-			return nil, internalerrors.E(op, fmt.Errorf("cannot export %s from metadata: %w", object.Key(), err))
+			return nil, internalerrors.E(
+				op,
+				fmt.Errorf("cannot export %s from metadata: %w", object.Key(), err),
+			)
 		}
-		for fileName, content := range files {
-			metadataFiles[fileName] = content
-		}
+
+		maps.Copy(metadataFiles, files)
 	}
+
 	return metadataFiles, nil
 }
 
 func (h *Handler) ResetMetadata() error {
-	var op internalerrors.Op = "projectmetadata.Handler.ResetMetadata"
-	var err error
+	var (
+		op  internalerrors.Op = "projectmetadata.Handler.ResetMetadata"
+		err error
+	)
+
 	_, err = h.v1MetadataOps.ClearMetadata()
 	if err != nil {
 		return internalerrors.E(op, err)
 	}
+
 	return nil
 }
 
-// ReloadMetadata - Reload Hasura GraphQL Engine metadata on the database
+// ReloadMetadata - Reload Hasura GraphQL Engine metadata on the database.
 func (h *Handler) ReloadMetadata() (io.Reader, error) {
-	var op internalerrors.Op = "projectmetadata.Handler.ReloadMetadata"
-	var err error
+	var (
+		op  internalerrors.Op = "projectmetadata.Handler.ReloadMetadata"
+		err error
+	)
+
 	r, err := h.v1MetadataOps.ReloadMetadata()
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	return r, nil
 }
 
-func (h *Handler) buildMetadataMap() (map[string]interface{}, error) {
-	var op internalerrors.Op = "projectmetadata.Handler.buildMetadataMap"
-	var metadata = map[string]interface{}{}
+func (h *Handler) buildMetadataMap() (map[string]any, error) {
+	var (
+		op       internalerrors.Op = "projectmetadata.Handler.buildMetadataMap"
+		metadata                   = map[string]any{}
+	)
+
 	for _, object := range h.objects {
 		objectMetadata, err := object.Build()
 		if err != nil {
 			if errors.Is(err, metadataobject.ErrMetadataFileNotFound) {
-				h.logger.Debugf("metadata file for %s was not found, assuming an empty file", object.Key())
+				h.logger.Debugf(
+					"metadata file for %s was not found, assuming an empty file",
+					object.Key(),
+				)
+
 				continue
 			}
-			return nil, internalerrors.E(op, fmt.Errorf("cannot build %s from project: %w", object.Key(), err))
+
+			return nil, internalerrors.E(
+				op,
+				fmt.Errorf("cannot build %s from project: %w", object.Key(), err),
+			)
 		}
-		for k, v := range objectMetadata {
-			metadata[k] = v
-		}
+
+		maps.Copy(metadata, objectMetadata)
 	}
+
 	return metadata, nil
 }
 
@@ -144,57 +356,71 @@ func (h *Handler) buildMetadataMap() (map[string]interface{}, error) {
 // json.Marshal to get JSON representation of the built metadata. But this assumption will not hold true because
 // the underlying types might have instances of yaml.Node which is not friendly with a json.Marshal and can produce
 // unexpected results. Rather to get a JSON / YAML form of built metadata make use of Handler.BuildYAMLMetadata and
-// Handler.BuildJSONMetadata helper functions
+// Handler.BuildJSONMetadata helper functions.
 func (h *Handler) buildMetadata() (*Metadata, error) {
 	var op internalerrors.Op = "projectmetadata.Handler.buildMetadata"
+
 	metadataMap, err := h.buildMetadataMap()
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	return GenMetadataFromMap(metadataMap)
 }
 
 func (h *Handler) BuildYAMLMetadata() ([]byte, error) {
 	var op internalerrors.Op = "projectmetadata.Handler.BuildYAMLMetadata"
+
 	metadata, err := h.buildMetadata()
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	return metadata.YAML()
 }
 
 func (h *Handler) BuildJSONMetadata() ([]byte, error) {
 	var op internalerrors.Op = "projectmetadata.Handler.BuildJSONMetadata"
+
 	metadata, err := h.buildMetadata()
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	return metadata.JSON()
 }
 
 func (h *Handler) V1ApplyMetadata() (io.Reader, error) {
 	var op internalerrors.Op = "projectmetadata.Handler.V1ApplyMetadata"
+
 	jbyt, err := h.BuildJSONMetadata()
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	r, err := h.v1MetadataOps.ReplaceMetadata(bytes.NewReader(jbyt))
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	return r, nil
 }
 
-func (h *Handler) V2ApplyMetadata(disallowInconsistentMetadata bool) (*hasura.V2ReplaceMetadataResponse, error) {
+func (h *Handler) V2ApplyMetadata(
+	disallowInconsistentMetadata bool,
+) (*hasura.V2ReplaceMetadataResponse, error) {
 	var op internalerrors.Op = "projectmetadata.Handler.V2ApplyMetadata"
+
 	jbyt, err := h.BuildJSONMetadata()
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
-	var metadata interface{}
+
+	var metadata any
 	if err := json.Unmarshal(jbyt, &metadata); err != nil {
 		return nil, internalerrors.E(op, internalerrors.KindBadInput, err)
 	}
+
 	r, err := h.v2MetadataOps.V2ReplaceMetadata(hasura.V2ReplaceMetadataArgs{
 		AllowInconsistentMetadata: !disallowInconsistentMetadata,
 		Metadata:                  metadata,
@@ -202,37 +428,46 @@ func (h *Handler) V2ApplyMetadata(disallowInconsistentMetadata bool) (*hasura.V2
 	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	return r, nil
 }
 
 func (h *Handler) GetInconsistentMetadata() (bool, []InconsistentMetadataObject, error) {
 	var op internalerrors.Op = "projectmetadata.Handler.GetInconsistentMetadata"
+
 	inconsistentMetadata, err := h.v1MetadataOps.GetInconsistentMetadata()
 	if err != nil {
 		return true, nil, internalerrors.E(op, err)
 	}
+
 	var objects []InconsistentMetadataObject
+
 	err = mapstructure.Decode(inconsistentMetadata.InconsistentObjects, &objects)
 	if err != nil {
 		return inconsistentMetadata.IsConsistent, objects, internalerrors.E(op, err)
 	}
+
 	return inconsistentMetadata.IsConsistent, objects, nil
 }
 
 func (h *Handler) DropInconsistentMetadata() error {
-	var op internalerrors.Op = "projectmetadata.Handler.DropInconsistentMetadata"
-	var err error
+	var (
+		op  internalerrors.Op = "projectmetadata.Handler.DropInconsistentMetadata"
+		err error
+	)
+
 	_, err = h.v1MetadataOps.DropInconsistentMetadata()
 	if err != nil {
 		return internalerrors.E(op, err)
 	}
+
 	return nil
 }
 
 type InconsistentMetadataObject struct {
-	Definition interface{} `json:"definition" mapstructure:"definition"`
-	Reason     interface{} `json:"reason" mapstructure:"reason"`
-	Type       interface{} `json:"type" mapstructure:"type"`
+	Definition any `json:"definition" mapstructure:"definition"`
+	Reason     any `json:"reason"     mapstructure:"reason"`
+	Type       any `json:"type"       mapstructure:"type"`
 }
 
 /*
@@ -276,16 +511,20 @@ func (obj InconsistentMetadataObject) GetType() string {
 	if v, ok := obj.Type.(string); ok {
 		return v
 	}
+
 	return "N/A"
 }
 
 func (obj InconsistentMetadataObject) GetName() string {
-	var m map[string]interface{}
-	if err := mapstructure.Decode(obj.Definition, &m); err == nil {
+	var m map[string]any
+
+	err := mapstructure.Decode(obj.Definition, &m)
+	if err == nil {
 		if v, ok := m["name"]; ok {
 			return fmt.Sprintf("%v", v)
 		}
 	}
+
 	return "N/A"
 }
 
@@ -294,6 +533,7 @@ func (obj InconsistentMetadataObject) GetDescription() string {
 	if err == nil {
 		return fmt.Sprintf("%.50s...", string(b))
 	}
+
 	return "N/A"
 }
 
@@ -301,10 +541,12 @@ func (obj InconsistentMetadataObject) GetReason() string {
 	if v, ok := obj.Reason.(string); ok {
 		return v
 	}
+
 	b, err := json.Marshal(obj.Reason)
 	if err == nil {
 		return fmt.Sprintf("%.80s...", string(b))
 	}
+
 	return "N/A"
 }
 
@@ -314,26 +556,26 @@ func (obj InconsistentMetadataObject) GetReason() string {
 // this is rather a utility / helper struct which allow us to unmarshal / marshal
 // metadata bytes in a specific order.
 type Metadata struct {
-	Version          interface{} `yaml:"version" mapstructure:"version"`
-	Sources          interface{} `yaml:"sources,omitempty" mapstructure:"sources,omitempty"`
-	Tables           interface{} `yaml:"tables,omitempty" mapstructure:"tables,omitempty"`
-	Functions        interface{} `yaml:"functions,omitempty" mapstructure:"functions,omitempty"`
-	Actions          interface{} `yaml:"actions,omitempty" mapstructure:"actions,omitempty"`
-	CustomTypes      interface{} `yaml:"custom_types,omitempty" mapstructure:"custom_types,omitempty"`
-	RemoteSchemas    interface{} `yaml:"remote_schemas,omitempty" mapstructure:"remote_schemas,omitempty"`
-	QueryCollections interface{} `yaml:"query_collections,omitempty" mapstructure:"query_collections,omitempty"`
-	AllowList        interface{} `yaml:"allowlist,omitempty" mapstructure:"allowlist,omitempty"`
-	CronTriggers     interface{} `yaml:"cron_triggers,omitempty" mapstructure:"cron_triggers,omitempty"`
-	Network          interface{} `yaml:"network,omitempty" mapstructure:"network,omitempty"`
-	APILimits        interface{} `yaml:"api_limits,omitempty" mapstructure:"api_limits,omitempty"`
-	RestEndpoints    interface{} `yaml:"rest_endpoints,omitempty" mapstructure:"rest_endpoints,omitempty"`
-	InheritedRoles   interface{} `yaml:"inherited_roles,omitempty" mapstructure:"inherited_roles,omitempty"`
-	Opentelemetry    interface{} `yaml:"opentelemetry,omitempty" mapstructure:"opentelemetry,omitempty"`
-	BackendConfig    interface{} `yaml:"backend_configs,omitempty" mapstructure:"backend_configs,omitempty"`
+	Version          any `mapstructure:"version"                     yaml:"version"`
+	Sources          any `mapstructure:"sources,omitempty"           yaml:"sources,omitempty"`
+	Tables           any `mapstructure:"tables,omitempty"            yaml:"tables,omitempty"`
+	Functions        any `mapstructure:"functions,omitempty"         yaml:"functions,omitempty"`
+	Actions          any `mapstructure:"actions,omitempty"           yaml:"actions,omitempty"`
+	CustomTypes      any `mapstructure:"custom_types,omitempty"      yaml:"custom_types,omitempty"`
+	RemoteSchemas    any `mapstructure:"remote_schemas,omitempty"    yaml:"remote_schemas,omitempty"`
+	QueryCollections any `mapstructure:"query_collections,omitempty" yaml:"query_collections,omitempty"`
+	AllowList        any `mapstructure:"allowlist,omitempty"         yaml:"allowlist,omitempty"`
+	CronTriggers     any `mapstructure:"cron_triggers,omitempty"     yaml:"cron_triggers,omitempty"`
+	Network          any `mapstructure:"network,omitempty"           yaml:"network,omitempty"`
+	APILimits        any `mapstructure:"api_limits,omitempty"        yaml:"api_limits,omitempty"`
+	RestEndpoints    any `mapstructure:"rest_endpoints,omitempty"    yaml:"rest_endpoints,omitempty"`
+	InheritedRoles   any `mapstructure:"inherited_roles,omitempty"   yaml:"inherited_roles,omitempty"`
+	Opentelemetry    any `mapstructure:"opentelemetry,omitempty"     yaml:"opentelemetry,omitempty"`
+	BackendConfig    any `mapstructure:"backend_configs,omitempty"   yaml:"backend_configs,omitempty"`
 
 	// HGE Pro
-	GraphQLSchemaIntrospection interface{} `yaml:"graphql_schema_introspection,omitempty" mapstructure:"graphql_schema_introspection,omitempty"`
-	MetricsConfig              interface{} `yaml:"metrics_config,omitempty" mapstructure:"metrics_config,omitempty"`
+	GraphQLSchemaIntrospection any `mapstructure:"graphql_schema_introspection,omitempty" yaml:"graphql_schema_introspection,omitempty"`
+	MetricsConfig              any `mapstructure:"metrics_config,omitempty"               yaml:"metrics_config,omitempty"`
 
 	// note: update metadatautil/json.metadata to reflect changes made here
 }
@@ -341,9 +583,10 @@ type Metadata struct {
 // JSON is a helper function which returns JSON representation of Metadata
 // This exists because we cannot directly do a json.Marshal on Metadata because
 // the underlying type of struct fields might be yaml.Node
-// which might give unintended result
+// which might give unintended result.
 func (m Metadata) JSON() ([]byte, error) {
 	var op internalerrors.Op = "projectmetadata.Metadata.JSON"
+
 	yamlbs, err := m.YAML()
 	if err != nil {
 		return nil, internalerrors.E(op, err)
@@ -353,19 +596,29 @@ func (m Metadata) JSON() ([]byte, error) {
 }
 
 func (m Metadata) YAML() ([]byte, error) {
-	var op internalerrors.Op = "projectmetadata.Metadata.YAML"
-	var buf bytes.Buffer
-	if err := metadataobject.GetEncoder(&buf).Encode(m); err != nil {
+	var (
+		op  internalerrors.Op = "projectmetadata.Metadata.YAML"
+		buf bytes.Buffer
+	)
+
+	err := metadataobject.GetEncoder(&buf).Encode(m)
+	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	return buf.Bytes(), nil
 }
 
-func GenMetadataFromMap(metadata map[string]interface{}) (*Metadata, error) {
-	var op internalerrors.Op = "projectmetadata.GenMetadataFromMap"
-	var m = new(Metadata)
-	if err := mapstructure.Decode(metadata, m); err != nil {
+func GenMetadataFromMap(metadata map[string]any) (*Metadata, error) {
+	var (
+		op internalerrors.Op = "projectmetadata.GenMetadataFromMap"
+		m                    = new(Metadata)
+	)
+
+	err := mapstructure.Decode(metadata, m)
+	if err != nil {
 		return nil, internalerrors.E(op, err)
 	}
+
 	return m, nil
 }

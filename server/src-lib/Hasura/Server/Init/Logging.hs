@@ -92,6 +92,7 @@ serveOptsToLog so =
           "server_host" .= show (Config.soHost so),
           "transaction_isolation" .= show (Config.soTxIso so),
           "admin_secret_set" .= not (HashSet.null (Config.soAdminSecret so)),
+          "disable_admin_secret" .= Config.soDisableAdminSecret so,
           "auth_hook" .= (Auth.ahUrl <$> Config.soAuthHook so),
           "auth_hook_mode" .= (show . Auth.ahType <$> Config.soAuthHook so),
           "jwt_secret" .= (J.toJSON <$> Config.soJwtSecret so),
@@ -120,7 +121,9 @@ serveOptsToLog so =
           "events_fetch_batch_size" .= Config.soEventsFetchBatchSize so,
           "graceful_shutdown_timeout" .= Config.soGracefulShutdownTimeout so,
           "websocket_connection_init_timeout" .= show (Config.soWebSocketConnectionInitTimeout so),
-          "enable_metadata_query_logging" .= Config.soEnableMetadataQueryLogging so
+          "websocket_queue_size" .= Config.soWebSocketQueueSize so,
+          "enable_metadata_query_logging" .= Config.soEnableMetadataQueryLogging so,
+          "http_log_query_only_on_error" .= Config.soHttpLogQueryOnlyOnError so
         ]
 
 mkGenericLog :: (ToJSON a) => Logging.LogLevel -> Text -> a -> Server.Logging.StartupLog

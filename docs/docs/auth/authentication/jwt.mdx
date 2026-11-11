@@ -228,13 +228,13 @@ The following is the behavior in detail:
 
     If it is unable to parse those values, then it will not refresh the JWKs (it assumes that if the above headers are
     not present, the provider doesn't rotate their JWKs). If the parsed time is less than a second, the JWKs
-    will be fetched once per second regardless.
+    will be fetched once per minute regardless.
 
     If `must-revalidate` and `max-age` are present, then it will refresh the JWK again after the time period specified
     in `max-age` has passed.
 
     However, if `max-age` is not specified or if `no-cache` or `no-store` are present, then it will refresh the JWKs
-    once a second.
+    once every minute.
 
 ##### JWK procedure while running
 
@@ -245,7 +245,7 @@ The following is the behavior in detail:
        as a timestamp.
 
 2.  If it is able to parse any of the above successfully, then it will use that parsed time to refetch the JWKs
-    again. If it is unable to parse any values, then it will sleep for 1 minute and then start another refresh cycle.
+    again. If it is unable to parse any values, then it will sleep for one minute and then start another refresh cycle.
 
 ##### JWK publisher URLs
 
@@ -367,13 +367,16 @@ or
 
 :::danger Audience Security Vulnerability
 
-Certain JWT providers share JWKs between multiple tenants. They use the `aud` claim of the JWT to specify the intended
-audience. Setting the `audience` field in the Hasura JWT configuration will make sure that the `aud` claim
-from the JWT is also checked during verification. Not doing this check will allow JWTs issued for other tenants to be
-valid as well.
+Certain JWT providers share JWKs between multiple tenants and use the `aud` claim to identify the intended
+audience. Setting the `audience` field in the Hasura JWT configuration ensures that a present `aud` claim is
+checked during verification. Not doing this will allow JWTs issued for other tenants to be valid as well.
 
 In these cases, you **MUST** set the `audience` field to the appropriate value. Failing to do so is a **major security
 vulnerability**.
+
+**Default behaviour:** by default, a token that omits the `aud` claim entirely is still accepted when `audience` is
+configured — only a present-but-mismatched `aud` causes rejection. If your provider always issues `aud` and you want
+to enforce its presence, set `"extra_required_claims": ["audience"]` (see below).
 
 :::
 
@@ -401,7 +404,30 @@ Examples:
 - Certain providers require you to verify the `iss` claim on the JWT. To do that you can set this field to the
   appropriate value.
 - A JWT configuration without an issuer will match any issuer field present in an incoming JWT.
-- An incoming JWT without an issuer specified will match a configuration even if it specifies an issuer.
+- An incoming JWT without an issuer specified will match a configuration even if it specifies an issuer. Set
+  `"extra_required_claims": ["issuer"]` to opt into strict validation where absence is treated as a mismatch.
+
+### extra_required_claims
+
+This is an optional field. It takes a list containing any combination of `"audience"` and `"issuer"`.
+
+By default, a token that omits the `aud` or `iss` claim is accepted even when `audience` or `issuer` is configured
+in Hasura (a present-but-mismatched value is still rejected). Use `extra_required_claims` to opt into stricter
+validation where a missing claim is treated the same as a mismatch.
+
+Example — require both claims to be present:
+
+```json
+{
+  "jwk_url": "https://......",
+  "audience": "myapp",
+  "issuer": "https://my-auth-server.com",
+  "extra_required_claims": ["audience", "issuer"]
+}
+```
+
+This is useful when your provider always includes these claims and you want to guard against accidentally accepting
+tokens from a provider that omits them.
 
 ### claims_map
 
@@ -741,15 +767,23 @@ Once authenticated, all operations are allowed without further check, until the 
 
 ## Popular providers and known issues
 
+### AWS Cognito
+
+AWS Cognito and ELB (Elastic Load Balancer) has a known issue where it adds additional padding
+(using = characters) to the JWT token that is generated from Cognito.
+
+This is a known issue and is documented by AWS in [their
+docs](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/listener-authenticate-users.html#user-claims-encoding):
+
+> Standard libraries are not compatible with the padding that is included in the Application Load
+> Balancer authentication token in JWT format.
+
+Currently, there is no workaround possible in Hasura. Even if Hasura strips the additional padding
+the signature verification of the token would fail (as Hasura had to tamper the token).
+
 ### Firebase
 
-This page of the Firebase
-[docs](https://firebase.google.com/docs/auth/admin/verify-id-tokens#verify_id_tokens_using_a_third-party_jwt_library)
-mentions that JWKs are published under:
-
-[https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com](https://www.googleapis.com/robot/v1/metadata/x509/securetoken@system.gserviceaccount.com)
-
-But that is a non-standard format. Firebase also publishes the same certificates as the proper JWK format under:
+Firebase publishes the JWKs at:
 
 [https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com](https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com)
 
@@ -767,46 +801,6 @@ If you are using Firebase and Hasura, use this config:
 
 Refer to the [Auth0 JWT Integration tutorial](https://hasura.io/learn/graphql/hasura-authentication/integrations/auth0/)
 for a detailed guide on integrating Auth0 with Hasura.
-
-Auth0 publishes their JWK under:
-
-`https://<your-auth0-domain>.auth0.com/.well-known/jwks.json`
-
-But they have a
-[bug where the certificate thumbprint does not match](https://community.auth0.com/t/certificate-thumbprint-is-longer-than-20-bytes/7794/3).
-Hence, currently this URL does not work with Hasura.
-
-Current workaround is - download the X590 certificate from:
-
-`https://<your-auth0-domain>.auth0.com/pem`
-
-And use it in the `key` field:
-
-```json
-{
-  "type":"RS512",
-  "key": "-----BEGIN CERTIFICATE-----
-MIIDDTCAfWgAwIBAgIJhNlZ11IDrxbMA0GCSqSIb3DQEBCwUAMCQxIjAgBgNV
-BAMTGXlc3QtaGdlLWp3C5ldS5hdXRoMC5jb20HhcNMTgwNzMwMTM1MjM1WhcN
-MzIwND3MTM1MjM1WjAkSIwIAYDVQQDExl0ZXNLWhnZS1qd3QuZXUuYXV0aDAu
-Y29tMIBIjANBgkqhkiGw0BAQEFAAOCAQ8AMIICgKCAQEA13CivdSkNzRnOnR5
-ZNiReD+AgbL7BWjRiw3RwjxRp5PYzvAGuj94yR6LRh3QybYtsMFbSg5J7fNq6
-Ld6yMpMrUu8CBOnYY456b/2jlf+Vp8vEQuKvPOOw8Ev6x7X3blcuXCELSwyL3
-AGHq9OP2RV6V6CIE863zzuYH5HDLzU35oMZqogJVRJM0+6besH6TnSTNiA7xi
-BAqFaiRNQRVi1CAUa0bkN1XRp4AFy7d63VldOsM+8QnCNHySdDr1XevVuq6DK
-LQyGexFy4niALgHV0Q7A+xP1c2G6rJomZmn4j1avnlBpU87E58JMrRHOCj+5m
-Xj22/QDAQABo0IwQDAPgNVHRMBAf8EBTADAQHMB0GA1UdDgQWBBT6FvNkuUgu
-tk3OYQi4lo5aOgwazAOgNVHQ8BAf8EBAMCAoQDQYJKoZIhvcNAQELBQADggEB
-ADCLj+L22pEKyqaIUlhUJh7DAiDSLafy0fw56CntzPhqiZVVRlhxeAKidkCLV
-r9IEbRuxUoXiQSezPqM//9xHegMp0f2VauVCFg7EpUanYwvqFqjy9LWgH+SBz
-4uroLSZ5g1EPsHtlArLChA90caTX4e7Z7Xlu8G2kHRJB5nC7ycdbMUvEWBMeI
-tn/pcbmZ3/vlgj4UTEnURe2UPmSJpxmPwXqBcvwdKHRMgFXhZxojWCi0z4ftf
-f8t8UJIcbEblnkYe7wzYy8tOXoMMHqGSisCdkp/866029rJsKbwd8rVIyKNC5
-frGYaw+0cxO6/WvSir0eA=
------END CERTIFICATE-----
-"
-}
-```
 
 ### Clerk
 

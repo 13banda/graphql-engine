@@ -1,5 +1,5 @@
 import isEmpty from 'lodash/isEmpty';
-import { Button } from '../../../../../../new-components/Button';
+import { Button } from '@hasura/shared/ui';
 import { isComparator } from './utils';
 import { useContext } from 'react';
 import { rowPermissionsContext } from './RowPermissionsProvider';
@@ -18,7 +18,7 @@ export function InputSuggestion({
   const { setValue } = useContext(rowPermissionsContext);
   const { table } = useContext(tableContext);
   const operators = useOperators({ path });
-  const operator = operators.find(o => o.name === comparatorName);
+  const operator = operators.find((o) => o.name === comparatorName);
 
   if (comparatorName === '_contains' || comparatorName === '_contained_in') {
     return (
@@ -31,11 +31,25 @@ export function InputSuggestion({
     return (
       <Button
         disabled={comparatorName === '_where' && isEmpty(table)}
-        onClick={() => setValue(path, 'X-Hasura-User-Id')}
-        data-testid={`${componentLevelId}-x-hasura-user-id`}
+        size="sm"
+        onClick={() =>
+          setValue(
+            path,
+            comparatorName === '_in' || comparatorName === '_nin'
+              ? 'X-Hasura-Allowed-Ids'
+              : 'X-Hasura-User-Id',
+          )
+        }
+        data-testid={`${componentLevelId}-${
+          comparatorName.endsWith('_in') || comparatorName.endsWith('_nin')
+            ? 'x-hasura-allowed-ids'
+            : 'x-hasura-user-id'
+        }`}
         mode="default"
       >
-        [x-hasura-user-id]
+        {comparatorName === '_in' || comparatorName === '_nin'
+          ? '[X-Hasura-Allowed-Ids]'
+          : '[X-Hasura-User-Id]'}
       </Button>
     );
   }

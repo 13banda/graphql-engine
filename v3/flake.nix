@@ -7,227 +7,239 @@
 
     crane = {
       url = "github:ipetkov/crane";
-      inputs.nixpkgs.follows = "nixpkgs";
     };
 
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs = {
         nixpkgs.follows = "nixpkgs";
-        flake-utils.follows = "flake-utils";
       };
     };
   };
 
   outputs = { self, nixpkgs, flake-utils, crane, rust-overlay }:
-    flake-utils.lib.eachDefaultSystem
-      (localSystem:
-        let
-          pkgs = import nixpkgs {
-            system = localSystem;
-            overlays = [ rust-overlay.overlays.default ];
-          };
+    flake-utils.lib.eachDefaultSystem (localSystem:
+      let
+        version = pkgs.lib.strings.fileContents ./nix/version;
 
-          rust = import ./nix/rust.nix {
-            inherit nixpkgs rust-overlay crane localSystem;
-          };
+        targetSystems = flake-utils.lib.defaultSystems;
 
-          rust-x86_64-linux = (import ./nix/rust.nix {
-            inherit nixpkgs rust-overlay crane localSystem;
-            crossSystem = "x86_64-linux";
-          });
+        dockerArchitectures = {
+          "x86_64-linux" = "amd64";
+          "aarch64-linux" = "arm64";
+        };
 
-          rust-aarch64-linux = (import ./nix/rust.nix {
-            inherit nixpkgs rust-overlay crane localSystem;
-            crossSystem = "aarch64-linux";
-          });
-        in
-        {
-          formatter = pkgs.nixpkgs-fmt;
+        pkgs = import nixpkgs {
+          system = localSystem;
+          overlays = [ rust-overlay.overlays.default ];
+        };
 
-          packages = {
-            ###### ENGINE
-
-            # engine binary for whichever is the local machine
-            engine = rust.callPackage ./nix/app.nix {
-              version = if self ? "dirtyRev" then self.dirtyShortRev else self.shortRev;
-              pname = "engine";
-            };
-
-            # engine binary for x86_64-linux
-            engine-x86_64-linux = rust-x86_64-linux.callPackage ./nix/app.nix {
-              version = if self ? "dirtyRev" then self.dirtyShortRev else self.shortRev;
-              pname = "engine";
-            };
-
-            # engine binary for aarch64-linux
-            engine-aarch64-linux = rust-aarch64-linux.callPackage ./nix/app.nix {
-              version = if self ? "dirtyRev" then self.dirtyShortRev else self.shortRev;
-              pname = "engine";
-            };
-
-            # engine docker files for whichever is the local machine
-            engine-docker = pkgs.callPackage ./nix/docker.nix {
-              package = self.packages.${localSystem}.engine;
-              image-name = "ghcr.io/hasura/v3-engine";
-              tag = "dev";
-              port = "3000";
-            };
-
-            # engine docker for x86_64-linux
-            engine-docker-x86_64-linux = pkgs.callPackage ./nix/docker.nix {
-              package = self.packages.${localSystem}.engine-x86_64-linux;
-              architecture = "amd64";
-              image-name = "ghcr.io/hasura/v3-engine";
-              port = "3000";
-            };
-
-            # engine docker for aarch64-linux
-            engine-docker-aarch64-linux = pkgs.callPackage ./nix/docker.nix {
-              package = self.packages.${localSystem}.engine-aarch64-linux;
-              architecture = "arm64";
-              image-name = "ghcr.io/hasura/v3-engine";
-              port = "3000";
-            };
-
-            default = self.packages.${localSystem}.engine;
-
-            ###### CUSTOM_CONNECTOR
-
-            # custom-connector binary for whichever is the local machine
-            custom-connector = rust.callPackage ./nix/app.nix {
-              version = if self ? "dirtyRev" then self.dirtyShortRev else self.shortRev;
-              pname = "custom-connector";
-            };
-
-            # custom-connector binary for x86_64-linux
-            custom-connector-x86_64-linux = rust-x86_64-linux.callPackage ./nix/app.nix {
-              version = if self ? "dirtyRev" then self.dirtyShortRev else self.shortRev;
-              pname = "custom-connector";
-            };
-
-            # custom-connector binary for aarch64-linux
-            custom-connector-aarch64-linux = rust-aarch64-linux.callPackage ./nix/app.nix {
-              version = if self ? "dirtyRev" then self.dirtyShortRev else self.shortRev;
-              pname = "custom-connector";
-            };
-
-            # custom-connector docker files for whichever is the local machine
-            custom-connector-docker = pkgs.callPackage ./nix/docker.nix {
-              package = self.packages.${localSystem}.custom-connector;
-              image-name = "ghcr.io/hasura/v3-custom-connector";
-              tag = "dev";
-              port = "8181";
-            };
-
-            # custom-connector docker for x86_64-linux
-            custom-connector-docker-x86_64-linux = pkgs.callPackage ./nix/docker.nix {
-              package = self.packages.${localSystem}.custom-connector-x86_64-linux;
-              architecture = "amd64";
-              image-name = "ghcr.io/hasura/v3-custom-connector";
-              port = "8181";
-            };
-
-            # custom-connector docker for aarch64-linux
-            custom-connector-docker-aarch64-linux = pkgs.callPackage ./nix/docker.nix {
-              package = self.packages.${localSystem}.custom-connector-aarch64-linux;
-              architecture = "arm64";
-              image-name = "ghcr.io/hasura/v3-custom-connector";
-              port = "8181";
-            };
-
-            ###### DEV-AUTH-WEBHOOK
-
-            # dev-auth-webhook binary for whichever is the local machine
-            dev-auth-webhook = rust.callPackage ./nix/app.nix {
-              version = if self ? "dirtyRev" then self.dirtyShortRev else self.shortRev;
-              pname = "dev-auth-webhook";
-            };
-
-            # dev-auth-webhook binary for x86_64-linux
-            dev-auth-webhook-x86_64-linux = rust-x86_64-linux.callPackage ./nix/app.nix {
-              version = if self ? "dirtyRev" then self.dirtyShortRev else self.shortRev;
-              pname = "dev-auth-webhook";
-            };
-
-            # dev-auth-webhook binary for aarch64-linux
-            dev-auth-webhook-aarch64-linux = rust-aarch64-linux.callPackage ./nix/app.nix {
-              version = if self ? "dirtyRev" then self.dirtyShortRev else self.shortRev;
-              pname = "dev-auth-webhook";
-            };
-
-            # dev-auth-webhook docker files for whichever is the local machine
-            dev-auth-webhook-docker = pkgs.callPackage ./nix/docker.nix {
-              package = self.packages.${localSystem}.dev-auth-webhook;
-              image-name = "ghcr.io/hasura/v3-dev-auth-webhook";
-              tag = "dev";
-              port = "3050";
-            };
-
-            # dev-auth-webhook docker for x86_64-linux
-            dev-auth-webhook-docker-x86_64-linux = pkgs.callPackage ./nix/docker.nix {
-              package = self.packages.${localSystem}.dev-auth-webhook-x86_64-linux;
-              architecture = "amd64";
-              image-name = "ghcr.io/hasura/v3-dev-auth-webhook";
-              port = "3050";
-            };
-
-            # dev-auth-webhook docker for aarch64-linux
-            dev-auth-webhook-docker-aarch64-linux = pkgs.callPackage ./nix/docker.nix {
-              package = self.packages.${localSystem}.dev-auth-webhook-aarch64-linux;
-              architecture = "arm64";
-              image-name = "ghcr.io/hasura/v3-dev-auth-webhook";
-              port = "3050";
-            };
-
-            ### SCRIPTS
-
-            publish-docker-image = pkgs.writeShellApplication {
-              name = "publish-docker-image";
-              runtimeInputs = with pkgs; [ coreutils skopeo ];
-              text = builtins.readFile ./.github/scripts/deploy.sh;
-            };
-          };
-
-          apps = {
-            default = self.apps.${localSystem}.engine;
-            engine = flake-utils.lib.mkApp {
-              drv = self.packages.${localSystem}.engine;
-              name = "engine";
-            };
-            dev-auth-webhook = flake-utils.lib.mkApp {
-              drv = self.packages.${localSystem}.dev-auth-webhook;
-              name = "dev-auth-webhook";
-            };
-            custom-connector = flake-utils.lib.mkApp {
-              drv = self.packages.${localSystem}.custom-connector;
-              name = "custom-connector";
-            };
-          };
-
-          devShells = {
-            default = pkgs.mkShell {
-              # include dependencies of the default package
-              inputsFrom = [ self.packages.${localSystem}.default ];
-
-              # build-time inputs
-              nativeBuildInputs = [
-                # Development
-                pkgs.just
-                pkgs.nixpkgs-fmt
-                pkgs.nodePackages.prettier
-
-                # Rust
-                pkgs.cargo-edit
-                pkgs.cargo-expand
-                pkgs.cargo-flamegraph
-                pkgs.cargo-insta
-                pkgs.cargo-machete
-                pkgs.cargo-nextest
-                pkgs.cargo-watch
-                rust.rustToolchain
-              ];
-            };
-          };
+        rust = pkgs.lib.attrsets.genAttrs targetSystems (crossSystem: import ./nix/rust.nix {
+          inherit nixpkgs rust-overlay crane localSystem crossSystem;
         });
+
+        binaries = [
+          "engine"
+          "custom-connector"
+          "dev-auth-webhook"
+          "pre-ndc-request-plugin-example"
+          "pre-ndc-response-plugin-example"
+          "pre-parse-plugin-example"
+        ];
+
+        binaryPackages = {
+        };
+
+        defaultBinary = "engine";
+
+        # Nix's pkgs.cacert places CA certificates at /etc/ssl/certs/ca-bundle.crt,
+        # but openssl-probe 0.2.x only searches for /etc/ssl/certs/ca-certificates.crt
+        # on Linux. Without SSL_CERT_FILE, native-tls/OpenSSL falls back to its
+        # compiled-in default path (/usr/lib/ssl/certs) which doesn't exist in the
+        # Nix image, causing "unable to get local issuer certificate" errors.
+        sslCertFileEnv = [ "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt" ];
+
+        dockerConfig = {
+          "engine" = {
+            ExposedPorts = { "3000/tcp" = { }; };
+            Env = sslCertFileEnv;
+          };
+          "ddn-engine-local-dev" = {
+            ExposedPorts = { "3000/tcp" = { }; };
+            Env = sslCertFileEnv;
+          };
+          "multitenant-engine" = {
+            Env = sslCertFileEnv;
+          };
+          "custom-connector" = {
+            ExposedPorts = { "8102/tcp" = { }; };
+          };
+          "dev-auth-webhook" = {
+            ExposedPorts = { "3060/tcp" = { }; };
+          };
+        };
+
+        # for adding extra packages inside the Docker container
+        dockerExtraContents = {
+          "engine" = [ pkgs.cacert ]; # so local dev can use SSH
+          "ddn-engine-local-dev" = [ pkgs.cacert ]; # so local dev can use SSH
+          "multitenant-engine" = [ pkgs.cacert pkgs.bash pkgs.coreutils ]; # to run sleep in a healthcheck, we should remove this soon
+          "artifact-server" = [ pkgs.curl pkgs.bash ]; # to run healthcheck, we should remove this soon
+        };
+      in
+      {
+        formatter = pkgs.nixpkgs-fmt;
+
+        # Generate packages in a tree structure.
+        #
+        # The path is of the form:
+        #
+        #   local system -> binary name -> target system -> output
+        #
+        # For example, to cross-compile the engine to aarch64-linux on a
+        # x86_64-linux machine, you will want to access:
+        #
+        #   targets.x86_64-linux.engine.aarch64-linux.binary
+        #
+        # Docker images are named "docker", and live next to the binaries. An
+        # "docker-env-loader" sibling provides the same image wrapped with the
+        # env-loader entrypoint that reads /secrets/*.json before exec'ing the
+        # binary. Both reuse the same `binary` derivation, so adding the
+        # variant does not trigger a second Rust build. They are not provided
+        # for all systems; if there is no Docker image, the value will be
+        # `null`.
+        #
+        # The tree looks something like this:
+        #
+        #   targets
+        #     - x86_64-linux
+        #        - engine
+        #          - x86_64-linux
+        #            - binary
+        #            - docker
+        #            - docker-env-loader
+        #          - aarch64-linux
+        #            - binary
+        #            - docker
+        #            - docker-env-loader
+        #          - x86_64-darwin
+        #            - binary
+        #            - docker = null
+        #            - docker-env-loader = null
+        #          - aarch64-darwin
+        #            - binary
+        #            - docker = null
+        #            - docker-env-loader = null
+        #        - custom-connector
+        #          - ...
+        #     - aarch64-linux
+        #        - ...
+        #     - x86_64-darwin
+        #        - ...
+        #     - aarch64-darwin
+        #        - ...
+        targets = pkgs.lib.attrsets.genAttrs binaries (binaryName:
+          pkgs.lib.attrsets.genAttrs targetSystems (targetSystem: {
+            binary = rust.${targetSystem}.callPackage ./nix/app.nix {
+              inherit version;
+              pname = binaryName;
+              packageName = binaryPackages.${binaryName} or binaryName;
+            };
+            docker =
+              if dockerArchitectures ? ${targetSystem}
+              then
+                pkgs.callPackage ./nix/docker.nix
+                  {
+                    package = self.targets.${localSystem}.${binaryName}.${targetSystem}.binary;
+                    architecture = dockerArchitectures.${targetSystem};
+                    image-name = "build.internal/${binaryName}-${targetSystem}";
+                    extraConfig = dockerConfig.${binaryName} or { };
+                    extraContents = dockerExtraContents.${binaryName} or [ ];
+                    tag = "ci";
+                  }
+              else null;
+            # An env-loader variant of the Docker image. It reuses the *same*
+            # binary derivation as `docker` above (so the Rust build is not
+            # repeated), and just rewraps it with the vendored env-loader
+            # entrypoint that reads /secrets/*.json into the environment before
+            # exec'ing the binary.
+            docker-env-loader =
+              if dockerArchitectures ? ${targetSystem}
+              then
+                pkgs.callPackage ./nix/docker.nix
+                  {
+                    package = self.targets.${localSystem}.${binaryName}.${targetSystem}.binary;
+                    architecture = dockerArchitectures.${targetSystem};
+                    image-name = "build.internal/${binaryName}-${targetSystem}-env-loader";
+                    extraConfig = dockerConfig.${binaryName} or { };
+                    extraContents = dockerExtraContents.${binaryName} or [ ];
+                    envLoader = true;
+                    tag = "ci";
+                  }
+              else null;
+          })
+        );
+
+        packages =
+          # binaries for the local system
+          pkgs.lib.attrsets.genAttrs binaries (binaryName: self.targets.${localSystem}.${binaryName}.${localSystem}.binary) // {
+            # `nix build` will build the default binary
+            default = self.packages.${localSystem}.${defaultBinary};
+
+            # a handy script to publish Docker images
+            publish-multi-arch-docker-image = pkgs.writeShellApplication {
+              name = "publish-multi-arch-docker-image";
+              runtimeInputs = with pkgs; [ coreutils skopeo ];
+              text = builtins.readFile ./.github/scripts/deploy-multi-arch.sh;
+            };
+
+            # a handy script to publish Docker images
+            publish-single-arch-docker-image = pkgs.writeShellApplication {
+              name = "publish-single-arch-docker-image";
+              runtimeInputs = with pkgs; [ coreutils skopeo ];
+              text = builtins.readFile ./.github/scripts/deploy-single-arch.sh;
+            };
+          };
+
+        # build an app per binary
+        apps = pkgs.lib.attrsets.genAttrs binaries
+          (binaryName:
+            flake-utils.lib.mkApp {
+              drv = self.packages.${localSystem}.${binaryName};
+              name = binaryName;
+            }
+          ) // {
+          # the default app is the app wrapping the default binary
+          default = self.apps.${localSystem}.${defaultBinary};
+        };
+
+        devShells = {
+          default = pkgs.mkShell {
+            # include dependencies of the default package
+            inputsFrom = [ self.packages.${localSystem}.default ];
+
+            # build-time inputs
+            nativeBuildInputs = [
+              # Development
+              pkgs.just
+              pkgs.moreutils
+              pkgs.nixpkgs-fmt
+              pkgs.nodejs_22
+              pkgs.git
+
+              # Rust
+              pkgs.bacon
+              pkgs.cargo-audit
+              pkgs.cargo-edit
+              pkgs.cargo-expand
+              pkgs.cargo-flamegraph
+              pkgs.cargo-insta
+              pkgs.cargo-machete
+              pkgs.cargo-nextest
+              pkgs.cargo-watch
+              rust.${localSystem}.rustToolchain
+            ];
+          };
+        };
+      });
 }

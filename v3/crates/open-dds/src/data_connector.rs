@@ -1,105 +1,24 @@
 use ndc_models;
+use ndc_models_v01;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 mod v1;
 
-pub use v1::{DataConnectorLinkV1, DataConnectorUrlV1 as DataConnectorUrl, ReadWriteUrls};
+pub use v1::{
+    DataConnectorArgumentPreset, DataConnectorArgumentPresetValue, DataConnectorLinkV1,
+    DataConnectorUrlV1 as DataConnectorUrl, HttpHeaders, HttpHeadersPreset, ReadWriteUrls,
+    ResponseHeaders,
+};
 
-use crate::{identifier::Identifier, impl_OpenDd_default_for};
+use crate::{identifier::Identifier, impl_OpenDd_default_for, str_newtype};
 
-/// The name of a data connector.
-#[derive(
-    Serialize,
-    Deserialize,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    JsonSchema,
-    derive_more::Display,
-    opendds_derive::OpenDd,
-)]
-pub struct DataConnectorName(pub Identifier);
-
-/// The name of an object type in a data connector.
-#[repr(transparent)]
-#[derive(
-    Serialize,
-    Deserialize,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    JsonSchema,
-    ref_cast::RefCast,
-    derive_more::Display,
-    opendds_derive::OpenDd,
-)]
-pub struct DataConnectorObjectType(pub String);
-
-/// The name of a scalar type in a data connector.
-#[repr(transparent)]
-#[derive(
-    Serialize,
-    Deserialize,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    JsonSchema,
-    ref_cast::RefCast,
-    derive_more::Display,
-    opendds_derive::OpenDd,
-)]
-pub struct DataConnectorScalarType(pub String);
-
-/// The name of an operator in a data connector.
-#[repr(transparent)]
-#[derive(
-    Serialize,
-    Deserialize,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    JsonSchema,
-    ref_cast::RefCast,
-    derive_more::Display,
-    opendds_derive::OpenDd,
-)]
-pub struct DataConnectorOperatorName(pub String);
-
-/// The name of a column in a data connector.
-#[repr(transparent)]
-#[derive(
-    Serialize,
-    Deserialize,
-    Clone,
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    JsonSchema,
-    ref_cast::RefCast,
-    derive_more::Display,
-    opendds_derive::OpenDd,
-)]
-pub struct DataConnectorColumnName(pub String);
+str_newtype!(DataConnectorName over Identifier | doc "The name of a data connector.");
+str_newtype!(CollectionName | doc "The name of a collection in a data connector.");
+str_newtype!(DataConnectorObjectType | doc "The name of an object type in a data connector.");
+str_newtype!(DataConnectorScalarType | doc "The name of a scalar type in a data connector.");
+str_newtype!(DataConnectorOperatorName | doc "The name of an operator in a data connector.");
+str_newtype!(DataConnectorColumnName | doc "The name of a column in a data connector.");
 
 #[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
 #[serde(tag = "version", content = "definition")]
@@ -136,9 +55,10 @@ impl DataConnectorLink {
                         "procedures": []
                     },
                     "capabilities": {
-                        "version": "0.1.0",
+                        "version": "0.1.3",
                         "capabilities": {
                             "query": {
+                                "nested_fields": {},
                                 "variables": {}
                             },
                             "mutation": {}
@@ -157,17 +77,30 @@ impl DataConnectorLink {
 }
 
 fn ndc_capabilities_response_v01_schema_reference(
-    _gen: &mut schemars::gen::SchemaGenerator,
+    _gen: &mut schemars::r#gen::SchemaGenerator,
 ) -> schemars::schema::Schema {
-    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.2/ndc-models/tests/json_schema/capabilities_response.jsonschema".into())
+    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.7/ndc-models/tests/json_schema/capabilities_response.jsonschema".into())
 }
 
 fn ndc_schema_response_v01_schema_reference(
-    _gen: &mut schemars::gen::SchemaGenerator,
+    _gen: &mut schemars::r#gen::SchemaGenerator,
 ) -> schemars::schema::Schema {
-    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.2/ndc-models/tests/json_schema/schema_response.jsonschema".into())
+    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.1.7/ndc-models/tests/json_schema/schema_response.jsonschema".into())
 }
 
+fn ndc_capabilities_response_v02_schema_reference(
+    _gen: &mut schemars::r#gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.2.11/ndc-models/tests/json_schema/capabilities_response.jsonschema".into())
+}
+
+fn ndc_schema_response_v02_schema_reference(
+    _gen: &mut schemars::r#gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    schemars::schema::Schema::new_ref("https://raw.githubusercontent.com/hasura/ndc-spec/v0.2.11/ndc-models/tests/json_schema/schema_response.jsonschema".into())
+}
+
+/// Versioned schema and capabilities for a data connector.
 #[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
 #[serde(tag = "version")]
 #[serde(rename_all = "camelCase")]
@@ -178,22 +111,41 @@ fn ndc_schema_response_v01_schema_reference(
 pub enum VersionedSchemaAndCapabilities {
     #[serde(rename = "v0.1")]
     #[opendd(rename = "v0.1")]
-    V01(SchemaAndCapabilitiesV01),
+    V01(Box<SchemaAndCapabilitiesV01>),
+    #[serde(rename = "v0.2")]
+    #[opendd(rename = "v0.2")]
+    V02(Box<SchemaAndCapabilitiesV02>),
 }
 
+/// Version 0.1 of schema and capabilities for a data connector.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 #[schemars(title = "SchemaAndCapabilitiesV01")]
 pub struct SchemaAndCapabilitiesV01 {
     #[schemars(schema_with = "ndc_schema_response_v01_schema_reference")]
-    pub schema: ndc_models::SchemaResponse,
+    pub schema: ndc_models_v01::SchemaResponse,
     #[schemars(schema_with = "ndc_capabilities_response_v01_schema_reference")]
-    pub capabilities: ndc_models::CapabilitiesResponse,
+    pub capabilities: ndc_models_v01::CapabilitiesResponse,
 }
 
 // Derive OpenDd for `SchemaAdnCapabilitiesV01` by serde Deserialize and schemars JsonSchema implementations.
 impl_OpenDd_default_for!(SchemaAndCapabilitiesV01);
+
+/// Version 0.2 of schema and capabilities for a data connector.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "SchemaAndCapabilitiesV02")]
+pub struct SchemaAndCapabilitiesV02 {
+    #[schemars(schema_with = "ndc_schema_response_v02_schema_reference")]
+    pub schema: ndc_models::SchemaResponse,
+    #[schemars(schema_with = "ndc_capabilities_response_v02_schema_reference")]
+    pub capabilities: ndc_models::CapabilitiesResponse,
+}
+
+// Derive OpenDd for `SchemaAdnCapabilitiesV02` by serde Deserialize and schemars JsonSchema implementations.
+impl_OpenDd_default_for!(SchemaAndCapabilitiesV02);
 
 #[cfg(test)]
 mod tests {
@@ -202,10 +154,51 @@ mod tests {
 
     #[test]
     fn test_upgrade() {
-        let v1: DataConnectorLink = crate::traits::OpenDd::deserialize(serde_json::json!(
-            {
-                "version": "v1",
-                "definition": {
+        let v1: DataConnectorLink = crate::traits::OpenDd::deserialize(
+            serde_json::json!(
+                {
+                    "version": "v1",
+                    "definition": {
+                        "name": "foo",
+                        "url": {
+                            "singleUrl": {
+                                "value": "http://foo"
+                            }
+                        },
+                        "headers": {
+                            "Authorization": {
+                                "value": "Bearer: abc"
+                            }
+                        },
+                        "schema": {
+                            "version": "v0.1",
+                            "capabilities": {
+                                "version": "0.1.3",
+                                "capabilities": {
+                                    "query": {
+                                        "nested_fields": {}
+                                    },
+                                    "mutation": {}
+                                }
+                            },
+                            "schema": {
+                                "scalar_types": {},
+                                "object_types": {},
+                                "collections": [],
+                                "functions": [],
+                                "procedures": []
+                            }
+                        }
+                    }
+                }
+            ),
+            jsonpath::JSONPath::new(),
+        )
+        .unwrap();
+
+        let upgraded: DataConnectorLinkV1 = crate::traits::OpenDd::deserialize(
+            serde_json::json!(
+                {
                     "name": "foo",
                     "url": {
                         "singleUrl": {
@@ -220,9 +213,11 @@ mod tests {
                     "schema": {
                         "version": "v0.1",
                         "capabilities": {
-                            "version": "1",
+                            "version": "0.1.3",
                             "capabilities": {
-                                "query": {},
+                                "query": {
+                                  "nested_fields": {}
+                                },
                                 "mutation": {}
                             }
                         },
@@ -235,42 +230,9 @@ mod tests {
                         }
                     }
                 }
-            }
-        ))
-        .unwrap();
-
-        let upgraded: DataConnectorLinkV1 = crate::traits::OpenDd::deserialize(serde_json::json!(
-            {
-                "name": "foo",
-                "url": {
-                    "singleUrl": {
-                        "value": "http://foo"
-                    }
-                },
-                "headers": {
-                    "Authorization": {
-                        "value": "Bearer: abc"
-                    }
-                },
-                "schema": {
-                    "version": "v0.1",
-                    "capabilities": {
-                        "version": "1",
-                        "capabilities": {
-                            "query": {},
-                            "mutation": {}
-                        }
-                    },
-                    "schema": {
-                        "scalar_types": {},
-                        "object_types": {},
-                        "collections": [],
-                        "functions": [],
-                        "procedures": []
-                    }
-                }
-            }
-        ))
+            ),
+            jsonpath::JSONPath::new(),
+        )
         .unwrap();
 
         assert_eq!(v1.upgrade(), upgraded);

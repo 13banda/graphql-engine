@@ -1,11 +1,11 @@
 import React from 'react';
-import { StoryObj, Meta } from '@storybook/react';
+import { StoryObj, Meta } from '@storybook/react-webpack5';
 import { z } from 'zod';
-import { SimpleForm } from '../../../../new-components/Form';
+import { SimpleForm } from '@hasura/shared/ui';
 import { useTableMachine } from '../hooks/useTableMachine';
 
 import {
-  EditableCell,
+  PermissionAccessCell,
   EditableCellProps,
   InputCell,
   InputCellProps,
@@ -15,7 +15,12 @@ export default {
   component: InputCell,
   decorators: [
     (StoryComponent: React.FC) => (
-      <SimpleForm schema={z.any()} onSubmit={() => {}}>
+      <SimpleForm
+        schema={z.any()}
+        onSubmit={() => {
+          /* noop */
+        }}
+      >
         <StoryComponent />
       </SimpleForm>
     ),
@@ -24,7 +29,7 @@ export default {
 } as Meta;
 
 export const InputCellComponent: StoryObj<InputCellProps> = {
-  render: args => {
+  render: (args) => {
     const machine = useTableMachine();
 
     return <InputCell {...args} machine={machine} />;
@@ -39,7 +44,7 @@ export const InputCellComponent: StoryObj<InputCellProps> = {
 };
 
 export const InputCellComponentNewRole: StoryObj<InputCellProps> = {
-  render: args => {
+  render: (args) => {
     const machine = useTableMachine();
 
     return <InputCell {...args} machine={machine} />;
@@ -54,7 +59,7 @@ export const InputCellComponentNewRole: StoryObj<InputCellProps> = {
 };
 
 export const EditableCellComponent: StoryObj<EditableCellProps> = {
-  render: args => (
+  render: (args) => (
     <table>
       <thead>
         <tr>
@@ -66,10 +71,10 @@ export const EditableCellComponent: StoryObj<EditableCellProps> = {
       </thead>
       <tbody>
         <tr>
-          <EditableCell {...args} />
-          <EditableCell {...{ ...args, isCurrentEdit: true }} />
-          <EditableCell {...{ ...args, access: 'noAccess' }} />
-          <EditableCell {...{ ...args, access: 'fullAccess' }} />
+          <PermissionAccessCell {...args} />
+          <PermissionAccessCell {...{ ...args, isCurrentEdit: true }} />
+          <PermissionAccessCell {...{ ...args, access: 'noAccess' }} />
+          <PermissionAccessCell {...{ ...args, access: 'fullAccess' }} />
         </tr>
       </tbody>
     </table>

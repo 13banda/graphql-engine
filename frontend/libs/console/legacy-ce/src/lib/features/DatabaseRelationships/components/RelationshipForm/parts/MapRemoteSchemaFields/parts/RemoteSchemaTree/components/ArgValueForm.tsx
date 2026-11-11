@@ -1,8 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { FaCircle } from 'react-icons/fa';
 import { GraphQLType } from 'graphql';
-
-import { useDebouncedEffect } from '../../../../../../../../../hooks/useDebounceEffect';
+import { useDebouncedEffect } from '@hasura/shared/hooks';
 import {
   ArgValue,
   ArgValueKind,
@@ -14,7 +13,7 @@ import StaticArgValue from './StaticArgValue';
 
 const fieldStyle =
   'block w-full h-input shadow-sm rounded border border-gray-300 hover:border-gray-400 focus:outline-0 focus:ring-2 focus:ring-yellow-200 focus:border-yellow-400';
-export interface ArgValueFormProps {
+interface ArgValueFormProps {
   argKey: string;
   relationshipFields: RelationshipFields[];
   setRelationshipFields: React.Dispatch<
@@ -39,15 +38,21 @@ export const ArgValueForm = ({
   argType,
 }: ArgValueFormProps) => {
   const [localArgValue, setLocalArgValue] = useState(argValue);
+  const [prevArgValue, setPrevArgValue] = useState(argValue);
 
-  useEffect(() => {
+  // Keep the locally-edited value in sync when the `argValue` prop changes.
+  // This runs during render (React's "adjust state while rendering" pattern)
+  // instead of inside an effect, so it mirrors the previous sync behavior
+  // without triggering a cascading render.
+  if (argValue !== prevArgValue) {
+    setPrevArgValue(argValue);
     setLocalArgValue(argValue);
-  }, [argValue]);
+  }
 
   useDebouncedEffect(
     () => {
       setRelationshipFields(
-        relationshipFields.map(f => {
+        relationshipFields.map((f) => {
           if (f.key === argKey) {
             return {
               ...f,
@@ -58,16 +63,16 @@ export const ArgValueForm = ({
             };
           }
           return f;
-        })
+        }),
       );
     },
     400,
-    [localArgValue.value]
+    [localArgValue.value],
   );
 
   const changeInputType = (e: React.ChangeEvent<HTMLSelectElement>) => {
     setRelationshipFields(
-      relationshipFields.map(f => {
+      relationshipFields.map((f) => {
         if (f.key === argKey) {
           return {
             ...f,
@@ -79,13 +84,13 @@ export const ArgValueForm = ({
           };
         }
         return f;
-      })
+      }),
     );
   };
 
   const changeInputColumnValue = (e: React.ChangeEvent<HTMLSelectElement>) => {
     setRelationshipFields(
-      relationshipFields.map(f => {
+      relationshipFields.map((f) => {
         if (f.key === argKey) {
           return {
             ...f,
@@ -96,7 +101,7 @@ export const ArgValueForm = ({
           };
         }
         return f;
-      })
+      }),
     );
   };
 
@@ -106,8 +111,8 @@ export const ArgValueForm = ({
 
   return (
     <div
-      onClick={e => e.stopPropagation()}
-      className="rounded bg-white shadow pt-xs pb-sm px-sm my-sm -ml-8 border-l-2 border-yellow-400 w-full"
+      onClick={(e) => e.stopPropagation()}
+      className="rounded bg-white shadow pt-xs pb-2 px-sm my-sm -ml-8 border-l-2 border-yellow-400 w-full"
     >
       <div className="grid grid-cols-2 gap-2">
         <div>
@@ -120,7 +125,7 @@ export const ArgValueForm = ({
             data-test="select-argument"
           >
             <option disabled>Select an arugment...</option>
-            {argValueTypeOptions.map(option => (
+            {argValueTypeOptions.map((option) => (
               <option key={option.key} value={option.key}>
                 {option.content}
               </option>
@@ -144,7 +149,7 @@ export const ArgValueForm = ({
                 <option value="" disabled>
                   Select Field...
                 </option>
-                {(fields ?? []).map(option => (
+                {(fields ?? []).map((option) => (
                   <option key={option} value={option}>
                     {option}
                   </option>

@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
-use axum::{http::StatusCode, Json};
+use axum::{Json, http::StatusCode};
 use ndc_models;
 
-use crate::query::Result;
+use crate::{
+    arguments::{argument_any, argument_string},
+    query::Result,
+};
 
 pub(crate) fn definition() -> ndc_models::ObjectType {
     ndc_models::ObjectType {
@@ -14,6 +17,7 @@ pub(crate) fn definition() -> ndc_models::ObjectType {
                 ndc_models::ObjectField {
                     description: Some("The actor's primary key".into()),
                     r#type: ndc_models::Type::Named { name: "Int".into() },
+                    arguments: argument_any(),
                 },
             ),
             (
@@ -23,6 +27,7 @@ pub(crate) fn definition() -> ndc_models::ObjectType {
                     r#type: ndc_models::Type::Named {
                         name: "String".into(),
                     },
+                    arguments: argument_string(),
                 },
             ),
             (
@@ -30,6 +35,7 @@ pub(crate) fn definition() -> ndc_models::ObjectType {
                 ndc_models::ObjectField {
                     description: Some("The actor's movie ID".into()),
                     r#type: ndc_models::Type::Named { name: "Int".into() },
+                    arguments: argument_any(),
                 },
             ),
             (
@@ -37,13 +43,45 @@ pub(crate) fn definition() -> ndc_models::ObjectType {
                 ndc_models::ObjectField {
                     description: Some("The actor's favourite author ID".into()),
                     r#type: ndc_models::Type::Named { name: "Int".into() },
+                    arguments: argument_any(),
+                },
+            ),
+            (
+                "favourite_big_integer".into(),
+                ndc_models::ObjectField {
+                    description: Some("The actor's favourite big integer".into()),
+                    r#type: ndc_models::Type::Named {
+                        name: "BigInt".into(),
+                    },
+                    arguments: argument_any(),
+                },
+            ),
+            (
+                "favourite_int_64".into(),
+                ndc_models::ObjectField {
+                    description: Some("The actor's favourite int 64".into()),
+                    r#type: ndc_models::Type::Named {
+                        name: "Int64".into(),
+                    },
+                    arguments: argument_any(),
+                },
+            ),
+            (
+                "country_id".into(),
+                ndc_models::ObjectField {
+                    description: Some("The actor's country of origin".into()),
+                    r#type: ndc_models::Type::Named { name: "Int".into() },
+                    arguments: argument_any(),
                 },
             ),
         ]),
+        foreign_keys: BTreeMap::new(),
     }
 }
 
-pub(crate) fn get_actor_movie_id(actor: &BTreeMap<String, serde_json::Value>) -> Result<i32> {
+pub(crate) fn get_actor_movie_id(
+    actor: &BTreeMap<ndc_models::FieldName, serde_json::Value>,
+) -> Result<i32> {
     let actor_movie_id = actor.get("movie_id").ok_or((
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ndc_models::ErrorResponse {

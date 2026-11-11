@@ -13,14 +13,27 @@ path = "src/main.rs"
 bench = false
 
 [dependencies]
-anyhow = "1"
-axum = { version = "0.6", features = ["http2"] }
-env_logger = "0.11"
-indexmap = "2"
-ndc-models = { git = "https://github.com/hasura/ndc-spec.git", tag = "v0.1.2" }
-regex = "1"
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+axum-ext = { path = "../utils/axum-ext" }
+
+anyhow = { workspace = true }
+axum = { workspace = true }
+datafusion = { workspace = true }
+datafusion-functions-json = { workspace = true }
+env_logger = { workspace = true }
+futures = { workspace = true }
+indexmap = { workspace = true }
+iso8601 = { workspace = true }
+itertools = { workspace = true }
+ndc-models = { workspace = true }
+regex = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tower-http = { workspace = true }
+uuid = { workspace = true }
+serde_arrow = { workspace = true }
+rand = { workspace = true }
 
 [lints]
 workspace = true

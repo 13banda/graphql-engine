@@ -2,7 +2,7 @@
 
 Trigger webhooks on database events using Hasura GraphQL Engine's event triggers.
 
-![Event triggers demo](assets/event-triggers.gif)
+![Event triggers demo](https://github.com/hasura/graphql-engine/raw/5fa3e0d2b617a4ae85f65491c5ff6c056cb612de/assets/event-triggers.gif)
 
 ## Highlights
 
@@ -104,3 +104,4 @@ Propagate event-driven and asynchronous information to UI clients easily with Gr
 This document is available in the following translations:
 
 - [French :fr:](translations/event-triggers.french.md)
+- [中文 :cn:](translations/event-triggers.chinese.md)

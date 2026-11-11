@@ -1,9 +1,6 @@
 import React from 'react';
 import { z } from 'zod';
-import {
-  CopyableInputField,
-  useConsoleForm,
-} from '../../../../../new-components/Form';
+import { CopyableInputField, useConsoleForm } from '@hasura/shared/ui';
 import { buildAgentPath, buildDockerCommand } from '../utils';
 import { AgentFormValues } from './useAgentForm';
 
@@ -25,23 +22,35 @@ export const useDockerCommandForm = ({
     },
   });
 
-  React.useEffect(() => {
-    methods.setValue('command', buildDockerCommand(containerName, port));
-  }, [containerName, port]);
+  // `setValue` is referentially stable across renders (react-hook-form), so
+  // depending on it (rather than the whole `methods` object) keeps these
+  // field-sync effects from re-running on every render.
+  const { setValue } = methods;
 
   React.useEffect(() => {
-    methods.setValue('agentPath', buildAgentPath(path, port, protocol));
-  }, [path, port, protocol]);
+    setValue('command', buildDockerCommand(containerName, port));
+  }, [setValue, containerName, port]);
+
+  React.useEffect(() => {
+    setValue('agentPath', buildAgentPath(path, port, protocol));
+  }, [setValue, path, port, protocol]);
 
   const DockerCommandForm = () => (
-    <Form onSubmit={data => {}}>
+    <Form
+      onSubmit={() => {
+        /* noop */
+      }}
+    >
       <CopyableInputField
-        inputClassName="text-xs"
         label="Install Command"
         tooltip="Use this Docker command to install the Hasura Data Connector Agent"
-        disabled
         learnMoreLink="https://hasura.io/blog/hasura-graphql-data-connectors/"
         name="command"
+        noErrorPlaceholder
+        fieldProps={{
+          className: 'text-xs',
+          disabled: true,
+        }}
       />
     </Form>
   );

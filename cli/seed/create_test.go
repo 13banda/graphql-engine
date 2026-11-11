@@ -1,17 +1,15 @@
 package seed
 
 import (
-	"io/ioutil"
+	"io"
+	"os"
 	"testing"
 
-	"github.com/stretchr/testify/require"
-
+	"github.com/hasura/graphql-engine/cli/v2/internal/hasura"
 	"github.com/hasura/graphql-engine/cli/v2/internal/hasura/pgdump"
 	"github.com/hasura/graphql-engine/cli/v2/internal/hasura/v1query"
-
 	"github.com/hasura/graphql-engine/cli/v2/internal/testutil"
-
-	"github.com/hasura/graphql-engine/cli/v2/internal/hasura"
+	"github.com/stretchr/testify/require"
 )
 
 func TestDriver_ExportDatadump(t *testing.T) {
@@ -50,7 +48,9 @@ func TestDriver_ExportDatadump(t *testing.T) {
 				tableNames: []string{"articles", "authors"},
 				sourceName: "default",
 			},
-			`SET check_function_bodies = false;
+			`\restrict hasura
+SET transaction_timeout = 0;
+SET check_function_bodies = false;
 INSERT INTO public.articles (id, title, content, rating, author_id) VALUES (1, 'test1', 'test1', 1, 4);
 INSERT INTO public.articles (id, title, content, rating, author_id) VALUES (2, 'test2', 'test1', 1, 4);
 INSERT INTO public.articles (id, title, content, rating, author_id) VALUES (3, 'test3', 'test1', 1, 4);
@@ -59,18 +59,19 @@ INSERT INTO public.authors (id, name) VALUES (4, 'test2');
 SELECT pg_catalog.setval('public.articles_author_id_seq', 1, false);
 SELECT pg_catalog.setval('public.articles_id_seq', 1, false);
 SELECT pg_catalog.setval('public.authors_id_seq', 1, false);
+\unrestrict hasura
 `,
 			false,
 			func(t *testing.T) {
 				c := testutil.NewHttpcClient(t, port, nil)
 				q := v1query.New(c, "v2/query")
-				b, err := ioutil.ReadFile("testdata/seeds/articles.sql")
+				b, err := os.ReadFile("testdata/seeds/articles.sql")
 				require.NoError(t, err)
 				_, err = q.PGRunSQL(hasura.PGRunSQLInput{
 					SQL: string(b),
 				})
 				require.NoError(t, err)
-				b, err = ioutil.ReadFile("testdata/seeds/authors.sql")
+				b, err = os.ReadFile("testdata/seeds/authors.sql")
 				require.NoError(t, err)
 				_, err = q.PGRunSQL(hasura.PGRunSQLInput{
 					SQL: string(b),
@@ -94,7 +95,7 @@ SELECT pg_catalog.setval('public.authors_id_seq', 1, false);
 			if tt.wantErr {
 				return
 			}
-			gotb, err := ioutil.ReadAll(got)
+			gotb, err := io.ReadAll(got)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, string(gotb))
 		})

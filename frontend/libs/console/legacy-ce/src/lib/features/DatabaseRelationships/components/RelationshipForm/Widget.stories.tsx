@@ -1,5 +1,5 @@
-import { StoryFn, Meta } from '@storybook/react';
-import { ReactQueryDecorator } from '../../../../storybook/decorators/react-query';
+import { StoryFn, Meta } from '@storybook/react-webpack5';
+import { ReactQueryDecorator } from '@hasura/shared/testing';
 import { Widget } from './Widget';
 
 export default {
@@ -11,8 +11,14 @@ export const CreateMode: StoryFn<typeof Widget> = () => (
   <Widget
     dataSourceName="chinook"
     table={{ name: 'Album', schema: 'public' }}
-    onSuccess={() => {}}
-    onError={() => {}}
-    onCancel={() => {}}
+    onSuccess={() => {
+      /* noop */
+    }}
+    onError={() => {
+      /* noop */
+    }}
+    onCancel={() => {
+      /* noop */
+    }}
   />
 );

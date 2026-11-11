@@ -7,3 +7,8 @@
 /apps/console-ee/src/assets/
 /apps/console-ce-e2e/**/snapshots.js
 /snapshots.js
+/.yarn
+/tmp
+/.nx/cache
+/.nx/workspace-data
+.nx/self-healing

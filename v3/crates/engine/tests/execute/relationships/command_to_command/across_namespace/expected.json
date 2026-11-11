@@ -4,6 +4,15 @@
       "getAllActors": [
         {
           "MovieFromActor": {
+            "movie_id": 2,
+            "rating": 5,
+            "title": "Slumdog Millionaire"
+          },
+          "actor_id": 0,
+          "name": "Peter"
+        },
+        {
+          "MovieFromActor": {
             "movie_id": 1,
             "rating": 4,
             "title": "Titanic"
@@ -72,7 +81,7 @@
     "data": null,
     "errors": [
       {
-        "message": "validation failed: field rating on type CommandMovie is not allowed for user"
+        "message": "validation failed: no such field on type CommandMovie: rating"
       }
     ]
   }

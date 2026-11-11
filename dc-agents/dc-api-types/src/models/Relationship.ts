@@ -1,10 +1,9 @@
+/* generated using openapi-typescript-codegen -- do not edit */
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
-
 import type { RelationshipType } from './RelationshipType';
 import type { Target } from './Target';
-
 export type Relationship = {
   /**
    * A mapping between columns on the source table to columns on the target table

@@ -1,16 +1,15 @@
 import React, { ReactElement, useMemo, useState } from 'react';
-
-import { Link } from 'react-router';
 import { FaDatabase } from 'react-icons/fa';
-
-import styles from './LeftSubSidebar.module.scss';
+import { Flex, Text } from '@radix-ui/themes';
+import { RelativeLink } from '@hasura/shared/ui';
 
 type CollapsibleItemsProps = {
   source: string;
   currentItem?: { name: string; source: string };
   getServiceEntityLink: (v: string) => string;
   items: { name: string; source: string }[];
-  icon: ReactElement;
+  icon: ReactElement<any>;
+  defaultOpen?: boolean;
 };
 const CollapsibleItems: React.FC<CollapsibleItemsProps> = ({
   currentItem,
@@ -18,79 +17,124 @@ const CollapsibleItems: React.FC<CollapsibleItemsProps> = ({
   getServiceEntityLink,
   items,
   icon,
+  defaultOpen = false,
 }) => {
-  const [isOpen, setIsOpen] = useState(true);
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  const [prevDefaultOpen, setPrevDefaultOpen] = useState(defaultOpen);
 
+  // Keep the open state in sync with the `defaultOpen` prop by adjusting state
+  // during render instead of in an effect (avoids a cascading render):
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
+  if (prevDefaultOpen !== defaultOpen) {
+    setPrevDefaultOpen(defaultOpen);
+    setIsOpen(defaultOpen);
+  }
   return (
-    <div className={styles.padd_bottom_small}>
-      <div
-        onClick={() => setIsOpen(prev => !prev)}
-        onKeyDown={() => setIsOpen(prev => !prev)}
+    <div className="max-h-90 overflow-y-auto">
+      <Flex
+        onClick={() => setIsOpen((prev) => !prev)}
+        onKeyDown={() => setIsOpen((prev) => !prev)}
         role="button"
-        className={styles.padd_bottom_small}
+        align="center"
+        className="cursor-pointer"
+        gap="2"
       >
-        <span className={`${styles.title} ${isOpen ? '' : styles.titleClosed}`}>
-          <FaDatabase /> {source}
-        </span>
-      </div>
-      {isOpen
-        ? items.map(({ name }) => (
-            <li
-              className={
-                currentItem && currentItem.name === name
-                  ? styles.activeLink
-                  : ''
-              }
+        <FaDatabase className="shrink-0" />{' '}
+        <Text weight="medium" className="truncate" title={source}>
+          {source}
+        </Text>
+      </Flex>
+      {isOpen ? (
+        <Flex direction="column" gap="1" className="pl-6">
+          {items.map(({ name }) => (
+            <RelativeLink
               key={name}
-              data-test={`action-sidebar-links-${name}`}
+              to={getServiceEntityLink(name)}
+              data-test={name}
+              className="block min-w-0"
+              size="2"
+              color={
+                currentItem && currentItem.name === name ? 'indigo' : 'gray'
+              }
+              weight={
+                currentItem && currentItem.name === name ? 'medium' : 'regular'
+              }
             >
-              <Link to={getServiceEntityLink(name)} data-test={name}>
-                {icon}
-                {name}
-              </Link>
-            </li>
-          ))
-        : null}
+              <Flex align="center" gap="2" className="min-w-0">
+                <span className="flex shrink-0">{icon}</span>
+                <span className="truncate" title={name}>
+                  {name}
+                </span>
+              </Flex>
+            </RelativeLink>
+          ))}
+        </Flex>
+      ) : null}
     </div>
   );
 };
 
+type SourceItem = {
+  name: string;
+  source: string;
+};
+
 type TreeViewProps = {
   service: string;
-  items: { name: string; source: string }[];
-  currentItem?: { name: string; source: string };
+  items: SourceItem[];
+  currentItem?: SourceItem;
   getServiceEntityLink: (name: string) => string;
-  icon: ReactElement;
+  searchText?: string;
+  icon: ReactElement<any>;
 };
+
 export const TreeView: React.FC<TreeViewProps> = ({
   items,
   service,
+  currentItem,
+  searchText,
   ...rest
 }) => {
   const itemsBySource = useMemo(() => {
-    return items.reduce((acc, item) => {
-      return {
-        ...acc,
-        [item.source]: acc[item.source] ? [...acc[item.source], item] : [item],
-      };
-    }, {} as Record<string, { name: string; source: string }[]>);
+    return items.reduce(
+      (acc, item) => {
+        return {
+          ...acc,
+          [item.source]: acc[item.source]
+            ? [...acc[item.source], item]
+            : [item],
+        };
+      },
+      {} as Record<string, { name: string; source: string }[]>,
+    );
   }, [items]);
 
   if (items.length === 0) {
     return (
-      <li className={styles.noChildren} data-test="sidebar-no-services">
-        <i>No {service} available</i>
-      </li>
+      <Text
+        className="italic"
+        align="center"
+        as="div"
+        data-test="sidebar-no-services"
+      >
+        No {service} available
+      </Text>
     );
   }
 
   return (
-    <div className={styles.treeNav}>
-      {Object.keys(itemsBySource).map(source => (
+    <div>
+      {Object.keys(itemsBySource).map((source) => (
         <CollapsibleItems
+          {...rest}
+          key={source}
           source={source}
           items={itemsBySource[source]}
-          {...rest}
+          currentItem={currentItem}
+          defaultOpen={
+            source === currentItem?.source ||
+            (Boolean(searchText) && itemsBySource[source].length > 0)
+          }
         />
       ))}
     </div>

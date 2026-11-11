@@ -11,7 +11,6 @@ import Control.Concurrent.Extended (concurrentlyEIO, forConcurrentlyEIO)
 import Control.Concurrent.STM qualified as STM
 import Control.Lens hiding (contexts)
 import Control.Monad.Memoize
-import Data.Aeson.Ordered qualified as JO
 import Data.HashMap.Strict qualified as HashMap
 import Data.HashMap.Strict.InsOrd qualified as InsOrdHashMap
 import Data.HashSet qualified as Set
@@ -19,9 +18,11 @@ import Data.List.Extended (duplicates)
 import Data.Text.Extended
 import Data.Text.NonEmpty qualified as NT
 import Database.PG.Query.Pool qualified as PG
+import Hasura.Authentication.Role (RoleName, adminRoleName, mkRoleNameSafe)
 import Hasura.Base.Error
 import Hasura.Base.ErrorMessage
 import Hasura.Base.ToErrorValue
+import Hasura.EncJSON
 import Hasura.Function.Cache
 import Hasura.GraphQL.ApolloFederation
 import Hasura.GraphQL.Context
@@ -61,7 +62,6 @@ import Hasura.RQL.Types.CustomTypes
 import Hasura.RQL.Types.Metadata.Object
 import Hasura.RQL.Types.Permission
 import Hasura.RQL.Types.Relationships.Remote
-import Hasura.RQL.Types.Roles (RoleName, adminRoleName, mkRoleNameSafe)
 import Hasura.RQL.Types.Schema.Options (SchemaOptions (..))
 import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache hiding (askTableInfo)
@@ -70,6 +70,7 @@ import Hasura.RQL.Types.SourceCustomization as SC
 import Hasura.RemoteSchema.Metadata
 import Hasura.RemoteSchema.SchemaCache
 import Hasura.SQL.AnyBackend qualified as AB
+import Hasura.Server.Init.Config (RelayModeStatus (..), isRelayEnabled)
 import Hasura.Server.Init.Logging
 import Hasura.Server.Types
 import Hasura.StoredProcedure.Cache (StoredProcedureCache, _spiReturns)
@@ -108,12 +109,12 @@ buildGQLContext ::
   ( MonadError QErr m,
     MonadIO m
   ) =>
-  SchemaSampledFeatureFlags ->
   Options.InferFunctionPermissions ->
   Options.RemoteSchemaPermissions ->
   HashSet ExperimentalFeature ->
   SQLGenCtx ->
   ApolloFederationStatus ->
+  RelayModeStatus ->
   SourceCache ->
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
   ActionCache ->
@@ -134,12 +135,12 @@ buildGQLContext ::
       SchemaRegistryAction
     )
 buildGQLContext
-  sampledFeatureFlags
   functionPermissions
   remoteSchemaPermissions
   experimentalFeatures
   sqlGen
   apolloFederationStatus
+  relayMode
   sources
   allRemoteSchemas
   allActions
@@ -156,46 +157,53 @@ buildGQLContext
         allLogicalModelRoles = Set.fromList $ getLogicalModelRoles =<< HashMap.elems sources
         allRoles = actionRoles <> allTableRoles <> allLogicalModelRoles
 
-    contexts <-
-      -- Buld role contexts in parallel. We'd prefer deterministic parallelism
-      -- but that isn't really acheivable (see mono #3829). NOTE: the admin role
-      -- will still be a bottleneck here, even on huge_schema which has many
-      -- roles.
-      fmap HashMap.fromList
-        $ forConcurrentlyEIO 10 (Set.toList allRoles)
-        $ \role -> do
-          (role,)
-            <$> concurrentlyEIO
-              ( buildRoleContext
-                  sampledFeatureFlags
-                  (sqlGen, functionPermissions)
-                  sources
-                  allRemoteSchemas
-                  allActionInfos
-                  customTypes
-                  role
-                  remoteSchemaPermissions
-                  experimentalFeatures
-                  apolloFederationStatus
-                  mSchemaRegistryContext
-              )
-              ( buildRelayRoleContext
-                  (sqlGen, functionPermissions)
-                  sources
-                  allActionInfos
-                  customTypes
-                  role
-                  experimentalFeatures
-                  sampledFeatureFlags
-              )
-    let hasuraContexts = fst <$> contexts
-        relayContexts = snd <$> contexts
+    -- Build role contexts in parallel. We'd prefer deterministic parallelism
+    -- but that isn't really acheivable (see mono #3829). NOTE: the admin role
+    -- will still be a bottleneck here, even on huge_schema which has many
+    -- roles.
+    let buildHasuraRoleContext role =
+          buildRoleContext
+            (sqlGen, functionPermissions)
+            sources
+            allRemoteSchemas
+            allActionInfos
+            customTypes
+            role
+            remoteSchemaPermissions
+            experimentalFeatures
+            apolloFederationStatus
+            mSchemaRegistryContext
+    (hasuraContexts, relayContexts) <-
+      if isRelayEnabled relayMode
+        then do
+          contexts <-
+            fmap HashMap.fromList
+              $ forConcurrentlyEIO 10 (Set.toList allRoles)
+              $ \role ->
+                (role,)
+                  <$> concurrentlyEIO
+                    (buildHasuraRoleContext role)
+                    ( buildRelayRoleContext
+                        (sqlGen, functionPermissions)
+                        sources
+                        allActionInfos
+                        customTypes
+                        role
+                        experimentalFeatures
+                    )
+          pure (fst <$> contexts, snd <$> contexts)
+        else do
+          hctxs <-
+            fmap HashMap.fromList
+              $ forConcurrentlyEIO 10 (Set.toList allRoles)
+              $ \role -> (role,) <$> buildHasuraRoleContext role
+          pure (hctxs, HashMap.empty)
 
     adminIntrospection <-
       case HashMap.lookup adminRoleName hasuraContexts of
         Just (_context, _errors, introspection) -> pure introspection
         Nothing -> throw500 "buildGQLContext failed to build for the admin role"
-    (unauthenticated, unauthenticatedRemotesErrors) <- unauthenticatedContext (sqlGen, functionPermissions) sources allRemoteSchemas experimentalFeatures sampledFeatureFlags remoteSchemaPermissions
+    (unauthenticated, unauthenticatedRemotesErrors) <- unauthenticatedContext (sqlGen, functionPermissions) sources allRemoteSchemas experimentalFeatures remoteSchemaPermissions
 
     writeToSchemaRegistryAction <-
       forM mSchemaRegistryContext $ \schemaRegistryCtx -> do
@@ -253,7 +261,7 @@ buildSchemaOptions ::
   HashSet ExperimentalFeature ->
   SchemaOptions
 buildSchemaOptions
-  ( SQLGenCtx stringifyNum dangerousBooleanCollapse _nullInNonNullableVariables remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput,
+  ( SQLGenCtx stringifyNum dangerousBooleanCollapse _nullInNonNullableVariables noNullUnboundVariableDefault removeEmptySubscriptionResponses remoteNullForwardingPolicy optimizePermissionFilters bigqueryStringNumericInput namingConventionSep2023,
     functionPermsCtx
     )
   expFeatures =
@@ -283,14 +291,19 @@ buildSchemaOptions
         soPostgresArrays =
           if EFDisablePostgresArrays `Set.member` expFeatures
             then Options.DontUsePostgresArrays
-            else Options.UsePostgresArrays
+            else Options.UsePostgresArrays,
+        soNoNullUnboundVariableDefault =
+          noNullUnboundVariableDefault,
+        soRemoveEmptySubscriptionResponses =
+          removeEmptySubscriptionResponses,
+        soNamingConventionSep2023 =
+          namingConventionSep2023
       }
 
 -- | Build the @QueryHasura@ context for a given role.
 buildRoleContext ::
   forall m.
   (MonadError QErr m, MonadIO m) =>
-  SchemaSampledFeatureFlags ->
   (SQLGenCtx, Options.InferFunctionPermissions) ->
   SourceCache ->
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
@@ -302,7 +315,7 @@ buildRoleContext ::
   ApolloFederationStatus ->
   Maybe SchemaRegistryContext ->
   m RoleContextValue
-buildRoleContext sampledFeatureFlags options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
+buildRoleContext options sources remotes actions customTypes role remoteSchemaPermsCtx expFeatures apolloFederationStatus mSchemaRegistryContext = do
   let schemaOptions = buildSchemaOptions options expFeatures
       schemaContext =
         SchemaContext
@@ -316,23 +329,12 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
               IncludeRemoteSourceRelationship
           )
           role
-          sampledFeatureFlags
   runMemoizeT $ do
     -- build all sources (`apolloFedTableParsers` contains all the parsers and
     -- type names, which are eligible for the `_Entity` Union)
     (sourcesQueryFields, sourcesMutationFrontendFields, sourcesMutationBackendFields, sourcesSubscriptionFields, apolloFedTableParsers) <-
       fmap mconcat $ for (toList sources) \sourceInfo ->
         AB.dispatchAnyBackend @BackendSchema sourceInfo $ buildSource schemaContext schemaOptions
-
-    -- build all remote schemas
-    -- we only keep the ones that don't result in a name conflict
-    (remoteSchemaFields, !remoteSchemaErrors) <-
-      runRemoteSchema schemaContext (soRemoteNullForwardingPolicy schemaOptions)
-        $ buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationBackendFields role remoteSchemaPermsCtx
-    let remotesQueryFields = concatMap (\(n, rf) -> (n,) <$> piQuery rf) remoteSchemaFields
-        remotesMutationFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piMutation rf) remoteSchemaFields
-        remotesSubscriptionFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piSubscription rf) remoteSchemaFields
-        apolloQueryFields = apolloRootFields apolloFederationStatus apolloFedTableParsers
 
     -- build all actions
     -- we use the source context due to how async query relationships are implemented
@@ -344,6 +346,16 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
           mutationFields <- buildActionMutationFields customTypes action
           subscriptionFields <- buildActionSubscriptionFields customTypes action
           pure (queryFields, mutationFields, subscriptionFields)
+
+    -- build all remote schemas
+    -- we only keep the ones that don't result in a name conflict
+    (remoteSchemaFields, !remoteSchemaErrors) <-
+      runRemoteSchema schemaContext (soRemoteNullForwardingPolicy schemaOptions)
+        $ buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationBackendFields actionsQueryFields actionsMutationFields role remoteSchemaPermsCtx
+    let remotesQueryFields = concatMap (\(n, rf) -> (n,) <$> piQuery rf) remoteSchemaFields
+        remotesMutationFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piMutation rf) remoteSchemaFields
+        remotesSubscriptionFields = concat $ mapMaybe (\(n, rf) -> fmap (n,) <$> piSubscription rf) remoteSchemaFields
+        apolloQueryFields = apolloRootFields apolloFederationStatus apolloFedTableParsers
 
     mutationParserFrontend <-
       buildMutationParser sourcesMutationFrontendFields remotesMutationFields actionsMutationFields
@@ -390,15 +402,20 @@ buildRoleContext sampledFeatureFlags options sources remotes actions customTypes
         (P.parserType <$> mutationParserFrontend)
         (P.parserType <$> subscriptionParser)
 
+    let queryRootFieldNamesFrontend = queryRootFieldNamesOf queryParserFrontend
+        queryRootFieldNamesBackend = queryRootFieldNamesOf queryParserBackend
+
     -- (since we're running this in parallel in caller, be strict)
     let !frontendContext =
           GQLContext
             (finalizeParser queryParserFrontend)
+            queryRootFieldNamesFrontend
             (finalizeParser <$> mutationParserFrontend)
             (finalizeParser <$> subscriptionParser)
         !backendContext =
           GQLContext
             (finalizeParser queryParserBackend)
+            queryRootFieldNamesBackend
             (finalizeParser <$> mutationParserBackend)
             (finalizeParser <$> subscriptionParser)
 
@@ -459,9 +476,8 @@ buildRelayRoleContext ::
   AnnotatedCustomTypes ->
   RoleName ->
   Set.HashSet ExperimentalFeature ->
-  SchemaSampledFeatureFlags ->
   m (RoleContext GQLContext)
-buildRelayRoleContext options sources actions customTypes role expFeatures schemaSampledFeatureFlags = do
+buildRelayRoleContext options sources actions customTypes role expFeatures = do
   let schemaOptions = buildSchemaOptions options expFeatures
       -- TODO: At the time of writing this, remote schema queries are not supported in relay.
       -- When they are supported, we should get do what `buildRoleContext` does. Since, they
@@ -473,7 +489,6 @@ buildRelayRoleContext options sources actions customTypes role expFeatures schem
           -- introspection issues such as https://github.com/hasura/graphql-engine/issues/5144.
           ignoreRemoteRelationship
           role
-          schemaSampledFeatureFlags
   runMemoizeT do
     -- build all sources, and the node root
     (node, fieldsList) <- do
@@ -523,14 +538,18 @@ buildRelayRoleContext options sources actions customTypes role expFeatures schem
         (P.parserType <$> mutationParserFrontend)
         (P.parserType <$> subscriptionParser)
 
-    let frontendContext =
+    let relayFrontendFieldNames = queryRootFieldNamesOf queryParserFrontend
+        relayBackendFieldNames = queryRootFieldNamesOf queryParserBackend
+        frontendContext =
           GQLContext
             (finalizeParser queryParserFrontend)
+            relayFrontendFieldNames
             (finalizeParser <$> mutationParserFrontend)
             (finalizeParser <$> subscriptionParser)
         backendContext =
           GQLContext
             (finalizeParser queryParserBackend)
+            relayBackendFieldNames
             (finalizeParser <$> mutationParserBackend)
             (finalizeParser <$> subscriptionParser)
 
@@ -593,10 +612,9 @@ unauthenticatedContext ::
   SourceCache ->
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
   Set.HashSet ExperimentalFeature ->
-  SchemaSampledFeatureFlags ->
   Options.RemoteSchemaPermissions ->
   m (GQLContext, HashSet InconsistentMetadata)
-unauthenticatedContext options sources allRemotes expFeatures schemaSampledFeatureFlags remoteSchemaPermsCtx = do
+unauthenticatedContext options sources allRemotes expFeatures remoteSchemaPermsCtx = do
   let schemaOptions = buildSchemaOptions options expFeatures
       fakeSchemaContext =
         SchemaContext
@@ -614,7 +632,6 @@ unauthenticatedContext options sources allRemotes expFeatures schemaSampledFeatu
               ExcludeRemoteSourceRelationship
           )
           fakeRole
-          schemaSampledFeatureFlags
       -- chosen arbitrarily to be as improbable as possible
       fakeRole = mkRoleNameSafe [NT.nonEmptyTextQQ|MyNameIsOzymandiasKingOfKingsLookOnMyWorksYeMightyAndDespair|]
 
@@ -627,7 +644,7 @@ unauthenticatedContext options sources allRemotes expFeatures schemaSampledFeatu
         -- Permissions are disabled, unauthenticated users have access to remote schemas.
         (remoteFields, remoteSchemaErrors) <-
           runRemoteSchema fakeSchemaContext (soRemoteNullForwardingPolicy schemaOptions)
-            $ buildAndValidateRemoteSchemas allRemotes [] [] fakeRole remoteSchemaPermsCtx
+            $ buildAndValidateRemoteSchemas allRemotes [] [] [] [] fakeRole remoteSchemaPermsCtx
         pure
           ( (\(n, rf) -> fmap (fmap (RFRemote n)) rf) <$> concatMap (\(n, q) -> (n,) <$> piQuery q) remoteFields,
             (\(n, rf) -> fmap (fmap (RFRemote n)) rf) <$> concat (mapMaybe (\(n, q) -> fmap (n,) <$> piMutation q) remoteFields),
@@ -649,7 +666,8 @@ unauthenticatedContext options sources allRemotes expFeatures schemaSampledFeatu
         (P.parserType queryParser)
         (P.parserType <$> mutationParser)
         (P.parserType <$> subscriptionParser)
-    pure (GQLContext (finalizeParser queryParser) (finalizeParser <$> mutationParser) (finalizeParser <$> subscriptionParser), remoteErrors)
+    let unauthFieldNames = queryRootFieldNamesOf queryParser
+    pure (GQLContext (finalizeParser queryParser) unauthFieldNames (finalizeParser <$> mutationParser) (finalizeParser <$> subscriptionParser), remoteErrors)
 
 -------------------------------------------------------------------------------
 -- Building parser fields
@@ -660,8 +678,10 @@ buildAndValidateRemoteSchemas ::
     MonadIO m
   ) =>
   HashMap RemoteSchemaName (RemoteSchemaCtx, MetadataObject) ->
-  [FieldParser P.Parse (NamespacedField (QueryRootField UnpreparedValue))] ->
-  [FieldParser P.Parse (NamespacedField (MutationRootField UnpreparedValue))] ->
+  [FieldParser P.Parse (NamespacedField (QueryRootField UnpreparedValue))] -> -- Sources query fields
+  [FieldParser P.Parse (NamespacedField (MutationRootField UnpreparedValue))] -> -- Sources mutation fields
+  [FieldParser P.Parse (QueryRootField UnpreparedValue)] -> -- Action query fields
+  [FieldParser P.Parse (MutationRootField UnpreparedValue)] -> -- Action mutation fields
   RoleName ->
   Options.RemoteSchemaPermissions ->
   SchemaT
@@ -672,7 +692,7 @@ buildAndValidateRemoteSchemas ::
     )
     (MemoizeT m)
     ([(RemoteSchemaName, RemoteSchemaParser P.Parse)], HashSet InconsistentMetadata)
-buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationFields role remoteSchemaPermsCtx =
+buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationFields actionQueryFields actionMutationFields role remoteSchemaPermsCtx =
   runWriterT $ foldlM step [] (HashMap.elems remotes)
   where
     getFieldName = P.getName . P.fDefinition
@@ -707,8 +727,23 @@ buildAndValidateRemoteSchemas remotes sourcesQueryFields sourcesMutationFields r
               --   - between this remote and the sources:
               for_ (duplicates $ newSchemaMutationFieldNames <> sourcesMutationFieldNames)
                 $ \name -> reportInconsistency $ "Field cannot be overwritten by remote field " <> squote name
-          -- No need to check for conflicts between subscription fields, since
-          -- remote subscriptions aren't supported yet.
+            -- No need to check for conflicts between subscription fields, since
+            -- remote subscriptions aren't supported yet.
+
+            -- check for conflicting types of remote schemas with existing sources and actions schema
+            let collectedTypes =
+                  P.collectTypeDefinitions @MetadataObjId
+                    [ -- sources and actions schema
+                      P.TypeDefinitionsWrapper $ map P.fDefinition sourcesQueryFields,
+                      P.TypeDefinitionsWrapper $ map P.fDefinition sourcesMutationFields,
+                      P.TypeDefinitionsWrapper $ map P.fDefinition actionQueryFields,
+                      P.TypeDefinitionsWrapper $ map P.fDefinition actionMutationFields,
+                      -- remote schema
+                      P.TypeDefinitionsWrapper $ map P.fDefinition $ piQuery remoteSchemaParser,
+                      P.TypeDefinitionsWrapper $ map P.fDefinition <$> piMutation remoteSchemaParser
+                    ]
+            onLeft_ collectedTypes $ \conflictingTypes ->
+              reportInconsistency $ "Conflicting types: " <> fromErrorMessage (toErrorValue conflictingTypes)
 
           -- Only add this new remote to the list if there was no error
           pure
@@ -1020,13 +1055,14 @@ queryWithIntrospectionHelper basicQueryFP mutationP subscriptionP = do
       -- Those two requirements cannot both be met when a service is mutations-only, and does not
       -- provide any query. In such a case, to meet both of those, we introduce a placeholder query
       -- in the schema.
-      placeholderText = "There are no queries available to the current role. Either there are no sources or remote schemas configured, or the current role doesn't have the required permissions."
-      placeholderField = NotNamespaced (RFRaw $ JO.String placeholderText) <$ P.selection_ Name._no_queries_available (Just $ G.Description placeholderText) P.string
+      placeholderText = "There are no queries available to the current role. Either there are no sources or remote schemas configured, or the current role doesn't have the required permissions." :: Text
+      placeholderField = NotNamespaced (RFRaw . TypenameResult $ encJFromJValue placeholderText) <$ P.selection_ Name._no_queries_available (Just $ G.Description placeholderText) P.string
       fixedQueryFP = if null basicQueryFP then [placeholderField] else basicQueryFP
   basicQueryP <- queryRootFromFields fixedQueryFP
   let buildIntrospectionResponse printResponseFromSchema =
         NotNamespaced
           . RFRaw
+          . SchemaIntrospection
           . printResponseFromSchema
           <$> parseBuildIntrospectionSchema
             (P.parserType basicQueryP)
@@ -1100,8 +1136,8 @@ customizeFields ::
   (Functor f, MonadParse n) =>
   ResolvedSourceCustomization ->
   MkTypename ->
-  f [FieldParser n (RootField db remote action JO.Value)] ->
-  f [FieldParser n (NamespacedField (RootField db remote action JO.Value))]
+  f [FieldParser n (RootField db remote action RFRawPayload)] ->
+  f [FieldParser n (NamespacedField (RootField db remote action RFRawPayload))]
 customizeFields ResolvedSourceCustomization {..} =
   fmap . customizeNamespace _rscRootNamespace (const typenameToRawRF)
 
@@ -1162,15 +1198,24 @@ queryRoot = Name._query_root
 finalizeParser :: Parser 'Output P.Parse a -> ParserFn a
 finalizeParser parser = P.toQErr . P.runParse . P.runParser parser
 
+-- | Extract the top-level field names from a query root parser's output type,
+-- for storage in 'GQLContext' and use in conflict detection ('checkConflictingNode').
+-- Returns @[]@ if the type isn't a named object, which shouldn't happen for a
+-- well-formed query root but is handled gracefully.
+queryRootFieldNamesOf :: P.Parser 'Output n a -> [G.Name]
+queryRootFieldNamesOf p = case P.parserType p of
+  P.TNamed _ (P.Definition _ _ _ _ (P.TIObject oi)) -> map P.dName (P.oiFields oi)
+  _ -> []
+
 throwOnConflictingDefinitions :: (QErrM m) => Either P.ConflictingDefinitions a -> m a
 throwOnConflictingDefinitions = either (throw500 . fromErrorMessage . toErrorValue) pure
 
 typenameToNamespacedRawRF ::
-  P.ParsedSelection (NamespacedField (RootField db remote action JO.Value)) ->
-  NamespacedField (RootField db remote action JO.Value)
-typenameToNamespacedRawRF = P.handleTypename $ NotNamespaced . RFRaw . JO.String . toTxt
+  P.ParsedSelection (NamespacedField (RootField db remote action RFRawPayload)) ->
+  NamespacedField (RootField db remote action RFRawPayload)
+typenameToNamespacedRawRF = P.handleTypename $ NotNamespaced . RFRaw . TypenameResult . encJFromJValue . toTxt
 
 typenameToRawRF ::
-  P.ParsedSelection (RootField db remote action JO.Value) ->
-  RootField db remote action JO.Value
-typenameToRawRF = P.handleTypename $ RFRaw . JO.String . toTxt
+  P.ParsedSelection (RootField db remote action RFRawPayload) ->
+  RootField db remote action RFRawPayload
+typenameToRawRF = P.handleTypename $ RFRaw . TypenameResult . encJFromJValue . toTxt

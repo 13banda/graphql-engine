@@ -7,7 +7,7 @@ import { createStore, useStore as useZustandStore } from 'zustand';
 // TYPES
 // --------------------------------------------------
 
-export type State = {
+type State = {
   hasuraPlan: HasuraPlan;
   serverEnvVars: ServerEnvVars;
 };
@@ -18,7 +18,7 @@ type Setters = {
   setServerEnvVars: (envVars: ServerEnvVars) => void;
 };
 
-export type Store = State & Setters;
+type Store = State & Setters;
 
 /**
  * All the info about the current Hasura plan.
@@ -85,6 +85,7 @@ type EeLicenseType = 'trial' | 'paid';
 
 type EeLicense = Extract<HasuraPlan, { name: 'ee' }>['license'];
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- schema is used at runtime via z.infer for type derivation below
 const serverEnvVarsSchema = z.object({
   consoleType: z
     .union([
@@ -98,7 +99,7 @@ const serverEnvVarsSchema = z.object({
     .optional(),
 });
 
-export type ServerEnvVars = z.infer<typeof serverEnvVarsSchema>;
+type ServerEnvVars = z.infer<typeof serverEnvVarsSchema>;
 
 // --------------------------------------------------
 // STORE
@@ -111,12 +112,12 @@ const defaultState: State = {
 function createNewStore() {
   const consoleInfoStore = createStore<Store>()(
     devtools(
-      set => ({
+      (set) => ({
         ...defaultState,
 
-        setServerEnvVars: serverEnvVars =>
+        setServerEnvVars: (serverEnvVars) =>
           set(
-            prev => ({
+            (prev) => ({
               ...prev,
               serverEnvVars,
             }),
@@ -124,12 +125,12 @@ function createNewStore() {
             {
               type: 'setServerEnvVars',
               serverEnvVars,
-            }
+            },
           ),
 
-        setHasuraPlan: hasuraPlan =>
+        setHasuraPlan: (hasuraPlan) =>
           set(
-            prev => ({
+            (prev) => ({
               ...prev,
               hasuraPlan,
             }),
@@ -137,15 +138,15 @@ function createNewStore() {
             {
               type: 'setHasuraPlan',
               hasuraPlan,
-            }
+            },
           ),
 
-        setEeLicense: eeLicense =>
+        setEeLicense: (eeLicense) =>
           set(
-            prev => {
+            (prev) => {
               if (prev.hasuraPlan.name !== 'ee') {
                 console.error(
-                  `The EE license cannot be set on a ${prev.hasuraPlan.name} plan`
+                  `The EE license cannot be set on a ${prev.hasuraPlan.name} plan`,
                 );
                 return prev;
               }
@@ -162,12 +163,12 @@ function createNewStore() {
             {
               type: 'setEeLicense',
               eeLicense,
-            }
+            },
           ),
       }),
       // Assign a name to the store for debugging purposes
-      { name: 'ConsoleInfoStore' }
-    )
+      { name: 'ConsoleInfoStore' },
+    ),
   );
 
   return consoleInfoStore;
@@ -181,7 +182,7 @@ const useStoreValue = () => {
   return createNewStore();
 };
 
-export type StoreContextType = ReturnType<typeof useStoreValue>;
+type StoreContextType = ReturnType<typeof useStoreValue>;
 
 const UseStore = createContext<StoreContextType | undefined>(undefined);
 
@@ -190,16 +191,7 @@ export const StoreProvider = ({ children }: { children: React.ReactNode }) => {
 
   return <UseStore.Provider value={value}>{children}</UseStore.Provider>;
 };
-
-export const MockStoreContextProvider = (
-  props: React.PropsWithChildren<{
-    params: StoreContextType;
-  }>
-) => {
-  return <UseStore.Provider value={props.params} {...props} />;
-};
-
-export const useStore = () => {
+const useStore = () => {
   const context = React.useContext(UseStore);
   if (context === undefined) {
     throw new Error('useCount must be used within a StoreProvider');
@@ -213,20 +205,5 @@ export const useStore = () => {
 
 export function useHasuraPlan() {
   const store = useStore();
-  return useZustandStore(store, state => state.hasuraPlan);
-}
-
-export function useSetHasuraPlan() {
-  const store = useStore();
-  return useZustandStore(store, state => state.setHasuraPlan);
-}
-
-export function useSetEeLicense() {
-  const store = useStore();
-  return useZustandStore(store, state => state.setEeLicense);
-}
-
-export function useSetServerEnvVars() {
-  const store = useStore();
-  return useZustandStore(store, state => state.setServerEnvVars);
+  return useZustandStore(store, (state) => state.hasuraPlan);
 }

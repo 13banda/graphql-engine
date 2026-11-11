@@ -15,10 +15,13 @@ module Hasura.GraphQL.Execute.Action.Types
   )
 where
 
+import Control.Lens ((.~))
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Aeson qualified as J
 import Data.Aeson.Casing qualified as J
+import Data.Aeson.Lens (key)
 import Data.Int (Int64)
+import Hasura.Authentication.Session (SessionVariables)
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.GraphQL.Transport.HTTP.Protocol
@@ -31,7 +34,7 @@ import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendType
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Headers (HeaderConf)
-import Hasura.Session
+import Hasura.Server.Types (RedactActionHandlerLogsStatus, isRedactActionHandlerLogsEnabled)
 import Hasura.Tracing qualified as Tracing
 import Network.HTTP.Client.Transformable qualified as HTTP
 
@@ -111,8 +114,9 @@ type ActionWebhookResponse = J.Value
 
 data ActionRequestInfo = ActionRequestInfo
   { _areqiUrl :: !Text,
-    _areqiBody :: !J.Value,
-    _areqiHeaders :: ![HeaderConf],
+    _areqiAction :: !ActionContext,
+    _areqiInput :: !J.Value,
+    _areqiRequestQuery :: !(Maybe GQLQueryText),
     _areqiTransformedRequest :: !(Maybe HTTP.Request)
   }
   deriving (Show, Generic)
@@ -154,13 +158,37 @@ data ActionHandlerLog = ActionHandlerLog
     _ahlRequestSize :: !Int64,
     _ahlTransformedRequestSize :: !(Maybe Int64),
     _ahlResponseSize :: !Int64,
-    _ahlActionName :: !ActionName
+    _ahlActionName :: !ActionName,
+    _ahlActionType :: !ActionType,
+    -- | When enabled, the request body (of both the original and the
+    -- transformed request) is redacted to JSON @null@ from the logged request.
+    -- Not emitted as a field. See the 'J.ToJSON' instance.
+    _ahlRedactLogs :: !RedactActionHandlerLogsStatus
   }
   deriving (Show, Generic)
 
+-- | Custom 'J.ToJSON' that reproduces the previous generic encoding (fields
+-- @request@, @request_trans@, @request_size@, @transformed_request_size@,
+-- @response_size@, @action_name@, @action_type@ with @omitNothingFields@) and,
+-- when payload redaction is enabled, redacts the request body of both the
+-- original and the transformed request to JSON @null@. The redaction flag is
+-- not itself emitted. When redaction is disabled the output is byte-identical
+-- to the previous behaviour.
 instance J.ToJSON ActionHandlerLog where
-  toJSON = J.genericToJSON (J.aesonDrop 4 J.snakeCase) {J.omitNothingFields = True}
-  toEncoding = J.genericToEncoding (J.aesonDrop 4 J.snakeCase) {J.omitNothingFields = True}
+  toJSON ActionHandlerLog {..} =
+    J.object
+      $ [ "request" J..= redactRequestBody (J.toJSON _ahlRequest),
+          "request_size" J..= _ahlRequestSize,
+          "response_size" J..= _ahlResponseSize,
+          "action_name" J..= _ahlActionName,
+          "action_type" J..= _ahlActionType
+        ]
+      <> maybe [] (\r -> ["request_trans" J..= redactRequestBody (J.toJSON r)]) _ahlRequestTrans
+      <> maybe [] (\s -> ["transformed_request_size" J..= s]) _ahlTransformedRequestSize
+    where
+      redactRequestBody v
+        | isRedactActionHandlerLogsEnabled _ahlRedactLogs = v & key "body" .~ J.Null
+        | otherwise = v
 
 instance L.ToEngineLog ActionHandlerLog L.Hasura where
   toEngineLog ahl = (L.LevelInfo, L.ELTActionHandler, J.toJSON ahl)

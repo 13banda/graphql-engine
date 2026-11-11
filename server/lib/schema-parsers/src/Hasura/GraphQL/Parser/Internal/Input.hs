@@ -71,19 +71,20 @@ data InputFieldsParser origin m a = InputFieldsParser
   deriving (Semigroup, Monoid) via Ap (InputFieldsParser origin m) a
 
 -- Note: this is just derived Functor instance, but by hand so we can inline
--- which reduces huge_schema schema memory by 3% at time of writing
+-- which reduces huge_schema schema memory by 3% at time of writing.
+-- CLAUDE: Using an explicit lambda instead of (.) avoids a composition THUNK per <&>
+-- use; (fmap f) . p leaves a suspended (.) application in every InputFieldsParser.
+-- BRANDON: I'm skeptical this is true, but it doesn't seem worth checking for now
 instance (Functor m) => Functor (InputFieldsParser origin m) where
   {-# INLINE fmap #-}
-  fmap f = \(InputFieldsParser d p) -> InputFieldsParser d (fmap (fmap f) p)
+  fmap f = \(InputFieldsParser d p) -> InputFieldsParser d (\args -> fmap f (p args))
 
 instance (Applicative m) => Applicative (InputFieldsParser origin m) where
   {-# INLINE pure #-}
   pure v = InputFieldsParser [] (const $ pure v)
   {-# INLINE (<*>) #-}
-  a <*> b =
-    InputFieldsParser
-      (ifDefinitions a <> ifDefinitions b)
-      (liftA2 (<*>) (ifParser a) (ifParser b))
+  (InputFieldsParser da pa) <*> (InputFieldsParser db pb) =
+    InputFieldsParser (da <> db) (\args -> pa args <*> pb args)
 
 {- Note [When are fields optional?]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

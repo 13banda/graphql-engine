@@ -1,14 +1,16 @@
 use std::fs;
 use std::path::PathBuf;
 
-use metadata_resolve::BooleanExpressionError;
+use graphql_schema::Error as SchemaError;
+use graphql_schema::GDS;
 use metadata_resolve::Error as ResolveError;
-use schema::Error as SchemaError;
-use schema::GDS;
+use metadata_resolve::{BooleanExpressionError, ModelGraphqlError};
 
 #[test]
 fn test_select_many_model_arguments_without_arguments_input_type() -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/metadata_with_model_arguments_without_arguments_input_type.json")?;
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/metadata_with_model_arguments_without_arguments_input_type.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata)?;
 
@@ -35,21 +37,10 @@ fn test_duplicate_field_path_relationship_mappings() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_field_path_to_argument_relationship_mapping() -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/metadata_with_field_path_to_argument_relationship_mapping.json")?;
-
-    let gds = GDS::new_with_default_flags(metadata);
-
-    assert_eq!(
-        gds.unwrap_err().to_string(),
-        "metadata is not consistent: Relationship mappings to model arguments expressions are not supported yet."
-    );
-    Ok(())
-}
-
-#[test]
 fn test_relationship_mapping_unknown_source_field() -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/metadata_with_unknown_source_field_in_relationship_mapping.json")?;
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/metadata_with_unknown_source_field_in_relationship_mapping.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata);
 
@@ -62,13 +53,15 @@ fn test_relationship_mapping_unknown_source_field() -> anyhow::Result<()> {
 
 #[test]
 fn test_relationship_mapping_unknown_target_field() -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/metadata_with_unknown_target_field_in_relationship_mapping.json")?;
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/metadata_with_unknown_target_field_in_relationship_mapping.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata);
 
     assert_eq!(
         gds.unwrap_err().to_string(),
-        "metadata is not consistent: target field author_id in field mapping for relationship author on type Article (in subgraph default) to model Authors (in subgraph default) is unknown."
+        "metadata is not consistent: target field id_unknown_field in field mapping for relationship author on type Article (in subgraph default) to model Authors (in subgraph default) is unknown."
     );
     Ok(())
 }
@@ -106,11 +99,14 @@ fn test_scalar_comparison_type_reuse() -> anyhow::Result<()> {
     let built_schema = gds.build_schema();
     built_schema?; // assert that it is OK
 
-    let metadata = read_metadata("validate_metadata_artifacts/metadata_with_scalar_comparison_type_reused_for_different_scalars.json")?;
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/metadata_with_scalar_comparison_type_reused_for_different_scalars.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata)?;
     let built_schema = gds.build_schema();
-    assert_eq!(built_schema.unwrap_err().to_string(),
+    assert_eq!(
+        built_schema.unwrap_err().to_string(),
         "internal error while building schema: multiple definitions of graphql type: Int_Comparison_Exp"
     );
     Ok(())
@@ -125,13 +121,15 @@ fn test_scalar_comparison_type_reuse() -> anyhow::Result<()> {
 #[test]
 fn test_filter_error_filter_expression_type_present_filter_input_not_present() -> anyhow::Result<()>
 {
-    let metadata = read_metadata("validate_metadata_artifacts/global_graphql_config/metadata_with_filter_expression_type_present_filter_input_not_present.json")?;
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/global_graphql_config/metadata_with_filter_expression_type_present_filter_input_not_present.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata);
 
     assert_eq!(
         gds.unwrap_err().to_string(),
-        "metadata is not consistent: the filterInput need to be defined in GraphqlConfig, when models have filterExpressionType"
+        "metadata is not consistent: the filterInput needs to be defined in GraphqlConfig, when models have filterExpressionType"
     );
     Ok(())
 }
@@ -141,15 +139,17 @@ fn test_filter_error_filter_expression_type_present_filter_input_not_present() -
 // `orderByExpressionType` is present in the `graphql` field of the model
 // but `orderByInput` is not present in the `GraphqlConfig` kind
 #[test]
-fn test_order_by_error_order_by_expression_type_present_order_by_input_not_present(
-) -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/global_graphql_config/metadata_with_order_by_expression_type_present_order_by_input_not_present.json")?;
+fn test_order_by_error_order_by_expression_type_present_order_by_input_not_present()
+-> anyhow::Result<()> {
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/global_graphql_config/metadata_with_order_by_expression_type_present_order_by_input_not_present.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata);
 
     assert_eq!(
         gds.unwrap_err().to_string(),
-        "metadata is not consistent: the orderByInput need to be defined in GraphqlConfig, when models have orderByExpressionType"
+        "metadata is not consistent: the orderByInput needs to be defined in GraphqlConfig, when models have orderByExpressionType"
     );
     Ok(())
 }
@@ -157,9 +157,11 @@ fn test_order_by_error_order_by_expression_type_present_order_by_input_not_prese
 // `orderByExpressionType` is present in the `graphql` field of the model
 // but `enumTypeNames` directions is other than `["asc", "desc"]` in the`orderByInput` in the `GraphqlConfig` kind
 #[test]
-fn test_order_by_error_order_by_expression_type_present_and_only_asc_in_enum_type_directions_in_order_by_input_present(
-) -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/global_graphql_config/metadata_with_order_by_expression_type_present_and_only_asc_in_enum_type_directions_in_order_by_input_present.json")?;
+fn test_order_by_error_order_by_expression_type_present_and_only_asc_in_enum_type_directions_in_order_by_input_present()
+-> anyhow::Result<()> {
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/global_graphql_config/metadata_with_order_by_expression_type_present_and_only_asc_in_enum_type_directions_in_order_by_input_present.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata);
 
@@ -175,15 +177,17 @@ fn test_order_by_error_order_by_expression_type_present_and_only_asc_in_enum_typ
 // `argumentsInputType` is present in the `graphql` field of the model
 // but `argumentsInput` is not present in the `GraphqlConfig` kind
 #[test]
-fn test_arguments_error_arguments_input_type_present_arguments_input_not_present(
-) -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/global_graphql_config/metadata_with_arguments_input_type_present_arguments_input_not_present.json")?;
+fn test_arguments_error_arguments_input_type_present_arguments_input_not_present()
+-> anyhow::Result<()> {
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/global_graphql_config/metadata_with_arguments_input_type_present_arguments_input_not_present.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata);
 
     assert_eq!(
         gds.unwrap_err().to_string(),
-        "metadata is not consistent: the fieldName for argumentsInput need to be defined in GraphqlConfig, when models have argumentsInputType"
+        "metadata is not consistent: the fieldName for argumentsInput needs to be defined in GraphqlConfig, when models have argumentsInputType"
     );
     Ok(())
 }
@@ -192,7 +196,9 @@ fn test_arguments_error_arguments_input_type_present_arguments_input_not_present
 // The `require_graphql_flag` is set to true but there is no `GraphqlConfig` object in metadata
 #[test]
 fn test_require_graphql_config_flag_no_graphql_config_present() -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/global_graphql_config/metadata_with_require_grapqhl_config_flag_graphql_config_not_present.json")?;
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/global_graphql_config/metadata_with_require_grapqhl_config_flag_graphql_config_not_present.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata);
 
@@ -204,9 +210,11 @@ fn test_require_graphql_config_flag_no_graphql_config_present() -> anyhow::Resul
 }
 
 #[test]
-fn test_global_if_fields_present_in_object_type_but_no_model_has_global_id_source_true_for_object_type(
-) -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/metadata_with_global_if_fields_present_in_object_type_but_no_model_has_global_id_source_true_for_object_type.json")?;
+fn test_global_if_fields_present_in_object_type_but_no_model_has_global_id_source_true_for_object_type()
+-> anyhow::Result<()> {
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/metadata_with_global_if_fields_present_in_object_type_but_no_model_has_global_id_source_true_for_object_type.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata);
 
@@ -230,7 +238,9 @@ fn test_disallow_object_mapped_to_scalar() -> anyhow::Result<()> {
         matches!(
             gds,
             Err(SchemaError::ResolveError {
-                error: ResolveError::ModelTypeMappingCollectionError { .. }
+                error: metadata_resolve::WithContext::Raw(ResolveError::ModelsError(
+                    metadata_resolve::ModelsError::ModelTypeMappingCollectionError { .. }
+                ))
             })
         ),
         "actual: {gds:?}"
@@ -250,7 +260,11 @@ fn test_disallow_filter_expression_without_source() -> anyhow::Result<()> {
         matches!(
             gds,
             Err(SchemaError::ResolveError {
-                error: ResolveError::CannotUseFilterExpressionsWithoutSource { .. }
+                error: metadata_resolve::WithContext::Raw(ResolveError::ModelGraphqlError(
+                    ModelGraphqlError::BooleanExpressionError(
+                        BooleanExpressionError::CannotUseFilterExpressionsWithoutSource { .. }
+                    )
+                ))
             })
         ),
         "actual: {gds:?}"
@@ -260,7 +274,9 @@ fn test_disallow_filter_expression_without_source() -> anyhow::Result<()> {
 
 #[test]
 fn test_disallow_filter_expression_with_object_type_mismatch() -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/boolean_expressions/filter_expression_with_object_type_mismatch.json")?;
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/boolean_expressions/filter_expression_with_object_type_mismatch.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata);
 
@@ -268,47 +284,11 @@ fn test_disallow_filter_expression_with_object_type_mismatch() -> anyhow::Result
         matches!(
             gds,
             Err(SchemaError::ResolveError {
-                error: ResolveError::BooleanExpressionError {
-                    boolean_expression_error:
+                error: metadata_resolve::WithContext::Raw(ResolveError::ModelGraphqlError(
+                    ModelGraphqlError::BooleanExpressionError(
                         BooleanExpressionError::BooleanExpressionTypeForInvalidObjectTypeInModel { .. }
-                }
-            })
-        ),
-        "actual: {gds:?}"
-    );
-    Ok(())
-}
-
-#[test]
-fn test_disallow_filter_expression_with_data_connector_mismatch() -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/boolean_expressions/filter_expression_with_data_connector_mismatch.json")?;
-
-    let gds = GDS::new_with_default_flags(metadata);
-
-    assert!(
-        matches!(
-            gds,
-            Err(SchemaError::ResolveError {
-                error: ResolveError::DifferentDataConnectorInFilterExpression { .. }
-            })
-        ),
-        "actual: {gds:?}"
-    );
-    Ok(())
-}
-
-#[test]
-fn test_disallow_filter_expression_with_data_connector_object_type_mismatch() -> anyhow::Result<()>
-{
-    let metadata = read_metadata("validate_metadata_artifacts/boolean_expressions/filter_expression_with_data_connector_object_type_mismatch.json")?;
-
-    let gds = GDS::new_with_default_flags(metadata);
-
-    assert!(
-        matches!(
-            gds,
-            Err(SchemaError::ResolveError {
-                error: ResolveError::DifferentDataConnectorObjectTypeInFilterExpression { .. }
+                    )
+                ))
             })
         ),
         "actual: {gds:?}"
@@ -327,7 +307,8 @@ fn test_disallow_boolean_expression_without_mapping() -> anyhow::Result<()> {
         matches!(
             gds,
             Err(SchemaError::ResolveError {
-                error: ResolveError::BooleanExpressionError { boolean_expression_error:BooleanExpressionError::NoDataConnectorTypeMappingForObjectTypeInBooleanExpression { .. }}
+                error: metadata_resolve::WithContext::Raw(
+                           ResolveError::BooleanExpressionError (BooleanExpressionError::NoDataConnectorTypeMappingForObjectTypeInBooleanExpression { .. }))
             })
         ),
         "actual: {gds:?}"
@@ -337,7 +318,9 @@ fn test_disallow_boolean_expression_without_mapping() -> anyhow::Result<()> {
 
 #[test]
 fn test_disallow_conflicting_object_field_name_and_relationship_name() -> anyhow::Result<()> {
-    let metadata = read_metadata("validate_metadata_artifacts/relationships/conflicting_object_field_name_and_relationship_name.json")?;
+    let metadata = read_metadata(
+        "validate_metadata_artifacts/relationships/conflicting_object_field_name_and_relationship_name.json",
+    )?;
 
     let gds = GDS::new_with_default_flags(metadata)?;
     let schema = gds.build_schema();

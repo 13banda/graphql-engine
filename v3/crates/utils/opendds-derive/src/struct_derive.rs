@@ -7,10 +7,7 @@ pub fn impl_opendd_struct(name: &syn::Ident, data: &StructData<'_>) -> TraitImpl
     let (impl_deserialize, json_schema_expr) = match &data {
         StructData::Newtype(field) => (
             quote! {
-                let __internal = open_dds::traits::OpenDd::deserialize(json).map_err(|e| open_dds::traits::OpenDdDeserializeError{
-                    path: e.path.prepend_index(0),
-                    error: e.error,
-                })?;
+                let __internal = open_dds::traits::deserialize_index(json, path.clone(), 0)?;
                 Ok(#name(__internal))
             },
             impl_json_schema_newtype(field),
@@ -30,7 +27,7 @@ pub fn impl_opendd_struct(name: &syn::Ident, data: &StructData<'_>) -> TraitImpl
 fn impl_json_schema_newtype(field: &syn::Field) -> proc_macro2::TokenStream {
     let ty = &field.ty.clone();
     quote! {
-        open_dds::traits::gen_subschema_for::<#ty>(gen)
+        open_dds::traits::gen_subschema_for::<#ty>(generator)
     }
 }
 
@@ -40,9 +37,31 @@ fn impl_deserialize_named_fields<'a>(
 ) -> proc_macro2::TokenStream {
     let expected_fields = named_fields
         .iter()
-        .map(|field| field.renamed_field.to_string())
+        .map(|field| field.renamed_field.clone())
         .collect::<Vec<String>>();
     let named_fields_value = generate_named_fields_value(name, named_fields);
+    let unexpected_fields_error = if expected_fields.is_empty() {
+        quote! {
+            return Err(open_dds::traits::OpenDdDeserializeError {
+                error: serde::de::Error::custom(format!(
+                    "unexpected keys: {}; expecting empty object",
+                    __remaining_keys.join(", "),
+                )),
+                path: path.clone(),
+            });
+        }
+    } else {
+        quote! {
+            return Err(open_dds::traits::OpenDdDeserializeError {
+                error: serde::de::Error::custom(format!(
+                    "unexpected keys: {}; expecting: {}",
+                    __remaining_keys.join(", "),
+                    [#(#expected_fields),*].join(", "),
+                )),
+                path: path.clone(),
+            });
+        }
+    };
     quote! {
         let mut __object_map = match json {
             serde_json::Value::Object(map) => map,
@@ -52,22 +71,15 @@ fn impl_deserialize_named_fields<'a>(
                         serde::de::Unexpected::Other("not an object"),
                         &"object",
                     ),
-                    path: open_dds::traits::JSONPath::new(),
+                    path: path.clone(),
                 })
             },
         };
         let __value = #named_fields_value;
-        let __remaining_keys = __object_map.keys().cloned().collect::<Vec<_>>();
         // Check for unexpected keys
-        if !__remaining_keys.is_empty() {
-            return Err(open_dds::traits::OpenDdDeserializeError {
-                error: serde::de::Error::custom(format!(
-                    "unexpected keys: {}; expecting: {}",
-                    __remaining_keys.join(", "),
-                    [#(#expected_fields),*].join(", "),
-                )),
-                path: open_dds::traits::JSONPath::new(),
-            });
+        if !__object_map.is_empty() {
+            let __remaining_keys = __object_map.keys().cloned().collect::<Vec<_>>();
+            #unexpected_fields_error
         }
         Ok(__value)
     }
@@ -82,12 +94,16 @@ fn generate_named_fields_value<'a>(
         let field_name = field.field_name;
         let field_name_str = field.renamed_field.as_str();
 
-        let field_value_deserialize = quote! {
-            |__value| open_dds::traits::OpenDd::deserialize(__value)
-                .map_err(|e| open_dds::traits::OpenDdDeserializeError {
-                    path: e.path.prepend_key(#field_name_str.to_string()),
-                    error: e.error,
-                })
+        let field_value_deserialize = if let Some(deserialize_with) = &field.deserialize_with {
+            let deserialize_fn = syn::parse_str::<syn::Path>(deserialize_with)
+                .expect("deserialize_with should be a valid function path");
+            quote! {
+                |__value| #deserialize_fn(__value, path.clone())
+            }
+        } else {
+            quote! {
+                |__value| open_dds::traits::deserialize_key(__value, path.clone(), #field_name_str.to_string())
+            }
         };
 
         let deserialize_field = quote! {
@@ -101,9 +117,18 @@ fn generate_named_fields_value<'a>(
             },
         };
 
-        let field_value_fallback = if field.is_default {
-            quote! {
-                .unwrap_or_default()
+        let field_value_fallback = if let Some(default) = &field.default {
+            match default {
+                DefaultAttribute::Flag => {
+                    quote! {
+                        .unwrap_or_default()
+                    }
+                }
+                DefaultAttribute::Expr(default_exp) => {
+                    quote! {
+                        .unwrap_or(#default_exp)
+                    }
+                }
             }
         } else if field.is_optional {
             quote! {
@@ -113,7 +138,7 @@ fn generate_named_fields_value<'a>(
             quote! {
                 .ok_or_else(|| open_dds::traits::OpenDdDeserializeError {
                     error: serde::de::Error::missing_field(#field_name_str),
-                    path: open_dds::traits::JSONPath::new(),
+                    path: path.clone(),
                 })?
             }
         };
@@ -132,20 +157,27 @@ fn generate_named_fields_value<'a>(
 
 fn impl_json_schema_named_fields(fields: &[NamedField<'_>]) -> proc_macro2::TokenStream {
     let mut fields_gen = Vec::new();
-    for field in fields {
+    let visible_fields = fields.iter().filter(|f| !f.hidden);
+    for field in visible_fields {
         let field_name = field.renamed_field.as_str();
         let ty = field.field_type.clone();
 
-        let default_prop = if field.is_default {
-            let default_exp = field
-                .default_exp
-                .as_ref()
-                .map(quote::ToTokens::to_token_stream)
-                .unwrap_or_else(|| {
-                    quote! {
-                        serde_json::json!(<#ty as Default>::default())
+        let default_prop = if let Some(default) = &field.default {
+            let default_exp = field.default_exp.as_ref().map_or_else(
+                || match default {
+                    DefaultAttribute::Flag => {
+                        quote! {
+                            serde_json::json!(<#ty as Default>::default())
+                        }
                     }
-                });
+                    DefaultAttribute::Expr(default_exp) => {
+                        quote! {
+                            serde_json::json!(#default_exp)
+                        }
+                    }
+                },
+                quote::ToTokens::to_token_stream,
+            );
             quote! {
                 metadata.default = Some(#default_exp);
             }
@@ -156,6 +188,14 @@ fn impl_json_schema_named_fields(fields: &[NamedField<'_>]) -> proc_macro2::Toke
         let description = if let Some(d) = field.description.as_ref() {
             quote! {
                 metadata.description = Some(#d.to_string());
+            }
+        } else {
+            proc_macro2::TokenStream::new()
+        };
+
+        let title = if let Some(t) = &field.title {
+            quote! {
+                metadata.title = Some(#t.to_string());
             }
         } else {
             proc_macro2::TokenStream::new()
@@ -175,13 +215,14 @@ fn impl_json_schema_named_fields(fields: &[NamedField<'_>]) -> proc_macro2::Toke
                 let metadata = schema_object.metadata();
                 #default_prop
                 #description
+                #title
                 schemars::schema::Schema::Object(schema_object)
             }
         };
 
         let field_schema_exp = quote! {
             {
-                let schema = open_dds::traits::gen_subschema_for::<#ty>(gen);
+                let schema = open_dds::traits::gen_subschema_for::<#ty>(generator);
                 #schema_with_metadata
             }
         };
@@ -190,7 +231,7 @@ fn impl_json_schema_named_fields(fields: &[NamedField<'_>]) -> proc_macro2::Toke
                 #field_name.to_string(), #field_schema_exp
             );
         };
-        let required_insert = if !field.is_default && !field.is_optional {
+        let required_insert = if field.default.is_none() && !field.is_optional {
             quote! {
                 required.insert(#field_name.to_string());
             }

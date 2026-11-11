@@ -1,10 +1,9 @@
+/* generated using openapi-typescript-codegen -- do not edit */
 /* istanbul ignore file */
 /* tslint:disable */
 /* eslint-disable */
-
 import type { ColumnType } from './ColumnType';
 import type { ColumnValueGenerationStrategy } from './ColumnValueGenerationStrategy';
-
 export type ColumnInfo = {
   /**
    * Column description

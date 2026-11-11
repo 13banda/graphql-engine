@@ -33,7 +33,7 @@ fn test_field_with_local_relationship() -> anyhow::Result<()> {
     common::test_execute_explain(
         "explain/field_with_local_relationship",
         "execute/relationships/array/metadata.json",
-        &["execute/common_metadata/postgres_connector_schema.json"],
+        &["execute/common_metadata/postgres_connector_ndc_v01_schema.json"],
     )
 }
 
@@ -61,5 +61,23 @@ fn test_field_with_nested_remote_relationship_2() -> anyhow::Result<()> {
         "explain/field_with_nested_remote_relationship_2",
         "explain/field_with_nested_remote_relationship_2/metadata.json",
         &["execute/common_metadata/two_postgres_connector_schema.json"],
+    )
+}
+
+#[test]
+fn test_remote_relationship_filter_object() -> anyhow::Result<()> {
+    common::test_execute_explain(
+        "explain/remote_relationship_filter/object",
+        "explain/remote_relationship_filter/common_metadata.json",
+        &["execute/common_metadata/postgres_connector_ndc_v01_schema.json"],
+    )
+}
+
+#[test]
+fn test_remote_relationship_filter_array() -> anyhow::Result<()> {
+    common::test_execute_explain(
+        "explain/remote_relationship_filter/array",
+        "explain/remote_relationship_filter/common_metadata.json",
+        &["execute/common_metadata/postgres_connector_ndc_v01_schema.json"],
     )
 }

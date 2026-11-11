@@ -1,0 +1,754 @@
+use std::{fmt::Display, str::FromStr};
+
+use all_or_list::AllOrList;
+use axum::http::HeaderMap;
+use hasura_authn_core::{AuthenticateResponse, Identity, Role, SessionVariableValue};
+use hasura_authn_jwt::{auth as jwt_auth, jwt};
+use hasura_authn_noauth as noauth;
+use hasura_authn_webhook::webhook;
+use open_dds::session_variables::SessionVariableName;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[schemars(title = "AuthModeConfig")]
+/// The configuration for the authentication mode to use - webhook, JWT or NoAuth.
+pub enum AuthModeConfig {
+    Webhook(webhook::AuthHookConfig),
+    Jwt(Box<jwt::JWTConfig>),
+    NoAuth(noauth::NoAuthConfig),
+}
+
+#[derive(Serialize, Debug, Clone, JsonSchema, PartialEq, opendds_derive::OpenDd, Deserialize)]
+#[serde(tag = "version", content = "definition")]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[opendd(as_versioned_with_definition)]
+#[opendd(json_schema(title = "AuthConfig"))]
+/// Definition of the authentication configuration used by the API server.
+pub enum AuthConfig {
+    /// Definition of the authentication configuration v1, used by the API server.
+    #[opendd(json_schema(title = "AuthConfigV1"))]
+    V1(AuthConfigV1),
+    /// Definition of the authentication configuration v2, used by the API server.
+    #[opendd(json_schema(title = "AuthConfigV2"))]
+    V2(AuthConfigV2),
+    // Definition of the authentication configuration v3, used by the API server.
+    #[opendd(json_schema(title = "AuthConfigV3"))]
+    V3(AuthConfigV3),
+    // Definition of the authentication configuration v4, used by the API server.
+    #[opendd(json_schema(title = "AuthConfigV4"))]
+    V4(AuthConfigV4),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, opendds_derive::OpenDd, JsonSchema)]
+#[schemars(
+    title = "AlternativeMode",
+    description = "An alternative authentication mode"
+)]
+/// Alternative Authentication Modes
+pub struct AlternativeMode {
+    identifier: String,
+    config: AuthModeConfigV3,
+}
+
+#[derive(Serialize, Debug, Clone, JsonSchema, PartialEq, opendds_derive::OpenDd, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "AuthConfigV4")]
+#[schemars(example = "AuthConfigV4::example")]
+/// Definition of the authentication configuration v4, used by the API server.
+pub struct AuthConfigV4 {
+    pub mode: AuthModeConfigV3,
+    #[schemars(title = "Alternative Modes")]
+    #[schemars(description = "Optional alternative authentication modes")]
+    pub alternative_modes: Option<Vec<AlternativeMode>>,
+    /// Optional mapping of session variables to trace attributes.
+    /// When configured, the specified session variable values will be
+    /// extracted after authentication and propagated as trace context
+    /// to downstream services. Works with all auth modes (JWT, webhook, noAuth).
+    /// For webhook auth, explicitly returned baggage values take precedence
+    /// over values from this mapping for the same key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_variable_to_trace_attribute_map:
+        Option<Vec<SessionVariableToTraceAttributeMapping>>,
+}
+
+/// Mapping of a session variable to a trace attribute.
+/// The session variable value from the authenticated identity will be
+/// propagated as a trace attribute to downstream services.
+#[derive(Serialize, Deserialize, PartialEq, Clone, JsonSchema, Debug, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "SessionVariableToTraceAttributeMapping")]
+pub struct SessionVariableToTraceAttributeMapping {
+    /// The session variable name (e.g. "x-hasura-tenant-id").
+    pub session_variable: SessionVariableName,
+    /// The trace attribute key to use when propagating this value
+    /// (e.g. "tenant-id").
+    pub trace_attribute: String,
+}
+
+impl AuthConfigV4 {
+    fn example() -> Self {
+        open_dds::traits::OpenDd::deserialize(
+            serde_json::json!(
+                {
+                    "mode": {
+                        "webhook": {
+                            "method": "GET",
+                            "url": {
+                                "value": "http://auth_hook:3060/validate-request"
+                            },
+                            "customHeadersConfig": {
+                                "headers": {
+                                    "forward": ["Authorization"],
+                                    "additional": {
+                                        "user-agent": "hasura-ddn"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "alternativeModes": [
+                        {
+                            "identifier": "internal",
+                            "config": {
+                                "jwt": {
+                                    "claimsConfig": {
+                                        "namespace": {
+                                            "claimsFormat": "Json",
+                                            "location": "/claims.jwt.hasura.io"
+                                        }
+                                    },
+                                    "tokenLocation": {
+                                        "type": "BearerAuthorization"
+                                    },
+                                    "key": {
+                                        "fixed": {
+                                            "algorithm": "HS256",
+                                            "key": {
+                                                "valueFromEnv": "AUTH_SECRET"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            ),
+            jsonpath::JSONPath::new(),
+        )
+        .unwrap()
+    }
+}
+
+#[derive(Serialize, Debug, Clone, JsonSchema, PartialEq, opendds_derive::OpenDd, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "AuthConfigV3")]
+#[schemars(example = "AuthConfigV3::example")]
+/// Definition of the authentication configuration v3, used by the API server.
+pub struct AuthConfigV3 {
+    pub mode: AuthModeConfigV3,
+}
+
+impl AuthConfigV3 {
+    fn example() -> Self {
+        open_dds::traits::OpenDd::deserialize(
+            serde_json::json!(
+                {
+                    "mode": {
+                        "webhook": {
+                            "method": "GET",
+                            "url": {
+                                "value": "http://auth_hook:3060/validate-request"
+                            },
+                            "customHeadersConfig": {
+                                "headers": {
+                                    "forward": ["Authorization"],
+                                    "additional": {
+                                        "user-agent": "hasura-ddn"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+            jsonpath::JSONPath::new(),
+        )
+        .unwrap()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, PartialEq, opendds_derive::OpenDd)]
+#[serde(rename_all = "camelCase")]
+#[schemars(title = "AuthModeConfigV3")]
+/// The configuration for the authentication mode to use - webhook, JWT or NoAuth.
+pub enum AuthModeConfigV3 {
+    Webhook(webhook::AuthHookConfigV3),
+    Jwt(Box<jwt::JWTConfig>),
+    NoAuth(noauth::NoAuthConfig),
+}
+
+#[derive(Serialize, Debug, Clone, JsonSchema, PartialEq, opendds_derive::OpenDd, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "AuthConfigV2")]
+#[schemars(example = "AuthConfigV2::example")]
+/// Definition of the authentication configuration v2, used by the API server.
+pub struct AuthConfigV2 {
+    pub mode: AuthModeConfig,
+}
+
+impl AuthConfigV2 {
+    fn example() -> Self {
+        open_dds::traits::OpenDd::deserialize(
+            serde_json::json!(
+                {
+                    "mode": {
+                      "webhook": {
+                        "url": "http://auth_hook:3060/validate-request",
+                        "method": "Post"
+                      }
+                    }
+                }
+            ),
+            jsonpath::JSONPath::new(),
+        )
+        .unwrap()
+    }
+}
+
+#[derive(Serialize, Debug, Clone, JsonSchema, PartialEq, opendds_derive::OpenDd, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+#[schemars(title = "AuthConfigV1")]
+#[schemars(example = "AuthConfigV1::example")]
+/// Definition of the authentication configuration v1, used by the API server.
+pub struct AuthConfigV1 {
+    pub allow_role_emulation_by: Option<Role>,
+    pub mode: AuthModeConfig,
+}
+
+impl AuthConfigV1 {
+    fn example() -> Self {
+        open_dds::traits::OpenDd::deserialize(
+            serde_json::json!(
+                {
+                    "allowRoleEmulationBy": "admin",
+                    "mode": {
+                      "webhook": {
+                        "url": "http://auth_hook:3060/validate-request",
+                        "method": "Post"
+                      }
+                    }
+                }
+            ),
+            jsonpath::JSONPath::new(),
+        )
+        .unwrap()
+    }
+}
+
+/// Warnings for the user raised during auth config generation
+/// These are things that don't break the build, but may do so in future
+#[derive(Debug, PartialEq, thiserror::Error)]
+pub enum Warning {
+    #[error(
+        "AuthConfig v1 is deprecated. `allowRoleEmulationBy` has been removed. Please consider upgrading to AuthConfig v4."
+    )]
+    PleaseUpgradeV1ToV4,
+    #[error("AuthConfig v2 is deprecated. Please consider upgrading to AuthConfig v4.")]
+    PleaseUpgradeV2ToV4,
+    #[error("AuthConfig v3 is deprecated. Please consider upgrading to AuthConfig v4.")]
+    PleaseUpgradeV3ToV4,
+    #[error("Header '{0}', used in the auth config, is not a valid header name")]
+    InvalidHeaderName(String),
+    #[error("Header value '{0}' is not a valid header value for header '{1}' in the auth config")]
+    InvalidHeaderValue(String, String),
+}
+
+impl Warning {
+    pub fn should_be_an_error(&self, flags: &open_dds::flags::OpenDdFlags) -> bool {
+        match self {
+            Warning::InvalidHeaderName(_) | Warning::InvalidHeaderValue(_, _) => {
+                flags.contains(open_dds::flags::Flag::DisallowInvalidHeadersInAuthConfig)
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+pub enum Error {
+    #[error("Invalid URL for auth webhook: {0}")]
+    InvalidAuthWebhookUrl(String),
+    #[error("{0}")]
+    AuthConfigWarningsAsErrors(SeparatedBy<Warning>),
+    #[error("Duplicate alternative mode identifier: '{0}'")]
+    DuplicateAlternativeModeIdentifier(String),
+}
+
+// A small utility type which exists for the sole purpose of displaying a vector with a certain
+// separator.
+#[derive(Debug, PartialEq)]
+pub struct SeparatedBy<T> {
+    pub lines_of: Vec<T>,
+    pub separator: String,
+}
+
+impl<T: Display> Display for SeparatedBy<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, elem) in self.lines_of.iter().enumerate() {
+            elem.fmt(f)?;
+            if index < self.lines_of.len() - 1 {
+                self.separator.fmt(f)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedAuthConfig {
+    pub auth_config: AuthConfig,
+    pub auth_config_flags: AuthConfigFlags,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthConfigFlags {
+    /// If true, if a JWT contains the 'aud' claim, it must be validated against
+    /// the audienced configured in the AuthConfig. If the audience is missing in the AuthConfig,
+    /// the JWT will be rejected.
+    pub require_audience_validation: hasura_authn_jwt::jwt::AudienceValidationMode,
+    /// If true, the client is allowed to indicate a role in the x-hasura-allowed-roles
+    /// session variable by adding the x-hasura-role header to HTTP requests.
+    pub allow_switching_role: bool,
+}
+
+impl Default for AuthConfigFlags {
+    fn default() -> Self {
+        Self {
+            // Legacy behaviour for backwards compatibility
+            require_audience_validation: hasura_authn_jwt::jwt::AudienceValidationMode::Optional,
+            allow_switching_role: false,
+        }
+    }
+}
+
+pub fn parse_auth_config(raw_auth_config: &str) -> Result<AuthConfig, anyhow::Error> {
+    Ok(open_dds::traits::OpenDd::deserialize(
+        serde_json::from_str(raw_auth_config)?,
+        jsonpath::JSONPath::new(),
+    )?)
+}
+
+/// Resolve `AuthConfig` which is not part of metadata. Hence we resolve/build
+/// it separately. This also emits warnings.
+pub fn resolve_auth_config(
+    auth_config: AuthConfig,
+    flags: &open_dds::flags::OpenDdFlags,
+) -> Result<(ResolvedAuthConfig, Vec<Warning>), Error> {
+    let warnings = validate_auth_config(&auth_config)?;
+    let warnings = auth_config_warnings_as_error_by_compatibility(flags, warnings)?;
+    let auth_config_flags = resolve_auth_config_flags(flags);
+    Ok((
+        ResolvedAuthConfig {
+            auth_config,
+            auth_config_flags,
+        },
+        warnings,
+    ))
+}
+
+fn resolve_auth_config_flags(flags: &open_dds::flags::OpenDdFlags) -> AuthConfigFlags {
+    AuthConfigFlags {
+        require_audience_validation: if flags
+            .contains(open_dds::flags::Flag::RequireJwtAudienceValidationIfAudClaimPresent)
+        {
+            hasura_authn_jwt::jwt::AudienceValidationMode::Required
+        } else {
+            hasura_authn_jwt::jwt::AudienceValidationMode::Optional
+        },
+        allow_switching_role: flags.contains(open_dds::flags::Flag::AllowSwitchingRoleInJWTAuth),
+    }
+}
+
+fn validate_auth_config(auth_config: &AuthConfig) -> Result<Vec<Warning>, Error> {
+    let mut warnings = vec![];
+    match auth_config {
+        AuthConfig::V1(_) => warnings.push(Warning::PleaseUpgradeV1ToV4),
+        AuthConfig::V2(_) => warnings.push(Warning::PleaseUpgradeV2ToV4),
+        // We are not raising any warnings for v3 of AuthConfig.
+        AuthConfig::V3(_) | AuthConfig::V4(_) => (),
+    }
+    match auth_config {
+        AuthConfig::V1(_) | AuthConfig::V2(_) => (),
+        AuthConfig::V3(AuthConfigV3 { mode }) | AuthConfig::V4(AuthConfigV4 { mode, .. }) => {
+            if let AuthModeConfigV3::Webhook(config) = &mode {
+                // Validate the URL is valid
+                reqwest::Url::parse(config.get_url())
+                    .map_err(|e| Error::InvalidAuthWebhookUrl(e.to_string()))?;
+                match &config {
+                    webhook::AuthHookConfigV3::GET(config) => {
+                        if let Some(headers_config) = config
+                            .custom_headers_config
+                            .as_ref()
+                            .and_then(|c| c.headers.as_ref())
+                        {
+                            warnings.extend(validate_header_config(headers_config));
+                        }
+                    }
+                    webhook::AuthHookConfigV3::POST(config) => {
+                        if let Some(headers_config) = config
+                            .custom_headers_config
+                            .as_ref()
+                            .and_then(|c| c.headers.as_ref())
+                        {
+                            warnings.extend(validate_header_config(headers_config));
+                        }
+                        if let Some(body_header_config) = config
+                            .custom_headers_config
+                            .as_ref()
+                            .and_then(|c| c.body.as_ref())
+                            .and_then(|c| c.headers.as_ref())
+                        {
+                            warnings.extend(validate_header_config(body_header_config));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    match auth_config {
+        AuthConfig::V1(_) | AuthConfig::V2(_) | AuthConfig::V3(_) => (),
+        AuthConfig::V4(AuthConfigV4 {
+            alternative_modes, ..
+        }) => {
+            if let Some(alternative_modes) = alternative_modes {
+                let mut identifiers = std::collections::HashSet::new();
+                for mode in alternative_modes {
+                    if !identifiers.insert(&mode.identifier) {
+                        return Err(Error::DuplicateAlternativeModeIdentifier(
+                            mode.identifier.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(warnings)
+}
+
+fn auth_config_warnings_as_error_by_compatibility(
+    flags: &open_dds::flags::OpenDdFlags,
+    auth_warnings: Vec<Warning>,
+) -> Result<Vec<Warning>, Error> {
+    let (warnings_that_are_errors, remaining_warnings): (Vec<Warning>, Vec<Warning>) =
+        auth_warnings
+            .into_iter()
+            .partition(|warning| warning.should_be_an_error(flags));
+
+    if warnings_that_are_errors.is_empty() {
+        Ok(remaining_warnings)
+    } else {
+        Err(Error::AuthConfigWarningsAsErrors(SeparatedBy {
+            lines_of: warnings_that_are_errors,
+            separator: "\n".to_string(),
+        }))
+    }
+}
+
+// Validate the header config
+fn validate_header_config(header_config: &webhook::AuthHookConfigV3Headers) -> Vec<Warning> {
+    let mut warnings = vec![];
+    if let AllOrList::List(list) = &header_config.forward {
+        for header_name in list {
+            if let Err(_e) = axum::http::header::HeaderName::from_str(header_name.as_str()) {
+                warnings.push(Warning::InvalidHeaderName(header_name.clone()));
+            }
+        }
+    }
+    for (header_name, header_value) in &header_config.additional {
+        if let Err(_e) = axum::http::header::HeaderName::from_str(header_name.as_str()) {
+            warnings.push(Warning::InvalidHeaderName(header_name.clone()));
+        }
+        if let Err(_e) = axum::http::header::HeaderValue::from_str(header_value.as_str()) {
+            warnings.push(Warning::InvalidHeaderValue(
+                header_value.clone(),
+                header_name.clone(),
+            ));
+        }
+    }
+    warnings
+}
+
+/// Errors that can occur during authentication
+#[derive(Debug, thiserror::Error)]
+pub enum AuthError {
+    #[error("JWT auth error: {0}")]
+    Jwt(#[from] jwt::Error),
+    #[error("Webhook auth error: {0}")]
+    Webhook(#[from] webhook::Error),
+    #[error("Invalid auth mode header: {0}")]
+    InvalidAuthModeHeader(String),
+}
+
+impl tracing_util::TraceableError for AuthError {
+    fn visibility(&self) -> tracing_util::ErrorVisibility {
+        match self {
+            AuthError::Jwt(e) => e.visibility(),
+            AuthError::Webhook(e) => e.visibility(),
+            AuthError::InvalidAuthModeHeader(_) => tracing_util::ErrorVisibility::User,
+        }
+    }
+}
+
+impl AuthError {
+    pub fn into_middleware_error(self) -> engine_types::MiddlewareError {
+        match self {
+            AuthError::Jwt(e) => e.into_middleware_error(),
+            AuthError::Webhook(e) => e.into_middleware_error(),
+            AuthError::InvalidAuthModeHeader(_) => engine_types::MiddlewareError {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                message: self.to_string(),
+                is_internal: false,
+            },
+        }
+    }
+}
+
+pub enum PossibleAuthModeConfig<'a> {
+    V1V2(&'a AuthModeConfig),
+    V3V4(&'a AuthModeConfigV3),
+}
+
+/// Extract session variables from the authenticated identity and map them
+/// to trace attribute baggage key-value pairs based on the provided mappings.
+fn extract_session_vars_as_baggage(
+    identity: &Identity,
+    mappings: &[SessionVariableToTraceAttributeMapping],
+) -> Vec<tracing_util::KeyValue> {
+    let session_vars = match identity {
+        Identity::Specific {
+            default_role,
+            allowed_roles,
+        } => allowed_roles
+            .get(default_role)
+            .map(|auth| &auth.session_variables),
+        Identity::RoleEmulationEnabled(_) => None,
+    };
+
+    let Some(session_vars) = session_vars else {
+        return Vec::new();
+    };
+
+    mappings
+        .iter()
+        .filter_map(|mapping| {
+            session_vars.get(&mapping.session_variable).map(|value| {
+                let string_value = match value {
+                    SessionVariableValue::Unparsed(s) => s.clone(),
+                    SessionVariableValue::Parsed(v) => match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    },
+                };
+                tracing_util::KeyValue::new(mapping.trace_attribute.clone(), string_value)
+            })
+        })
+        .collect()
+}
+
+/// Merge two sets of baggage. `explicit` values (e.g. from webhook response)
+/// take precedence over `mapped` values for the same key.
+fn merge_baggage(
+    mapped: Vec<tracing_util::KeyValue>,
+    explicit: Vec<tracing_util::KeyValue>,
+) -> Vec<tracing_util::KeyValue> {
+    let mut result: std::collections::HashMap<String, String> = mapped
+        .into_iter()
+        .map(|kv| (kv.key.to_string(), kv.value.to_string()))
+        .collect();
+    // Explicit values override mapped ones
+    for kv in explicit {
+        result.insert(kv.key.to_string(), kv.value.to_string());
+    }
+    result
+        .into_iter()
+        .map(|(k, v)| tracing_util::KeyValue::new(k, v))
+        .collect()
+}
+
+/// Authenticate the user based on the headers and the auth config
+pub async fn authenticate(
+    headers_map: &HeaderMap,
+    client: &reqwest::Client,
+    resolved_auth_config: &ResolvedAuthConfig,
+    auth_mode_header: &str,
+) -> Result<AuthenticateResponse, AuthError> {
+    let session_variable_to_trace_attribute_map = match &resolved_auth_config.auth_config {
+        AuthConfig::V4(v4) => v4.session_variable_to_trace_attribute_map.as_deref(),
+        _ => None,
+    };
+
+    // We are still supporting AuthConfig::V1, hence we need to
+    // support role emulation
+    let (auth_mode, allow_role_emulation_by) = match &resolved_auth_config.auth_config {
+        AuthConfig::V1(auth_config) => (
+            &PossibleAuthModeConfig::V1V2(&auth_config.mode),
+            auth_config.allow_role_emulation_by.as_ref(),
+        ),
+        // There is no role emulation in AuthConfig::V2
+        AuthConfig::V2(auth_config) => (&PossibleAuthModeConfig::V1V2(&auth_config.mode), None),
+        // There is no role emulation in AuthConfig::V3
+        AuthConfig::V3(auth_config) => (&PossibleAuthModeConfig::V3V4(&auth_config.mode), None),
+        AuthConfig::V4(auth_config) => {
+            let auth_mode_header = headers_map.get(auth_mode_header);
+            match (auth_mode_header, &auth_config.alternative_modes) {
+                (Some(mode), Some(alt_modes)) => {
+                    let mode = mode
+                        .to_str()
+                        .map_err(|e| AuthError::InvalidAuthModeHeader(e.to_string()))?;
+                    if let Some(mode_config) = alt_modes.iter().find(|m| m.identifier == mode) {
+                        (&PossibleAuthModeConfig::V3V4(&mode_config.config), None)
+                    } else {
+                        (&PossibleAuthModeConfig::V3V4(&auth_config.mode), None)
+                    }
+                }
+                _ => (&PossibleAuthModeConfig::V3V4(&auth_config.mode), None),
+            }
+        }
+    };
+    let auth_response = match &auth_mode {
+        PossibleAuthModeConfig::V1V2(AuthModeConfig::NoAuth(no_auth_config))
+        | PossibleAuthModeConfig::V3V4(AuthModeConfigV3::NoAuth(no_auth_config)) => Ok(
+            AuthenticateResponse::new(noauth::identity_from_config(no_auth_config)),
+        ),
+        PossibleAuthModeConfig::V1V2(AuthModeConfig::Webhook(webhook_config)) => {
+            webhook::authenticate_request(
+                client,
+                webhook_config,
+                headers_map,
+                allow_role_emulation_by,
+            )
+            .await
+            .map_err(AuthError::from)
+        }
+        PossibleAuthModeConfig::V3V4(AuthModeConfigV3::Webhook(webhook_config)) => {
+            webhook::authenticate_request_v2(
+                client,
+                webhook_config,
+                headers_map,
+                allow_role_emulation_by,
+            )
+            .await
+            .map_err(AuthError::from)
+        }
+        PossibleAuthModeConfig::V1V2(AuthModeConfig::Jwt(jwt_secret_config))
+        | PossibleAuthModeConfig::V3V4(AuthModeConfigV3::Jwt(jwt_secret_config)) => {
+            jwt_auth::authenticate_request(
+                client,
+                jwt_secret_config,
+                headers_map,
+                allow_role_emulation_by,
+                resolved_auth_config
+                    .auth_config_flags
+                    .require_audience_validation,
+                resolved_auth_config.auth_config_flags.allow_switching_role,
+            )
+            .await
+            .map(AuthenticateResponse::new)
+            .map_err(AuthError::from)
+        }
+    }?;
+
+    // Apply claims-to-trace-attributes mapping if configured.
+    // This works for all auth modes (JWT, webhook, noAuth).
+    if let Some(mappings) = session_variable_to_trace_attribute_map {
+        let mapped_baggage = extract_session_vars_as_baggage(&auth_response.identity, mappings);
+        if !mapped_baggage.is_empty() {
+            // Merge: explicitly returned baggage (e.g. from webhook) takes
+            // precedence over config-mapped values for the same key.
+            let merged = merge_baggage(mapped_baggage, auth_response.baggage);
+            return Ok(AuthenticateResponse::with_baggage(
+                auth_response.identity,
+                merged,
+            ));
+        }
+    }
+
+    Ok(auth_response)
+}
+
+#[cfg(test)]
+mod tests {
+    use goldenfile::Mint;
+    use open_dds::{
+        test_utils::{JsonSchemaValidationConfig, validate_root_json_schema},
+        traits::gen_root_schema_for,
+    };
+    use pretty_assertions::assert_eq;
+    use std::{io::Write, path::PathBuf};
+
+    #[test]
+    fn test_auth_config_schema() {
+        let mut mint = Mint::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let mut expected = mint.new_goldenfile("tests/auth_config.jsonschema").unwrap();
+        let schema = gen_root_schema_for::<super::AuthConfig>(
+            &mut schemars::r#gen::SchemaGenerator::default(),
+        );
+        write!(
+            expected,
+            "{}",
+            serde_json::to_string_pretty(&schema).unwrap()
+        )
+        .unwrap();
+    }
+
+    #[test]
+    /// This test is a round trip test for the AuthConfig type. It reads a reference auth config file,
+    /// deserializes it into a AuthConfig type, serializes it back to JSON, deserializes it back into
+    /// a AuthConfig type, and compares the two AuthConfig types to ensure they are equal.
+    fn test_serialize_reference_auth_config() {
+        let path = {
+            let mut path_buf = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            path_buf.pop();
+            path_buf.pop();
+            path_buf.pop();
+            path_buf.join("static/auth/auth_config_v3.json")
+        };
+        let auth_config_from_json = <super::AuthConfig as open_dds::traits::OpenDd>::deserialize(
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap(),
+            jsonpath::JSONPath::new(),
+        )
+        .unwrap();
+        let auth_config_serialized = serde_json::to_value(auth_config_from_json.clone()).unwrap();
+        let auth_config_from_serialized =
+            <super::AuthConfig as open_dds::traits::OpenDd>::deserialize(
+                auth_config_serialized,
+                jsonpath::JSONPath::new(),
+            )
+            .unwrap();
+        assert_eq!(auth_config_from_json, auth_config_from_serialized);
+    }
+
+    #[test]
+    /// Runs various checks on the generated JSONSchema to ensure it follows certain conventions.
+    fn test_validate_auth_config_json_schema() {
+        validate_root_json_schema(
+            gen_root_schema_for::<super::AuthConfig>(
+                &mut schemars::r#gen::SchemaGenerator::default(),
+            ),
+            &JsonSchemaValidationConfig {
+                schemas_with_arbitrary_additional_properties_allowed: vec!["JWTClaimsMap"],
+            },
+        );
+    }
+}

@@ -46,7 +46,7 @@ describe('comparatorsFromSchema', () => {
         type: 'comparision',
         graphqlType: typeFromAST(
           schema,
-          parseType('[number!]') as NamedTypeNode
+          parseType('[number!]') as NamedTypeNode,
         ),
       },
       {
@@ -89,7 +89,7 @@ describe('comparatorsFromSchema', () => {
         type: 'comparision',
         graphqlType: typeFromAST(
           schema,
-          parseType('[number!]') as NamedTypeNode
+          parseType('[number!]') as NamedTypeNode,
         ),
       },
       {
@@ -123,6 +123,17 @@ describe('comparatorsFromSchema', () => {
 describe('getDataTypeOperators', () => {
   it('should fallback to use int for integer type fallback columns', () => {
     const operators = getDataTypeOperators(mssqlRealColumnTypeInput);
+    expect(operators.length).toEqual(15);
+  });
+
+  it('maps the data type by the kind of the source, not its name', () => {
+    const operators = getDataTypeOperators({
+      ...mssqlRealColumnTypeInput,
+      tables: mssqlRealColumnTypeInput.tables.map((table) => ({
+        ...table,
+        dataSource: { ...table.dataSource, name: 'warehouse' },
+      })),
+    });
     expect(operators.length).toEqual(15);
   });
 });

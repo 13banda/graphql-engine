@@ -1,6 +1,6 @@
 import React from 'react';
-import { StoryFn, Meta } from '@storybook/react';
-import { ReactQueryDecorator } from '../../../../../storybook/decorators/react-query';
+import { StoryFn, Meta } from '@storybook/react-webpack5';
+import { ReactQueryDecorator } from '@hasura/shared/testing';
 import { CliScreen } from './CliScreen';
 import { OneClickDeploymentState } from '../../types';
 
@@ -45,7 +45,9 @@ export const Happy: StoryFn = () => (
       },
       [OneClickDeploymentState.Completed]: { kind: 'success' },
     }}
-    triggerDeployment={() => {}}
+    triggerDeployment={() => {
+      /* noop */
+    }}
     fallbackApps={fallbackApps}
   />
 );
@@ -71,7 +73,9 @@ export const Error: StoryFn = () => {
         },
         [OneClickDeploymentState.Completed]: { kind: 'idle' },
       }}
-      triggerDeployment={() => {}}
+      triggerDeployment={() => {
+        /* noop */
+      }}
       fallbackApps={fallbackApps}
     />
   );

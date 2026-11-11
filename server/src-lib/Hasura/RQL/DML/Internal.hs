@@ -37,6 +37,9 @@ import Data.Sequence qualified as DS
 import Data.Text qualified as T
 import Data.Text.Extended
 import Database.PG.Query qualified as PG
+import Hasura.Authentication.Role (RoleName, adminRoleName)
+import Hasura.Authentication.Session (SessionVariable, fromSessionVariable, getSessionVariables)
+import Hasura.Authentication.User (UserInfoM, askCurRole, askUserInfo, _uiSession)
 import Hasura.Backends.Postgres.Instances.Metadata ()
 import Hasura.Backends.Postgres.SQL.DML qualified as S
 import Hasura.Backends.Postgres.SQL.Types hiding (TableName)
@@ -56,10 +59,8 @@ import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.ComputedField
 import Hasura.RQL.Types.Permission
 import Hasura.RQL.Types.Relationships.Local
-import Hasura.RQL.Types.Roles (RoleName, adminRoleName)
 import Hasura.RQL.Types.SchemaCache
 import Hasura.SQL.Types
-import Hasura.Session (SessionVariable, UserInfoM, askCurRole, askUserInfo, getSessionVariables, sessionVariableToText, _uiSession)
 import Hasura.Table.Cache
 
 newtype DMLP1T m a = DMLP1T {unDMLP1T :: StateT (DS.Seq PG.PrepArg) m a}
@@ -287,14 +288,17 @@ checkOnColExp spi sessVarBldr annFld = case annFld of
     let cn = ciColumn colInfo
     checkSelOnCol spi cn
     return annFld
-  AVRelationship relInfo (RelationshipFilters targetPerm nesAnn) ->
+  -- TODO The discarded rfTargetTablePermissions field is always BoolAnd [] (true) at
+  -- this point; see 'annBoolExp' in Permission.Internal. Some kind of
+  -- impedance mismatch that deserves refactor.
+  AVRelationship relInfo (RelationshipFilters _ nesAnn) ->
     case riTarget relInfo of
       RelTargetNativeQuery _ -> error "checkOnColExp RelTargetNativeQuery"
       RelTargetTable tableName -> do
         relSPI <- snd <$> fetchRelDet (riName relInfo) tableName
         modAnn <- checkSelPerm relSPI sessVarBldr nesAnn
         resolvedFltr <- convAnnBoolExpPartialSQL sessVarBldr $ spiFilter relSPI
-        return $ AVRelationship relInfo (RelationshipFilters targetPerm (andAnnBoolExps modAnn resolvedFltr))
+        return $ AVRelationship relInfo (RelationshipFilters resolvedFltr modAnn)
   AVComputedField cfBoolExp -> do
     roleName <- askCurRole
     let fieldName = _acfbName cfBoolExp
@@ -302,7 +306,7 @@ checkOnColExp spi sessVarBldr annFld = case annFld of
       CFBEScalar _ _ -> do
         checkSelectPermOnScalarComputedField spi fieldName
         pure annFld
-      CFBETable table nesBoolExp -> do
+      CFBETable table (RelationshipFilters _ nesBoolExp) -> do
         tableInfo <- modifyErrAndSet500 ("function " <>) $ askTableInfoSource table
         let errMsg _ =
               "role "
@@ -315,9 +319,7 @@ checkOnColExp spi sessVarBldr annFld = case annFld of
         tableSPI <- modifyErr errMsg $ askSelPermInfo tableInfo
         modBoolExp <- checkSelPerm tableSPI sessVarBldr nesBoolExp
         resolvedFltr <- convAnnBoolExpPartialSQL sessVarBldr $ spiFilter tableSPI
-        -- Including table permission filter; "input condition" AND "permission filter condition"
-        let finalBoolExp = andAnnBoolExps modBoolExp resolvedFltr
-        pure $ AVComputedField cfBoolExp {_acfbBoolExp = CFBETable table finalBoolExp}
+        pure $ AVComputedField cfBoolExp {_acfbBoolExp = CFBETable table (RelationshipFilters resolvedFltr modBoolExp)}
   AVAggregationPredicates {} -> throw400 NotExists "Aggregation Predicates cannot appear in permission checks"
   AVRemoteRelationship {} -> throw400 NotExists "Remote relationships permission checks not implemented yet"
 
@@ -363,7 +365,7 @@ fromCurrentSession ::
 fromCurrentSession currentSessionExp sessVar =
   S.SEOpApp
     (S.SQLOp "->>")
-    [currentSessionExp, S.SELit $ sessionVariableToText sessVar]
+    [currentSessionExp, S.SELit $ fromSessionVariable sessVar]
 
 currentSession :: S.SQLExp
 currentSession = S.SEUnsafe "current_setting('hasura.user')::json"

@@ -1,16 +1,19 @@
 import { useEffect, useState } from 'react';
-import { InputField, useConsoleForm } from '../../../../new-components/Form';
-import { Button } from '../../../../new-components/Button';
+import {
+  Button,
+  InputField,
+  useConsoleForm,
+  Collapsible,
+  Tabs,
+  showErrorNotification,
+} from '@hasura/shared/ui';
 import { GraphQLCustomization } from '../GraphQLCustomization/GraphQLCustomization';
 import { Configuration } from './parts/Configuration';
 import { getDefaultValues, BigQueryConnectionSchema, schema } from './schema';
-import { hasuraToast } from '../../../../new-components/Toasts';
-import { useMetadata } from '../../../hasura-metadata-api';
+import { useMetadata } from '@hasura/metadata/api';
 import { useManageDatabaseConnection } from '../../hooks/useManageDatabaseConnection';
 import { generateBigQueryRequestPayload } from './utils/generateRequests';
-import { Collapsible } from '../../../../new-components/Collapsible';
-import { Tabs } from '../../../../new-components/Tabs';
-import { DisplayToastErrorMessage } from '../Common/DisplayToastErrorMessage';
+import { Flex, Heading } from '@radix-ui/themes';
 
 interface ConnectBigQueryWidgetProps {
   dataSourceName?: string;
@@ -21,30 +24,14 @@ export const ConnectBigQueryWidget = (props: ConnectBigQueryWidgetProps) => {
 
   const isEditMode = !!dataSourceName;
 
-  const { data: metadataSource } = useMetadata(m =>
-    m.metadata.sources.find(source => source.name === dataSourceName)
+  const { data: metadataSource } = useMetadata((m) =>
+    m.metadata.sources.find((source) => source.name === dataSourceName),
   );
 
   const [tab, setTab] = useState('connectionDetails');
 
-  const { createConnection, editConnection, isLoading } =
-    useManageDatabaseConnection({
-      onSuccess: () => {
-        hasuraToast({
-          type: 'success',
-          title: isEditMode
-            ? 'Database updated successful!'
-            : 'Database added successfully!',
-        });
-      },
-      onError: err => {
-        hasuraToast({
-          type: 'error',
-          title: err.name,
-          children: <DisplayToastErrorMessage message={err.message} />,
-        });
-      },
-    });
+  const { createConnection, editConnection, isPending } =
+    useManageDatabaseConnection({});
 
   const handleSubmit = (formValues: BigQueryConnectionSchema) => {
     const payload = generateBigQueryRequestPayload({
@@ -70,40 +57,42 @@ export const ConnectBigQueryWidget = (props: ConnectBigQueryWidgetProps) => {
     try {
       reset(getDefaultValues(metadataSource));
     } catch (err) {
-      console.log(err);
-      hasuraToast({
-        type: 'error',
+      showErrorNotification({
         title:
           'Error while retrieving database. Please check if the database is of type bigquery.',
+        error: err,
       });
     }
   }, [metadataSource, reset]);
 
   return (
     <div>
-      <div className="text-xl text-gray-600 font-semibold">
+      <Heading size="4">
         {isEditMode ? 'Edit BigQuery Connection' : 'Connect BigQuery Database'}
-      </div>
+      </Heading>
 
       <Tabs
         value={tab}
-        onValueChange={value => setTab(value)}
+        onValueChange={(value) => setTab(value)}
         items={[
           {
             value: 'connectionDetails',
             label: 'Connection Details',
             content: (
-              <div className="mt-sm">
+              <div className="mt-4">
                 <Form onSubmit={handleSubmit}>
                   <InputField
                     name="name"
                     label="Database name"
-                    placeholder="Database name"
+                    fieldProps={{
+                      placeholder: 'Database name',
+                    }}
                   />
                   <Configuration name="configuration" />
 
-                  <div className="mt-sm">
+                  <div className="my-4">
                     <Collapsible
+                      disableContentStyles
                       triggerChildren={
                         <div className="font-semibold text-muted">
                           GraphQL Customization
@@ -114,16 +103,16 @@ export const ConnectBigQueryWidget = (props: ConnectBigQueryWidgetProps) => {
                     </Collapsible>
                   </div>
 
-                  <div className="flex justify-end">
+                  <Flex justify="end">
                     <Button
                       type="submit"
                       mode="primary"
-                      isLoading={isLoading}
+                      loading={isPending}
                       loadingText="Saving"
                     >
                       {isEditMode ? 'Update Connection' : 'Connect Database'}
                     </Button>
-                  </div>
+                  </Flex>
                 </Form>
               </div>
             ),

@@ -1,10 +1,17 @@
 extern crate self as open_dds;
 
-use schemars::{schema::Schema::Object as SchemaObjectVariant, JsonSchema};
+use std::borrow::Cow;
+
+use open_dds::spanned::Spanned;
+use schemars::{JsonSchema, schema::Schema::Object as SchemaObjectVariant};
 use serde::{Deserialize, Serialize};
 
+use crate::views::View;
+
 pub mod accessor;
+pub mod aggregates;
 pub mod arguments;
+pub mod authorization;
 pub mod boolean_expression;
 pub mod commands;
 pub mod data_connector;
@@ -12,38 +19,47 @@ pub mod flags;
 pub mod graphql_config;
 pub mod identifier;
 pub mod models;
+pub mod order_by_expression;
 pub mod permissions;
+pub mod plugins;
+pub mod query;
 pub mod relationships;
 pub mod session_variables;
+pub mod spanned;
+pub mod sql_schema_aliases;
 pub mod test_utils;
 pub mod traits;
 pub mod types;
+pub mod views;
 
 // In the user facing configuration, the connection string can either be a literal or a reference
 // to a secret, so we advertize either in the JSON schema. However, when building the configuration,
 // we expect the metadata build service to have resolved the secret reference so we deserialize
 // only to a literal value.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, derive_more::Display)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, derive_more::with_trait::Display)]
 pub struct EnvironmentValue {
     pub value: String,
 }
 
 // Requires a custom OpenDd impl since the json schema generation is based on 'EnvironmentValueImpl'
 impl traits::OpenDd for EnvironmentValue {
-    fn deserialize(json: serde_json::Value) -> Result<Self, traits::OpenDdDeserializeError> {
-        serde_path_to_error::deserialize(json).map_err(|e| traits::OpenDdDeserializeError {
-            path: traits::JSONPath::from_serde_path(e.path()),
-            error: e.into_inner(),
+    fn deserialize(
+        json: serde_json::Value,
+        _path: jsonpath::JSONPath,
+    ) -> Result<Self, traits::OpenDdDeserializeError> {
+        serde_json::from_value(json).map_err(|e| traits::OpenDdDeserializeError {
+            path: _path,
+            error: e,
         })
     }
 
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
         // This is copied from ndc-sdk to avoid establishing a dependency.
-        let mut s = EnvironmentValueImpl::json_schema(gen);
-        if let SchemaObjectVariant(o) = &mut s {
-            if let Some(m) = &mut o.metadata {
-                m.id = Some("https://hasura.io/jsonschemas/EnvironmentValue".into());
-            }
+        let mut s = EnvironmentValueImpl::json_schema(generator);
+        if let SchemaObjectVariant(o) = &mut s
+            && let Some(m) = &mut o.metadata
+        {
+            m.id = Some("https://hasura.io/jsonschemas/EnvironmentValue".into());
         }
         s
     }
@@ -74,37 +90,51 @@ enum EnvironmentValueImpl {
 )]
 #[serde(tag = "kind")]
 #[opendd(as_kind)]
+#[allow(clippy::large_enum_variant)]
 pub enum OpenDdSubgraphObject {
     // Data connector
-    DataConnectorLink(data_connector::DataConnectorLink),
+    DataConnectorLink(Spanned<data_connector::DataConnectorLink>),
 
     // GraphQL "super-graph" level config
-    #[opendd(hidden = true)]
-    GraphqlConfig(graphql_config::GraphqlConfig),
+    // This is boxed because it bloats the enum's size
+    // See: https://rust-lang.github.io/rust-clippy/master/index.html#large_enum_variant
+    GraphqlConfig(Spanned<graphql_config::GraphqlConfig>),
 
     // Types
-    ObjectType(types::ObjectType),
-    ScalarType(types::ScalarType),
-    ObjectBooleanExpressionType(types::ObjectBooleanExpressionType),
-    #[opendd(hidden = true)]
-    BooleanExpressionType(boolean_expression::BooleanExpressionType),
+    ObjectType(Spanned<types::ObjectType>),
+    ScalarType(Spanned<types::ScalarType>),
+    ObjectBooleanExpressionType(Spanned<types::ObjectBooleanExpressionType>),
+    BooleanExpressionType(Spanned<boolean_expression::BooleanExpressionType>),
+
+    // OrderBy Expressions
+    OrderByExpression(Spanned<order_by_expression::OrderByExpression>),
 
     // Data Connector Scalar Representation
-    DataConnectorScalarRepresentation(types::DataConnectorScalarRepresentation),
+    DataConnectorScalarRepresentation(Spanned<types::DataConnectorScalarRepresentation>),
+
+    // Aggregate Expressions
+    AggregateExpression(Spanned<aggregates::AggregateExpression>),
 
     // Models
-    Model(models::Model),
+    Model(Spanned<models::Model>),
 
     // Commands
-    Command(commands::Command),
+    Command(Spanned<commands::Command>),
 
     // Relationships
-    Relationship(relationships::Relationship),
+    Relationship(Spanned<relationships::Relationship>),
 
     // Permissions
-    TypePermissions(permissions::TypePermissions),
-    ModelPermissions(permissions::ModelPermissions),
-    CommandPermissions(permissions::CommandPermissions),
+    TypePermissions(Spanned<permissions::TypePermissions>),
+    ModelPermissions(Spanned<permissions::ModelPermissions>),
+    CommandPermissions(Spanned<permissions::CommandPermissions>),
+
+    // Plugin
+    LifecyclePluginHook(Spanned<plugins::LifecyclePluginHook>),
+
+    // View
+    View(Spanned<View>),
+    ViewPermissions(Spanned<permissions::ViewPermissions>),
 }
 
 /// All of the metadata required to run Hasura v3 engine.
@@ -117,20 +147,25 @@ pub enum Metadata {
 }
 
 impl traits::OpenDd for Metadata {
-    fn deserialize(json: serde_json::Value) -> Result<Self, traits::OpenDdDeserializeError> {
+    fn deserialize(
+        json: serde_json::Value,
+        path: jsonpath::JSONPath,
+    ) -> Result<Self, traits::OpenDdDeserializeError> {
         match json {
             serde_json::Value::Array(arr) => Ok(Self::WithoutNamespaces(<Vec<
                 OpenDdSubgraphObject,
             > as traits::OpenDd>::deserialize(
                 serde_json::Value::Array(arr),
+                path,
             )?)),
             serde_json::Value::Object(obj) => Ok(Self::Versioned(
-                <MetadataWithVersion as traits::OpenDd>::deserialize(serde_json::Value::Object(
-                    obj,
-                ))?,
+                <MetadataWithVersion as traits::OpenDd>::deserialize(
+                    serde_json::Value::Object(obj),
+                    path,
+                )?,
             )),
             _ => Err(traits::OpenDdDeserializeError {
-                path: traits::JSONPath::new(),
+                path: jsonpath::JSONPath::new(),
                 error: serde::de::Error::invalid_type(
                     serde::de::Unexpected::Other("not a sequence or map"),
                     &"a sequence or map",
@@ -139,12 +174,12 @@ impl traits::OpenDd for Metadata {
         }
     }
 
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
         let mut schema_object = schemars::schema::SchemaObject {
             subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
                 any_of: Some(vec![
-                    traits::gen_subschema_for::<Vec<OpenDdSubgraphObject>>(gen),
-                    traits::gen_subschema_for::<MetadataWithVersion>(gen),
+                    traits::gen_subschema_for::<Vec<OpenDdSubgraphObject>>(generator),
+                    traits::gen_subschema_for::<MetadataWithVersion>(generator),
                 ]),
                 ..Default::default()
             })),
@@ -168,28 +203,32 @@ impl traits::OpenDd for Metadata {
 
 impl Metadata {
     pub fn from_json_str(s: &str) -> Result<Self, traits::OpenDdDeserializeError> {
-        // First deserialize the JSON string into a serde_json::Value using serde_path_to_error
-        // to record the path to the error in case of a parse error.
-
-        let json_deserializer = &mut serde_json::Deserializer::from_str(s);
-
-        let mut track = serde_path_to_error::Track::new();
-        let json_deserializer_with_path =
-            serde_path_to_error::Deserializer::new(json_deserializer, &mut track);
-
-        match serde_json::Value::deserialize(json_deserializer_with_path) {
-            Ok(json) => {
-                // Then deserialize the serde_json::Value into the OpenDd type using the OpenDd trait.
-                <Metadata as traits::OpenDd>::deserialize(json)
-            }
-            Err(e) => Err(traits::OpenDdDeserializeError {
-                path: traits::JSONPath::from_serde_path(&track.path()),
+        // First deserialize the JSON string into a serde_json::Value.
+        // serde_path_to_error is not needed here since serde_json::Value always
+        // deserializes successfully from valid JSON, and syntax errors already
+        // include line/column information.
+        let json: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| traits::OpenDdDeserializeError {
+                path: jsonpath::JSONPath::new(),
                 error: e,
-            }),
+            })?;
+        // Then deserialize the serde_json::Value into the OpenDd type using the OpenDd trait.
+        <Metadata as traits::OpenDd>::deserialize(json, jsonpath::JSONPath::new())
+    }
+
+    pub fn get_flags(&self) -> Cow<'_, flags::OpenDdFlags> {
+        match self {
+            Metadata::WithoutNamespaces(_) => Cow::Owned(flags::OpenDdFlags::default()),
+            Metadata::Versioned(metadata) => match metadata {
+                MetadataWithVersion::V1(metadata) => Cow::Borrowed(&metadata.flags),
+                MetadataWithVersion::V2(metadata) => Cow::Borrowed(&metadata.flags),
+                MetadataWithVersion::V3(metadata) => Cow::Borrowed(&metadata.flags),
+            },
         }
     }
 }
 
+/// Metadata with versioning.
 #[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
 #[serde(tag = "version", rename_all = "camelCase")]
 #[opendd(
@@ -208,20 +247,26 @@ pub enum MetadataWithVersion {
     V3(MetadataV3),
 }
 
+/// The v1 metadata.
 #[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
 #[opendd(json_schema(rename = "OpenDdMetadataV1"))]
 pub struct MetadataV1 {
     pub namespaces: Vec<NamespacedObjects>,
-    #[opendd(default, json_schema(default_exp = "flags::Flags::default_json()"))]
-    pub flags: flags::Flags,
+    #[opendd(
+        default,
+        json_schema(default_exp = "serde_json::to_value(flags::OpenDdFlags::default()).unwrap()")
+    )]
+    pub flags: flags::OpenDdFlags,
 }
 
+/// A collection of objects that are related to each other.
 #[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
 pub struct NamespacedObjects {
     pub name: String,
     pub objects: Vec<OpenDdSubgraphObject>,
 }
 
+/// The v2 metadata.
 #[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
 #[opendd(json_schema(rename = "OpenDdMetadataV2"))]
 pub struct MetadataV2 {
@@ -229,17 +274,24 @@ pub struct MetadataV2 {
     pub supergraph: Supergraph,
     #[opendd(default, json_schema(default_exp = "serde_json::json!([])"))]
     pub subgraphs: Vec<Subgraph>,
-    #[opendd(default, json_schema(default_exp = "flags::Flags::default_json()"))]
-    pub flags: flags::Flags,
+    #[opendd(
+        default,
+        json_schema(default_exp = "serde_json::to_value(flags::OpenDdFlags::default()).unwrap()")
+    )]
+    pub flags: flags::OpenDdFlags,
 }
 
+/// The v3 metadata.
 #[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
 #[opendd(json_schema(rename = "OpenDdMetadataV3"))]
 pub struct MetadataV3 {
     #[opendd(default, json_schema(default_exp = "serde_json::json!([])"))]
     pub subgraphs: Vec<Subgraph>,
-    #[opendd(default, json_schema(default_exp = "flags::Flags::default_json()"))]
-    pub flags: flags::Flags,
+    #[opendd(
+        default,
+        json_schema(default_exp = "serde_json::to_value(flags::OpenDdFlags::default()).unwrap()")
+    )]
+    pub flags: flags::OpenDdFlags,
 }
 
 #[derive(
@@ -247,11 +299,15 @@ pub struct MetadataV3 {
 )]
 #[serde(tag = "kind")]
 #[opendd(as_kind)]
+#[allow(clippy::large_enum_variant)]
 pub enum OpenDdSupergraphObject {
-    // GraphQL schema configuration
+    /// GraphQL schema configuration
     GraphqlConfig(graphql_config::GraphqlConfig),
+    /// SQL schema alias
+    SqlSchemaAlias(sql_schema_aliases::SqlSchemaAlias),
 }
 
+/// A collection of objects that apply to the entire supergraph.
 #[derive(Serialize, Default, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
 #[opendd(json_schema(rename = "OpenDdSupergraph"))]
 pub struct Supergraph {
@@ -267,17 +323,18 @@ impl Supergraph {
     }
 }
 
+/// A subgraph is a collection of objects that belong to the same data domain.
 #[derive(Serialize, Clone, Debug, PartialEq, opendds_derive::OpenDd)]
 #[opendd(json_schema(rename = "OpenDdSubgraph"))]
 pub struct Subgraph {
-    pub name: identifier::SubgraphIdentifier,
+    pub name: identifier::SubgraphNameInput,
     pub objects: Vec<OpenDdSubgraphObject>,
 }
 
 #[cfg(test)]
 pub mod tests {
     use crate::{
-        test_utils::{validate_root_json_schema, JsonSchemaValidationConfig},
+        test_utils::{JsonSchemaValidationConfig, validate_root_json_schema},
         traits::gen_root_schema_for,
     };
     use goldenfile::Mint;
@@ -288,8 +345,10 @@ pub mod tests {
     fn test_metadata_schema() {
         let mut mint = Mint::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         let mut expected = mint.new_goldenfile("metadata.jsonschema").unwrap();
-        let schema =
-            gen_root_schema_for::<super::Metadata>(&mut schemars::gen::SchemaGenerator::default());
+        let mut schema = gen_root_schema_for::<super::Metadata>(
+            &mut schemars::r#gen::SchemaGenerator::default(),
+        );
+        schema.definitions.sort_keys();
         write!(
             expected,
             "{}",
@@ -307,8 +366,11 @@ pub mod tests {
         let metadata =
             open_dds::Metadata::from_json_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let metadata_json = serde_json::to_value(metadata.clone()).unwrap();
-        let metadata_from_json =
-            <super::Metadata as super::traits::OpenDd>::deserialize(metadata_json).unwrap();
+        let metadata_from_json = <super::Metadata as super::traits::OpenDd>::deserialize(
+            metadata_json,
+            jsonpath::JSONPath::new(),
+        )
+        .unwrap();
         assert_eq!(metadata, metadata_from_json);
     }
 
@@ -316,7 +378,7 @@ pub mod tests {
     /// Runs various checks on the generated JSONSchema to ensure it follows certain conventions.
     fn test_validate_json_schema() {
         validate_root_json_schema(
-            gen_root_schema_for::<super::Metadata>(&mut schemars::gen::SchemaGenerator::default()),
+            gen_root_schema_for::<super::Metadata>(&mut schemars::r#gen::SchemaGenerator::default()),
             &JsonSchemaValidationConfig::new(),
         );
     }

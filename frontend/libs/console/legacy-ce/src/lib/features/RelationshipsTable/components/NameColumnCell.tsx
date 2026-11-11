@@ -1,6 +1,6 @@
-import React from 'react';
-import { Button } from '../../../new-components/Button';
+import { Button } from '@hasura/shared/ui';
 import { RelationshipType } from '../types';
+import { Strong } from '@radix-ui/themes';
 
 type NameColumnCellProps = {
   relationship: RelationshipType;
@@ -9,7 +9,9 @@ type NameColumnCellProps = {
 
 const NameColumnCell = ({ relationship, onClick }: NameColumnCellProps) => {
   return (
-    <Button onClick={() => onClick(relationship)}>{relationship?.name}</Button>
+    <Button variant="ghost" onClick={() => onClick(relationship)}>
+      <Strong>{relationship?.name}</Strong>
+    </Button>
   );
 };
 

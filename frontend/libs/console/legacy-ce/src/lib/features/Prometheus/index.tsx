@@ -1,14 +1,12 @@
 import React from 'react';
-
-import { useServerConfig } from '../../hooks';
 import endpoints from '../../Endpoints';
 import { PrometheusSettingsForm } from './PrometheusSettingsForm';
-import globals from '../../Globals';
 import { useEELiteAccess } from '../../features/EETrial';
+import { useServerConfig } from '@hasura/metadata/api';
 
 export const extractPrometheusUrl = (prometheusUrl: string) => {
   const urlRegExp =
-    /^(https?):\/\/(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.?[a-zA-Z0-9()]{0,6})\b(?:[-a-zA-Z0-9()@:%_\+.~#?&\/=]*)$/;
+    /^(https?):\/\/(?:www\.)?([-a-zA-Z0-9@:%._+~#=]{1,256}\.?[a-zA-Z0-9()]{0,6})\b(?:[-a-zA-Z0-9()@:%_+.~#?&/=]*)$/;
   let prometheusUrlExtract = prometheusUrl.match(urlRegExp);
   if (!prometheusUrlExtract) {
     prometheusUrlExtract = ['', 'http', 'myhasuradomain.com'];
@@ -16,14 +14,18 @@ export const extractPrometheusUrl = (prometheusUrl: string) => {
   return prometheusUrlExtract;
 };
 
-export const PrometheusSettings: React.VFC<Record<string, never>> = () => {
-  const eeLiteAccess = useEELiteAccess(globals);
+export const PrometheusSettings: React.FC<Record<string, never>> = () => {
+  const eeLiteAccess = useEELiteAccess();
   const { data: configData, isLoading } = useServerConfig();
 
-  // eslint-disable-next-line no-underscore-dangle
-  if (eeLiteAccess.access === 'forbidden') {
-    return null;
-  }
+  const isFeatureForbidden =
+    eeLiteAccess.consoleType !== 'pro' &&
+    !(
+      eeLiteAccess.consoleType === 'pro-lite' &&
+      eeLiteAccess.access === 'forbidden'
+    );
+
+  if (isFeatureForbidden) return null;
 
   const prometheusUrlExtract = extractPrometheusUrl(endpoints.prometheusUrl);
   return (

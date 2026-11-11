@@ -23,14 +23,15 @@ type Props = {
  * more complex surveys). State management for themes can be unified in the common component
  * in future if need arises.
  */
-export const Survey: React.FC<Props> = props => {
+export const Survey: React.FC<Props> = (props) => {
   const { onSubmit, onSkip, data, onSuccessCb, onRejectCb, theme } = props;
 
   // position the question order before showing in survey
+  const surveyQuestions = data?.survey_questions;
   const orderedSurveyQuestionData = useMemo(() => {
-    if (!data) return [];
-    return orderArrayItems(data.survey_questions);
-  }, [data?.survey_questions]);
+    if (!surveyQuestions) return [];
+    return orderArrayItems(surveyQuestions);
+  }, [surveyQuestions]);
 
   if (!data) return null;
 

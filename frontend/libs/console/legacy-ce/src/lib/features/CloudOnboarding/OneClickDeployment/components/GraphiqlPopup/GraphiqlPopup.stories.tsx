@@ -1,6 +1,6 @@
 import React from 'react';
-import { StoryFn, Meta } from '@storybook/react';
-import { ReactQueryDecorator } from '../../../../../storybook/decorators/react-query';
+import { StoryFn, Meta } from '@storybook/react-webpack5';
+import { ReactQueryDecorator } from '@hasura/shared/testing';
 import { GraphiqlPopup } from './GraphiqlPopup';
 
 export default {
@@ -14,7 +14,9 @@ export const Default: StoryFn = () => (
     status="success"
     gitRepoName="abhi40308/hasura-sample-app-ocd"
     gitRepoFullLink="https://github.com/abhi40308/hasura-sample-app-ocd/tree/main/hasura"
-    dismissCb={() => {}}
+    dismissCb={() => {
+      /* noop */
+    }}
   />
 );
 
@@ -24,7 +26,9 @@ export const Error: StoryFn = () => {
       status="error"
       gitRepoName="abhi40308/hasura-sample-app-ocd"
       gitRepoFullLink="https://github.com/abhi40308/hasura-sample-app-ocd/tree/main/hasura"
-      dismissCb={() => {}}
+      dismissCb={() => {
+        /* noop */
+      }}
     />
   );
 };

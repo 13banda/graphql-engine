@@ -1,37 +1,35 @@
 import React, { useEffect } from 'react';
+import { Flex } from '@radix-ui/themes';
 import { z } from 'zod';
-import AceEditor from 'react-ace';
 import {
   CheckboxesField,
   CodeEditorField,
   InputField,
-  Textarea,
+  TextAreaField,
   useConsoleForm,
-} from '../../../../new-components/Form';
-import { Button } from '../../../../new-components/Button';
+  Button,
+  hasuraToast,
+  showErrorNotification,
+} from '@hasura/shared/ui';
 import { FaArrowRight, FaPlay } from 'react-icons/fa';
-import { useRestEndpoint } from '../../hooks/useRestEndpoint';
-import { parseQueryVariables } from '../../../../components/Services/ApiExplorer/Rest/utils';
 import { useRestEndpointRequest } from '../../hooks/useRestEndpointRequest';
 import { RequestHeaders } from './RequestHeaders';
 import { Variables } from './Variables';
-import { AllowedRESTMethods } from '../../../../metadata/types';
-import { openInGraphiQL } from './utils';
-import { LS_KEYS, getLSItem } from '../../../../utils';
-import { hasuraToast } from '../../../../new-components/Toasts';
-import { Analytics } from '../../../Analytics';
+import { openInGraphiQL } from '../../utils';
+import { Analytics } from '@hasura/shared/analytics';
+import { useAuthContext } from '@hasura/shared/context';
+import { DataHeader } from '@hasura/shared/types';
+import { useNavigate } from 'react-router';
+import { parseQueryVariables } from '../../../ApiExplorer/components/Rest/utils';
+import { getPersistedGraphiQLHeaders } from '../../../ApiExplorer/components/ApiRequest/utils';
+import { useRestEndpoint } from '@hasura/metadata/api';
+import { AllowedRestMethods } from '@hasura/shared/types';
 
 export type Variable = Exclude<
   ReturnType<typeof parseQueryVariables>,
   undefined
 >[0] & {
   value: string;
-};
-
-export type Header = {
-  name: string;
-  value: string;
-  selected: boolean;
 };
 
 export type RestEndpointDetailsProps = {
@@ -67,50 +65,17 @@ const validationSchema = z.object({
     .array()
     .nonempty({ message: 'Choose at least one method' }),
   request: z.string().min(1, { message: 'Please add a GraphQL query' }),
+  response: z.string().nullish(),
 });
 
-export const getInitialHeaders = (): Header[] => {
-  const headers = getLSItem(LS_KEYS.apiExplorerConsoleGraphQLHeaders);
-
-  if (headers) {
-    return JSON.parse(headers).map(
-      (header: { key: string; value: string; isDisabled: boolean }) => {
-        const value =
-          header.key === 'x-hasura-admin-secret'
-            ? window.__env.adminSecret || getLSItem(LS_KEYS.consoleAdminSecret)
-            : header.value;
-        return {
-          name: header.key,
-          value,
-          selected: !header.isDisabled,
-        };
-      }
-    );
-  }
-  return [
-    {
-      name: '',
-      value: '',
-      selected: true,
-    },
-  ];
-};
-
 export const RestEndpointDetails = (props: RestEndpointDetailsProps) => {
+  const navigate = useNavigate();
   const endpoint = useRestEndpoint(props.name);
+  const { getHeaders } = useAuthContext();
 
-  const initialHeaders = getInitialHeaders();
-
-  const [headers, setHeaders] = React.useState(
-    initialHeaders.map(header => ({
-      ...header,
-      selected: true,
-    }))
-  );
-
+  const [headers, setHeaders] = React.useState<DataHeader[]>([]);
   const [variables, setVariables] = React.useState<Variable[]>([]);
-
-  const { data, mutate, isLoading } = useRestEndpointRequest();
+  const { data, mutate, isPending: isLoading } = useRestEndpointRequest();
 
   const {
     Form,
@@ -119,33 +84,69 @@ export const RestEndpointDetails = (props: RestEndpointDetailsProps) => {
     schema: validationSchema,
   });
 
+  // Seed the request headers once on mount. `getHeaders` is recreated on every
+  // render by the auth context, so we deliberately read the latest one through a
+  // ref to keep this a mount-only fetch (re-running it would discard the user's
+  // header edits).
+  const getHeadersRef = React.useRef(getHeaders);
   useEffect(() => {
-    if (endpoint?.query?.query) {
-      const parsedVariables = parseQueryVariables(endpoint.query.query);
-      setVariables(parsedVariables?.map(v => ({ ...v, value: '' })) ?? []);
-    }
+    getHeadersRef.current().then((authHeaders) => {
+      const initialHeaders = getPersistedGraphiQLHeaders(authHeaders);
+      setHeaders(
+        initialHeaders.map((header) => ({
+          ...header,
+          selected: true,
+        })),
+      );
+    });
+  }, []);
 
-    if (endpoint) {
-      setValue('name', endpoint.endpoint?.name);
-      setValue('comment', endpoint?.endpoint?.comment);
-      setValue('url', endpoint?.endpoint?.url);
-      setValue('methods', endpoint?.endpoint?.methods);
-      setValue('request', endpoint?.query?.query);
+  // `useRestEndpoint` returns a new wrapper object each render, but its
+  // `.endpoint`/`.query` sub-objects are stable (react-query). Depend on those
+  // stable values instead of the wrapper to avoid re-running on every render.
+  const endpointData = endpoint?.endpoint;
+  const queryString = endpoint?.query?.query;
+
+  // Reset the editable variables while rendering whenever the endpoint's query
+  // changes (adjusting state during render instead of in an effect to avoid a
+  // cascading render; the variables remain user-editable afterwards).
+  const [prevQueryString, setPrevQueryString] = React.useState<
+    string | undefined
+  >(undefined);
+  if (queryString !== prevQueryString) {
+    setPrevQueryString(queryString);
+    if (queryString) {
+      const parsedVariables = parseQueryVariables(queryString);
+      setVariables(parsedVariables?.map((v) => ({ ...v, value: '' })) ?? []);
     }
-  }, [endpoint?.query?.query, endpoint?.endpoint]);
+  }
+
+  useEffect(() => {
+    if (endpointData) {
+      setValue('name', endpointData?.name);
+      setValue('comment', endpointData?.comment ?? null);
+      setValue('url', endpointData?.url);
+      setValue('methods', (endpointData?.methods ?? []) as any);
+      setValue('request', queryString ?? '');
+    }
+  }, [endpointData, queryString, setValue]);
 
   useEffect(() => {
     setValue('response', JSON.stringify(data, null, 2));
-  }, [data]);
+  }, [data, setValue]);
 
   if (!endpoint) {
     return null;
   }
 
   return (
-    <Form onSubmit={() => {}}>
+    <Form
+      onSubmit={() => {
+        /* noop */
+      }}
+    >
       <div className="grid grid-cols-2 gap-4">
-        <div className="flex flex-col gap-2">
+        <Flex direction="column" gap="2">
           <div className="relative">
             <CodeEditorField
               disabled
@@ -161,11 +162,10 @@ export const RestEndpointDetails = (props: RestEndpointDetailsProps) => {
                 passHtmlAttributesToChildren
               >
                 <Button
-                  icon={<FaArrowRight />}
-                  iconPosition="end"
+                  rightIcon={FaArrowRight}
                   size="sm"
-                  onClick={e => {
-                    openInGraphiQL(endpoint.query.query);
+                  onClick={(e) => {
+                    openInGraphiQL(navigate, endpoint.query.query);
                   }}
                 >
                   Test it in GraphiQL
@@ -173,18 +173,20 @@ export const RestEndpointDetails = (props: RestEndpointDetailsProps) => {
               </Analytics>
             </div>
           </div>
-          <Textarea
+          <TextAreaField
             disabled
             name="comment"
             label="Description"
             placeholder="Description"
           />
           <InputField
-            disabled
             name="url"
             label="Location"
-            placeholder="Location"
             description={`This is the location of your endpoint (must be unique). Any parameterized variables`}
+            fieldProps={{
+              disabled: true,
+              placeholder: 'Location',
+            }}
           />
           <CheckboxesField
             disabled
@@ -197,7 +199,7 @@ export const RestEndpointDetails = (props: RestEndpointDetailsProps) => {
               { value: 'PATCH', label: 'PATCH' },
               { value: 'DELETE', label: 'DELETE' },
             ].filter(({ value }) =>
-              endpoint.endpoint?.methods.includes(value as AllowedRESTMethods)
+              endpoint.endpoint?.methods.includes(value as AllowedRestMethods),
             )}
             orientation="horizontal"
           />
@@ -212,8 +214,8 @@ export const RestEndpointDetails = (props: RestEndpointDetailsProps) => {
             >
               <Button
                 disabled={!endpoint?.endpoint}
-                isLoading={isLoading}
-                icon={<FaPlay />}
+                loading={isLoading}
+                leftIcon={FaPlay}
                 onClick={() => {
                   mutate(
                     {
@@ -222,7 +224,7 @@ export const RestEndpointDetails = (props: RestEndpointDetailsProps) => {
                       variables,
                     },
                     {
-                      onSuccess: data => {
+                      onSuccess: (data) => {
                         hasuraToast({
                           title: 'Success',
                           message: 'Request successful',
@@ -233,28 +235,13 @@ export const RestEndpointDetails = (props: RestEndpointDetailsProps) => {
                           behavior: 'smooth',
                         });
                       },
-                      onError: error => {
-                        hasuraToast({
-                          title: 'Error',
+                      onError: (error) => {
+                        showErrorNotification({
                           message: 'Request failed',
-                          type: 'error',
-                          children: (
-                            <div className="overflow-hidden">
-                              <AceEditor
-                                theme="github"
-                                setOptions={{
-                                  minLines: 1,
-                                  maxLines: Infinity,
-                                  showGutter: false,
-                                  useWorker: false,
-                                }}
-                                value={JSON.stringify(error, null, 2)}
-                              />
-                            </div>
-                          ),
+                          error,
                         });
                       },
-                    }
+                    },
                   );
                 }}
                 mode="primary"
@@ -263,12 +250,15 @@ export const RestEndpointDetails = (props: RestEndpointDetailsProps) => {
               </Button>
             </Analytics>
           </div>
-        </div>
+        </Flex>
         <div>
           <CodeEditorField
             editorOptions={responseEditorOptions}
             name="response"
             label="GraphQL Response"
+            editorProps={{
+              mode: 'json',
+            }}
           />
         </div>
       </div>

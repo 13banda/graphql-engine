@@ -2,39 +2,32 @@ import { useCallback } from 'react';
 import {
   MetadataMigrationOptions,
   useMetadataMigration,
-} from '../../MetadataAPI/hooks/useMetadataMigration';
-import {
-  MetadataSelectors,
-  areTablesEqual,
   useMetadata,
-} from '../../hasura-metadata-api';
+} from '@hasura/metadata/api';
+import { MetadataFunction, TableFunction } from '@hasura/shared/types';
 import {
-  MetadataFunction,
-  QualifiedFunction,
-} from '../../hasura-metadata-types';
-import { transformErrorResponse } from '../errorUtils';
-
-export type MetadataFunctionPayload = {
-  function: QualifiedFunction;
-  configuration?: MetadataFunction['configuration'];
-  source: string;
-  comment?: string;
-};
-
+  getDriverPrefix,
+  areTablesEqual,
+  MetadataSelectors,
+} from '@hasura/metadata/helpers';
 export const useSetFunctionConfiguration = ({
   dataSourceName,
   ...globalMutateOptions
 }: { dataSourceName: string } & MetadataMigrationOptions) => {
   const { mutate, ...rest } = useMetadataMigration({
     ...globalMutateOptions,
-    onSuccess: (data, variables, ctx) => {
-      globalMutateOptions?.onSuccess?.(data, variables, ctx);
+    onSuccess: (data, variables, onMutateResult, context) => {
+      globalMutateOptions?.onSuccess?.(
+        data,
+        variables,
+        onMutateResult,
+        context,
+      );
     },
-    errorTransform: transformErrorResponse,
   });
 
   const { data: { driver, resource_version, functions = [] } = {} } =
-    useMetadata(m => ({
+    useMetadata((m) => ({
       driver: MetadataSelectors.findSource(dataSourceName)(m)?.kind,
       resource_version: m.resource_version,
       functions: MetadataSelectors.findSource(dataSourceName)(m)?.functions,
@@ -44,39 +37,34 @@ export const useSetFunctionConfiguration = ({
     ({
       qualifiedFunction,
       configuration,
+      comment,
       ...mutationOptions
     }: {
-      qualifiedFunction: QualifiedFunction;
+      qualifiedFunction: TableFunction;
       configuration: MetadataFunction['configuration'];
+      comment?: string;
     } & MetadataMigrationOptions) => {
-      const metadataFunction = functions.find(fn =>
-        areTablesEqual(fn.function, qualifiedFunction)
+      const metadataFunction = functions.find((fn) =>
+        areTablesEqual(fn.function, qualifiedFunction),
       );
-
-      const payload = {
-        type: `${driver}_set_function_customization`,
-        args: {
-          source: dataSourceName,
-          function: metadataFunction?.function,
-          configuration,
-        },
-      };
 
       mutate(
         {
           query: {
-            type: 'bulk',
-            source: dataSourceName,
+            type: `${getDriverPrefix(driver ?? 'postgres')}_set_function_customization` as const,
+            args: {
+              source: dataSourceName,
+              function: metadataFunction?.function,
+              configuration,
+              comment: comment || undefined,
+            },
             resource_version,
-            args: [payload],
           },
         },
-        {
-          ...mutationOptions,
-        }
+        mutationOptions,
       );
     },
-    [functions, driver, dataSourceName, mutate, resource_version]
+    [functions, driver, dataSourceName, mutate, resource_version],
   );
 
   return { setFunctionConfiguration, ...rest };

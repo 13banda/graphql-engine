@@ -1,22 +1,29 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { FaCircle } from 'react-icons/fa';
 import { GraphQLType } from 'graphql';
-
-import { useDebouncedEffect } from '../../../../../../hooks/useDebounceEffect';
+import { useDebouncedEffect } from '@hasura/shared/hooks';
 import {
   ArgValue,
   ArgValueKind,
   HasuraRsFields,
   RelationshipFields,
-  RsToRsSchema,
 } from '../../../types';
 import { defaultArgValue } from '../utils';
 import StaticArgValue from './StaticArgValue';
 import { useFormContext } from 'react-hook-form';
+import { Grid } from '@radix-ui/themes';
+import {
+  Card,
+  createTextOption,
+  FieldLabel,
+  ReactSelect,
+  ReactSelectOptionType,
+  Select,
+} from '@hasura/shared/ui';
+import { RsToRsSchema } from '../../RemoteSchemaToRemoteSchemaForm/schemas';
+import { createFilter } from 'react-select';
 
-const fieldStyle =
-  'block w-full h-input shadow-sm rounded border border-gray-300 hover:border-gray-400 focus:outline-0 focus:ring-2 focus:ring-yellow-200 focus:border-yellow-400';
-export interface ArgValueFormProps {
+interface ArgValueFormProps {
   argKey: string;
   relationshipFields: RelationshipFields[];
   setRelationshipFields: React.Dispatch<
@@ -37,6 +44,16 @@ export const ArgValueForm = ({
 }: ArgValueFormProps) => {
   const [localArgValue, setLocalArgValue] = useState(argValue);
 
+  // Reset the local (debounced) copy when the `argValue` prop changes, using
+  // the "adjust state during render" pattern instead of an effect so the reset
+  // happens in the same commit as the prop change (no extra render pass). Local
+  // edits don't touch `argValue`, so they are preserved.
+  const [prevArgValue, setPrevArgValue] = useState(argValue);
+  if (argValue !== prevArgValue) {
+    setPrevArgValue(argValue);
+    setLocalArgValue(argValue);
+  }
+
   const { watch } = useFormContext<RsToRsSchema>();
 
   const sourceType = watch('rsSourceType');
@@ -46,14 +63,10 @@ export const ArgValueForm = ({
     { key: 'static', content: 'Static Value' },
   ];
 
-  useEffect(() => {
-    setLocalArgValue(argValue);
-  }, [argValue]);
-
   useDebouncedEffect(
     () => {
       setRelationshipFields(
-        relationshipFields.map(f => {
+        relationshipFields.map((f) => {
           if (f.key === argKey) {
             return {
               ...f,
@@ -64,45 +77,45 @@ export const ArgValueForm = ({
             };
           }
           return f;
-        })
+        }),
       );
     },
     400,
-    [localArgValue.value]
+    [localArgValue.value],
   );
 
-  const changeInputType = (e: React.ChangeEvent<HTMLSelectElement>) => {
+  const changeInputType = (value: string) => {
     setRelationshipFields(
-      relationshipFields.map(f => {
+      relationshipFields.map((f) => {
         if (f.key === argKey) {
           return {
             ...f,
             argValue: {
               ...(f.argValue ?? defaultArgValue),
               value: '',
-              kind: e.target.value as ArgValueKind,
+              kind: value as ArgValueKind,
             },
           };
         }
         return f;
-      })
+      }),
     );
   };
 
-  const changeInputColumnValue = (e: React.ChangeEvent<HTMLSelectElement>) => {
+  const changeInputColumnValue = (option: ReactSelectOptionType | null) => {
     setRelationshipFields(
-      relationshipFields.map(f => {
+      relationshipFields.map((f) => {
         if (f.key === argKey) {
           return {
             ...f,
             argValue: {
               ...(f.argValue ?? defaultArgValue),
-              value: e.target.value,
+              value: option?.value,
             },
           };
         }
         return f;
-      })
+      }),
     );
   };
 
@@ -111,57 +124,45 @@ export const ArgValueForm = ({
   };
 
   return (
-    <div
-      onClick={e => e.stopPropagation()}
-      className="rounded bg-white shadow pt-xs pb-sm px-sm my-sm -ml-8 border-l-2 border-yellow-400 w-full"
-    >
-      <div className="grid grid-cols-2 gap-2">
+    <Card className="my-2">
+      <Grid columns="2" gap="2">
         <div>
-          <label htmlFor="fillFrom text-muted font-semibold">Fill From</label>
-          <select
-            id="fillFrom"
-            className={fieldStyle}
+          <FieldLabel label="Fill From" className="mb-2" />
+          <Select
             value={localArgValue.kind}
             onChange={changeInputType}
             data-test="select-argument"
-          >
-            <option disabled>Select an arugment...</option>
-            {argValueTypeOptions.map(option => (
-              <option key={option.key} value={option.key}>
-                {option.content}
-              </option>
-            ))}
-          </select>
+            placeholder="Select an argument..."
+            options={argValueTypeOptions.map((option) => ({
+              value: option.key,
+              label: option.content,
+            }))}
+          />
         </div>
-        <div>
+        <div onClick={(e) => e.stopPropagation()}>
           {localArgValue.kind === 'field' ? (
             <>
-              <label htmlFor="fromField" className="text-muted font-semibold">
-                <FaCircle className="text-green-600 mr-2 mb-1" />
-                From Source Type Field
-              </label>
-              <select
-                className={fieldStyle}
-                value={localArgValue.value as string | number}
+              <FieldLabel
+                label="From Source Type Field"
+                labelIcon={<FaCircle className="text-green-600" />}
+                className="mb-2"
+              />
+              <ReactSelect
+                isSearchable
+                options={fields.map(createTextOption)}
+                filterOption={createFilter({
+                  ignoreCase: true,
+                  matchFrom: 'any',
+                })}
+                value={createTextOption(localArgValue.value as string)}
                 onChange={changeInputColumnValue}
                 data-test="select-source-field"
-                id="fromField"
-              >
-                <option value="" disabled>
-                  Select Field from {sourceType}
-                </option>
-                {(fields ?? []).map(option => (
-                  <option key={option} value={option}>
-                    {option}
-                  </option>
-                ))}
-              </select>
+                placeholder={`Select Field from ${sourceType}`}
+              />
             </>
           ) : (
             <>
-              <label htmlFor="argValue text-muted font-semibold">
-                Static Value
-              </label>
+              <FieldLabel label="Static Value" className="mb-2" />
               <StaticArgValue
                 data-test="select-static-value"
                 argType={argType}
@@ -171,7 +172,7 @@ export const ArgValueForm = ({
             </>
           )}
         </div>
-      </div>
-    </div>
+      </Grid>
+    </Card>
   );
 };

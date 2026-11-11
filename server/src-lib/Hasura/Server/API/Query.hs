@@ -13,11 +13,11 @@ import Data.Aeson.Casing qualified as J (snakeCase)
 import Data.Environment qualified as Env
 import Data.Has (Has)
 import Hasura.App.State
+import Hasura.Authentication.User (UserInfoM)
 import Hasura.Backends.Postgres.DDL.RunSQL
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.Function.API qualified as Functions
-import Hasura.GraphQL.Schema.Common (SchemaSampledFeatureFlags)
 import Hasura.Logging qualified as L
 import Hasura.Metadata.Class
 import Hasura.Prelude
@@ -58,7 +58,6 @@ import Hasura.RemoteSchema.MetadataAPI
 import Hasura.Server.Types
 import Hasura.Server.Utils
 import Hasura.Services
-import Hasura.Session
 import Hasura.Tracing qualified as Tracing
 
 data RQLQueryV1
@@ -208,7 +207,7 @@ runQuery appContext sc query = do
 
   MetadataWithResourceVersion metadata currentResourceVersion <- liftEitherM fetchMetadata
   ((result, updatedMetadata), modSchemaCache, invalidations, sourcesIntrospection, schemaRegistryAction) <-
-    runQueryM (acEnvironment appContext) (acSchemaSampledFeatureFlags appContext) (acSQLGenCtx appContext) query
+    runQueryM (acEnvironment appContext) (acSQLGenCtx appContext) query
       -- TODO: remove this straight runReaderT that provides no actual new info
       & flip runReaderT logger
       & runMetadataT metadata metadataDefaults
@@ -225,7 +224,7 @@ runQuery appContext sc query = do
         saveSourcesIntrospection logger sourcesIntrospection newResourceVersion
 
         (_, modSchemaCache', _, _, _) <-
-          Tracing.newSpan "setMetadataResourceVersionInSchemaCache"
+          Tracing.newSpan "setMetadataResourceVersionInSchemaCache" Tracing.SKInternal
             $ setMetadataResourceVersionInSchemaCache newResourceVersion
             & runCacheRWT dynamicConfig modSchemaCache
 
@@ -414,11 +413,10 @@ runQueryM ::
     MonadGetPolicies m
   ) =>
   Env.Environment ->
-  SchemaSampledFeatureFlags ->
   SQLGenCtx ->
   RQLQuery ->
   m EncJSON
-runQueryM env schemaSampledFeatureFlags sqlGen rq = withPathK "args" $ case rq of
+runQueryM env sqlGen rq = withPathK "args" $ case rq of
   RQV1 q -> runQueryV1M q
   RQV2 q -> runQueryV2M q
   where
@@ -453,8 +451,8 @@ runQueryM env schemaSampledFeatureFlags sqlGen rq = withPathK "args" $ case rq o
       RQUpdate q -> runUpdate sqlGen q
       RQDelete q -> runDelete sqlGen q
       RQCount q -> runCount q
-      RQAddRemoteSchema q -> runAddRemoteSchema env schemaSampledFeatureFlags q
-      RQUpdateRemoteSchema q -> runUpdateRemoteSchema env schemaSampledFeatureFlags q
+      RQAddRemoteSchema q -> runAddRemoteSchema env q
+      RQUpdateRemoteSchema q -> runUpdateRemoteSchema env q
       RQRemoveRemoteSchema q -> runRemoveRemoteSchema q
       RQReloadRemoteSchema q -> runReloadRemoteSchema q
       RQIntrospectRemoteSchema q -> runIntrospectRemoteSchema q
@@ -489,7 +487,7 @@ runQueryM env schemaSampledFeatureFlags sqlGen rq = withPathK "args" $ case rq o
       RQDumpInternalState q -> runDumpInternalState q
       RQRunSql q -> runRunSQL @'Vanilla sqlGen q
       RQSetCustomTypes q -> runSetCustomTypes q
-      RQBulk qs -> encJFromList <$> indexedMapM (runQueryM env schemaSampledFeatureFlags sqlGen) qs
+      RQBulk qs -> encJFromList <$> indexedMapM (runQueryM env sqlGen) qs
 
     runQueryV2M = \case
       RQV2TrackTable q -> runTrackTableV2Q q

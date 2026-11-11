@@ -1,30 +1,27 @@
 import { TypesContext, PermissionType } from './types';
-import {
-  useState,
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-} from 'react';
+import { useState, createContext, useCallback, useContext } from 'react';
 import { rowPermissionsContext } from './RowPermissionsProvider';
 import set from 'lodash/set';
 import unset from 'lodash/unset';
 import { getPermissionTypes } from './utils/typeProviderHelpers';
 import { rootTableContext } from './RootTableProvider';
+import { getTableDisplayName } from '@hasura/shared/utils';
 
 export const typesContext = createContext<TypesContext>({
   types: {},
-  setType: () => {},
+  setType: () => {
+    /* noop */
+  },
 });
 
 // Provides types for permissions
 // This is used to determine if a permission is a column or relationship or nested object
 export const TypesProvider = ({ children }: { children: React.ReactNode }) => {
   const [types, setTypes] = useState<Record<string, { type: PermissionType }>>(
-    {}
+    {},
   );
   const { permissions } = useContext(rowPermissionsContext);
-  const { table, tables } = useContext(rootTableContext);
+  const { table, tables, tablesKey, source } = useContext(rootTableContext);
   const setType = useCallback(
     ({
       type,
@@ -35,7 +32,7 @@ export const TypesProvider = ({ children }: { children: React.ReactNode }) => {
       path: string[];
       value: any;
     }) => {
-      setTypes(prev => {
+      setTypes((prev) => {
         // Remove old path
         const newTypes = { ...prev };
         unset(newTypes, path.join('.'));
@@ -45,18 +42,22 @@ export const TypesProvider = ({ children }: { children: React.ReactNode }) => {
         return newTypes;
       });
     },
-    []
+    [],
   );
-  //  Stringify values to get a stable value for useEffect
+  //  Stringify values to get a stable key for the derived-state sync below
   const jsonPermissions = JSON.stringify(permissions);
-  const stringifiedTable = JSON.stringify(table);
-  const stringifiedTables = JSON.stringify(tables);
-  // Recursively set types
-  useEffect(() => {
-    const newTypes = getPermissionTypes(tables, table, permissions);
-
-    setTypes(newTypes);
-  }, [jsonPermissions, setTypes, stringifiedTable, stringifiedTables]);
+  const stringifiedTable = table ? getTableDisplayName(table) : '';
+  const typesKey = `${jsonPermissions}|${stringifiedTable}|${source ?? ''}|${tablesKey}`;
+  // Recursively (re)compute types while rendering when permissions/table/tables
+  // change. This is the React "adjusting state during render" pattern: it fully
+  // recomputes types from the inputs (as the effect did) without the cascading
+  // renders of setting state in an effect, while `setType` still supports
+  // incremental updates.
+  const [prevTypesKey, setPrevTypesKey] = useState<string | null>(null);
+  if (typesKey !== prevTypesKey) {
+    setPrevTypesKey(typesKey);
+    setTypes(getPermissionTypes(tables, table, permissions, source));
+  }
 
   return (
     <typesContext.Provider value={{ types, setType }}>

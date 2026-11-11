@@ -599,6 +599,29 @@ class TestGraphQLInheritedRolesPostgres:
     def test_inherited_role_when_some_roles_may_not_have_permission_configured(self, hge_ctx, transport):
         check_query_f(hge_ctx, self.dir() + '/inherited_role_with_some_roles_having_no_permissions.yaml')
 
+# NOTE (Brandon): this is a potential issue flagged by Claude that is not
+# currently reachable, but we leave it here in case we decide to finish the
+# implementation.
+#
+# Security regression test for F-001: group_by key redaction bypass in inherited roles.
+# groupByKeySelectionSet in Select.hs drops AnnRedactionExpUnpreparedValue, so
+# group_key fields expose raw column values that should be NULL under inherited-role
+# cell-level security. Requires group_by_aggregations experimental feature (Postgres only).
+@pytest.mark.hge_env('HASURA_GRAPHQL_EXPERIMENTAL_FEATURES', 'group_by_aggregations')
+@pytest.mark.parametrize('transport', ['http'])
+@usefixtures('per_class_tests_db_state')
+class TestGroupByKeyRedactionInheritedRoles:
+
+    @classmethod
+    def dir(cls):
+        return 'queries/graphql_query/permissions/inherited_roles'
+
+    setup_metadata_api_version = "v2"
+
+    @pytest.mark.xfail(reason="Potentially vulnerable code not yet reachable")
+    def test_group_by_key_does_not_leak_redacted_column_values(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/group_by_key_redaction.yaml')
+
 @pytest.mark.parametrize('transport', ['http', 'websocket'])
 @pytest.mark.backend('mssql')
 @usefixtures('per_class_tests_db_state')
@@ -808,6 +831,49 @@ class TestGraphQLQueryOrderBy:
         return 'queries/graphql_query/order_by'
 
 @pytest.mark.parametrize("transport", ['http', 'websocket'])
+@pytest.mark.backend('postgres', 'mssql')
+@usefixtures('per_class_tests_db_state')
+class TestGraphQLQueryOrderByNulls:
+    """
+    Regression tests for #10844: MSSQL used to always emit a redundant
+    IIF(.. IS NULL, ..) sort key to implement nulls first/last ordering, even
+    when the ordering expression could never be NULL, which defeated index
+    use. These check actual row order (not just the generated SQL) against a
+    column that has real NULLs, on both Postgres and MSSQL.
+
+    asc_nulls_first/asc_nulls_last/desc_nulls_first/desc_nulls_last are
+    expected to place NULLs identically on every backend. Plain asc/desc are
+    intentionally backend-specific: they follow each backend's native default
+    nulls ordering (Postgres: asc nulls last, desc nulls first; MSSQL: asc
+    nulls first, desc nulls last), so those two use per-backend expected files.
+    """
+
+    def test_asc_nulls_first(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/asc_nulls_first.yaml', transport)
+
+    def test_asc_nulls_last(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/asc_nulls_last.yaml', transport)
+
+    def test_desc_nulls_first(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/desc_nulls_first.yaml', transport)
+
+    def test_desc_nulls_last(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/desc_nulls_last.yaml', transport)
+
+    def test_plain_asc_native_nulls_order(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + hge_ctx.backend_suffix('/plain_asc') + '.yaml', transport)
+
+    def test_plain_desc_native_nulls_order(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + hge_ctx.backend_suffix('/plain_desc') + '.yaml', transport)
+
+    def test_not_nullable_column_desc(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/not_nullable_column_desc.yaml', transport)
+
+    @classmethod
+    def dir(cls):
+        return 'queries/graphql_query/order_by_nulls'
+
+@pytest.mark.parametrize("transport", ['http', 'websocket'])
 @usefixtures('per_class_tests_db_state')
 class TestGraphQLQueryCustomSchema:
 
@@ -899,6 +965,49 @@ class TestGraphQLQueryComputedFields:
 
     def test_table_computed_field_filter_session_argument(self, hge_ctx, transport):
         check_query_f(hge_ctx, self.dir() + '/table_computed_field_filter_session_argument.yaml')
+
+@pytest.mark.parametrize('transport', ['http', 'websocket'])
+@usefixtures('per_class_tests_db_state')
+class TestComputedFieldRowPermissionBypass:
+    """
+    Regression tests for the row-level permission bypass via SETOF-table computed
+    fields in WHERE clauses (CVE candidate reported by Cipher / Causal Security).
+
+    The Postgres BoolExp translator omits the returning table's row filter for the
+    AVComputedField / CFBETable case, allowing a low-privileged role to use the
+    computed field as a boolean oracle over otherwise hidden rows.
+    """
+    @classmethod
+    def dir(cls):
+        return 'queries/graphql_query/computed_fields_row_permission_bypass'
+
+    def test_selection_correctly_filtered(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/selection_correctly_filtered.yaml', transport)
+
+    def test_where_clause_existence_oracle(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/where_clause_existence_oracle.yaml', transport)
+
+    def test_where_clause_content_oracle(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/where_clause_content_oracle.yaml', transport)
+
+    def test_where_clause_permitted_row(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/where_clause_permitted_row.yaml', transport)
+
+@pytest.mark.parametrize('transport', ['http', 'websocket'])
+@usefixtures('per_class_tests_db_state')
+class TestGraphQLRootColPerm:
+    """
+    Consistency check: the same IsRoot ("$") column-reference scenario tested in
+    TestV1SelectDMLRootColPerm (queries/v1/select/dml_root_col_perm) exercised via
+    /v1/graphql.  Confirms both endpoints behave identically after the DML-path fix
+    (resolvedFltr moved from rfFilter to rfTargetTablePermissions in checkOnColExp).
+    """
+    @classmethod
+    def dir(cls):
+        return 'queries/graphql_query/root_col_perm'
+
+    def test_user_cannot_access_tasks_via_root_col_perm(self, hge_ctx, transport):
+        check_query_f(hge_ctx, self.dir() + '/user_cannot_access_tasks_via_root_col_perm.yaml', transport)
 
 @pytest.mark.parametrize('transport', ['http', 'websocket'])
 @usefixtures('per_class_tests_db_state')

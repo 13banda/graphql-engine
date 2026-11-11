@@ -956,6 +956,13 @@ be derived from a session variable of the same name.
       "value_from_env": env-var-string
     }
   ],
+  "introspection_headers": [
+    {
+      "name": header-name-string,
+      "value": header-value-string,
+      "value_from_env": env-var-string
+    }
+  ],
   "forward_client_headers": boolean,
   "timeout_seconds": integer,
   "customization": `}
@@ -966,6 +973,10 @@ be derived from a session variable of the same name.
 </pre>
 
 </div>
+
+`introspection_headers` is optional. When omitted, Remote Schema introspection uses `headers` for backward
+compatibility. When present, introspection uses only this list; an explicit empty list sends no configured headers.
+Runtime Remote Schema operations always use `headers`.
 
 ## RemoteSchemaCustomization {#remoteschemacustomization}
 
@@ -1260,6 +1271,7 @@ A string literal that conform to [GraphQL spec](https://spec.graphql.org/June201
 | kind                   | false    | \[ `synchronous` \| `asynchronous` \]                                       | The kind of the mutation action (default: `synchronous`). If the type of the action is `query` then the `kind` field should be omitted. |
 | headers                | false    | \[[HeaderFromValue](#headerfromvalue) \| [HeaderFromEnv](#headerfromenv) \] | List of defined headers to be sent to the handler                                                                                       |
 | forward_client_headers | false    | boolean                                                                     | If set to `true` the client headers are forwarded to the webhook handler (default: `false`)                                             |
+| ignored_client_headers | false    | Array of text | A set of client headers to ignore when forwarding headers to the webhook handler (default: `["Content-Length", "Content-MD5", "User-Agent", "Host", "Origin", "Referer", "Accept", "Accept-Encoding", "Accept-Language", "Accept-Datetime", "Cache-Control", "Connection", "DNT", "Content-Type"]`) |
 | handler                | true     | [WebhookURL](#webhookurl)                                                   | The action's webhook URL                                                                                                                |
 | type                   | false    | \[ `mutation` \| `query` \]                                                 | The type of the action (default: `mutation`)                                                                                            |
 | timeout                | false    | Integer                                                                     | Number of seconds to wait for response before timing out. Default: 30                                                                   |
@@ -1576,7 +1588,7 @@ HGE provides the following functions that can be used in the template:
 | ------------- | -------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
 | action        | true     | remove \| transform \| x_www_form_urlencoded                                                                             | The action to perform on the request body.                                                                   |
 | template      | false    | String                                                                                                                   | The transformation template to be applied to the body. This is required if the action is _transform_.        |
-| form_template | false    | Object ([String](/schema/postgres/postgresql-types.mdx#string) : [String](/schema/postgres/postgresql-types.mdx#string)) | The key/value pairs to be used in a `x-www-url-formencoded` body. The values can be transfomation templates. |
+| form_template | false    | Object ([String](/schema/postgres/postgresql-types.mdx#string) : [String](/schema/postgres/postgresql-types.mdx#string)) | The key/value pairs to be used in a `x-www-url-formencoded` body. The values can be transformation templates. |
 
 ## TemplateEngine {#templateengine}
 

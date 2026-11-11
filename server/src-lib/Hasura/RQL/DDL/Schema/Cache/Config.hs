@@ -8,7 +8,6 @@ module Hasura.RQL.DDL.Schema.Cache.Config
   )
 where
 
-import Hasura.GraphQL.Schema.Common (SchemaSampledFeatureFlags)
 import Hasura.Logging (Hasura, Logger)
 import Hasura.Prelude
 import Hasura.RQL.Types.BackendType
@@ -16,6 +15,7 @@ import Hasura.RQL.Types.Common (SQLGenCtx)
 import Hasura.RQL.Types.Metadata (MetadataDefaults)
 import Hasura.RQL.Types.NamingCase (NamingCase)
 import Hasura.RQL.Types.Schema.Options qualified as Options
+import Hasura.Server.Init.Config (RelayModeStatus)
 import Hasura.Server.Types
 
 --------------------------------------------------------------------------------
@@ -76,6 +76,6 @@ data CacheDynamicConfig = CacheDynamicConfig
     _cdcMetadataDefaults :: MetadataDefaults,
     _cdcApolloFederationStatus :: ApolloFederationStatus,
     _cdcCloseWebsocketsOnMetadataChangeStatus :: CloseWebsocketsOnMetadataChangeStatus,
-    _cdcSchemaSampledFeatureFlags :: SchemaSampledFeatureFlags
+    _cdcRelayMode :: RelayModeStatus
   }
   deriving (Eq)

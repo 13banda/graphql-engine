@@ -18,9 +18,11 @@ describe('Create Scheduled trigger', () => {
 
     // add scheduled time
     cy.log('**--- Add scheduled time');
-    cy.get('.rdt').click();
-    cy.get('.rdtNext').click();
-    cy.get('.rdtDays').find('td').eq(1).click();
+    cy.get('#time').click();
+    cy.get('.react-datepicker__navigation--next').click();
+    cy.get('.react-datepicker__day:not(.react-datepicker__day--outside-month)')
+      .eq(1)
+      .click();
 
     // add payload
     cy.log('**--- Add request payload');
@@ -28,7 +30,7 @@ describe('Create Scheduled trigger', () => {
 
     // Add headers
     cy.log('**--- Add headers');
-    cy.findByText('Advance Settings').click();
+    cy.findByText('Advanced Settings').click();
     cy.findAllByRole('button', { name: 'Add request headers' }).click();
     cy.findByPlaceholderText('Key...').type('user_id');
     cy.findByPlaceholderText('Value...').type('1234');
@@ -36,9 +38,12 @@ describe('Create Scheduled trigger', () => {
     // Add headers retry config
     cy.log('**--- Add headers');
     cy.findByText('Retry Configuration').click();
-    cy.get('[name=num_retries]').clear().type('3');
-    cy.get('[name=retry_interval_seconds]').clear().type('20');
-    cy.get('[name=timeout_seconds]').clear().type('80');
+    cy.get('[name=num_retries]').clear();
+    cy.get('[name=num_retries]').type('3');
+    cy.get('[name=retry_interval_seconds]').clear();
+    cy.get('[name=retry_interval_seconds]').type('20');
+    cy.get('[name=timeout_seconds]').clear();
+    cy.get('[name=timeout_seconds]').type('80');
 
     // click on create button to save scheduled trigger
     cy.log('**--- Click on Create scheduled event');
@@ -50,13 +55,13 @@ describe('Create Scheduled trigger', () => {
 
     // expect scheduled event in pending events table
     cy.get('[data-test=event-filter-table').should('exist');
-    cy.get('[data-test=event-filter-table')
-      .find('.rt-tbody')
-      .find('div')
-      .first()
-      .within(() => {
-        cy.get('div').should('have.length', 12);
-      });
+    // The scheduled event is rendered as a complete row of the events table.
+    cy.get('[data-test=event-filter-table] thead th').then(($headers) => {
+      cy.get('[data-test=event-filter-table] tbody tr')
+        .first()
+        .find('td')
+        .should('have.length', $headers.length);
+    });
   });
   it('with shortest path everything should work', () => {
     cy.log('**------------------------------**');
@@ -90,12 +95,12 @@ describe('Create Scheduled trigger', () => {
     // expect scheduled event in pending events table
     cy.get('[data-test=event-filter-table').should('exist');
 
-    cy.get('[data-test=event-filter-table')
-      .find('.rt-tbody')
-      .find('div')
-      .first()
-      .within(() => {
-        cy.get('div').should('have.length', 12);
-      });
+    // The scheduled event is rendered as a complete row of the events table.
+    cy.get('[data-test=event-filter-table] thead th').then(($headers) => {
+      cy.get('[data-test=event-filter-table] tbody tr')
+        .first()
+        .find('td')
+        .should('have.length', $headers.length);
+    });
   });
 });

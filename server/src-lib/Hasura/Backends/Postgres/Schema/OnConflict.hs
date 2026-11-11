@@ -36,10 +36,10 @@ import Hasura.RQL.IR.BoolExp qualified as IR
 import Hasura.RQL.IR.Insert qualified as IR
 import Hasura.RQL.IR.Value qualified as IR
 import Hasura.RQL.Types.BackendType
+import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RQL.Types.SchemaCache
 import Hasura.RQL.Types.Source
 import Hasura.RQL.Types.SourceCustomization
-import Hasura.Server.Init.FeatureFlag qualified as FF
 import Hasura.Table.Cache
 import Language.GraphQL.Draft.Syntax qualified as G
 
@@ -144,7 +144,7 @@ conflictConstraint ::
   TableInfo ('Postgres pgKind) ->
   SchemaT r m (Parser 'Both n (UniqueConstraint ('Postgres pgKind)))
 conflictConstraint constraints tableInfo = do
-  enableNamingConventionSep2023 <- FF.checkFlag FF.namingConventionSep2023
+  enableNamingConventionSep2023 <- (== Options.EnableNamingConventionSep2023) <$> retrieve Options.soNamingConventionSep2023
   sourceInfo :: SourceInfo ('Postgres pgKind) <- asks getter
   let sourceName = _siName sourceInfo
       tableName = tableInfoName tableInfo

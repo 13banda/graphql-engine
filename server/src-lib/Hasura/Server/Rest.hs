@@ -5,7 +5,7 @@ module Hasura.Server.Rest
 where
 
 import Control.Monad.Trans.Control (MonadBaseControl)
-import Data.Aeson hiding (json)
+import Data.Aeson
 import Data.Aeson qualified as J
 import Data.Align qualified as Align
 import Data.Environment qualified as Env
@@ -14,6 +14,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as T
 import Data.Text.Extended
 import Data.These (These (..))
+import Hasura.Authentication.User (UserInfo)
 import Hasura.Backends.DataConnector.Agent.Client (AgentLicenseKey)
 import Hasura.Base.Error
 import Hasura.CredentialCache
@@ -40,7 +41,6 @@ import Hasura.Server.Name qualified as Name
 import Hasura.Server.Prometheus (PrometheusMetrics)
 import Hasura.Server.Types
 import Hasura.Services
-import Hasura.Session
 import Hasura.Tracing qualified as Tracing
 import Language.GraphQL.Draft.Syntax qualified as G
 import Network.HTTP.Types qualified as HTTP
@@ -120,6 +120,8 @@ runCustomEndpoint ::
   ReadOnlyMode ->
   RemoteSchemaResponsePriority ->
   HeaderPrecedence ->
+  RedactActionHandlerLogsStatus ->
+  TraceQueryStatus ->
   PrometheusMetrics ->
   L.Logger L.Hasura ->
   Maybe (CredentialCache AgentLicenseKey) ->
@@ -131,7 +133,7 @@ runCustomEndpoint ::
   EndpointTrie GQLQueryWithText ->
   Init.ResponseInternalErrorsConfig ->
   m (HttpLogGraphQLInfo, HttpResponse EncJSON)
-runCustomEndpoint env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence prometheusMetrics logger agentLicenseKey requestId userInfo reqHeaders ipAddress RestRequest {..} endpoints responseErrorsConfig = do
+runCustomEndpoint env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence redactActionHandlerLogs traceQueryStatus prometheusMetrics logger agentLicenseKey requestId userInfo reqHeaders ipAddress RestRequest {..} endpoints responseErrorsConfig = do
   -- First match the path to an endpoint.
   case matchPath reqMethod (T.split (== '/') reqPath) endpoints of
     MatchFound (queryx :: EndpointMetadata GQLQueryWithText) matches ->
@@ -161,7 +163,7 @@ runCustomEndpoint env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePri
               -- with the query string from the schema cache, and pass it
               -- through to the /v1/graphql endpoint.
               (httpLoggingMetadata, handlerResp) <- do
-                (gqlOperationLog, resp) <- GH.runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence prometheusMetrics logger agentLicenseKey requestId userInfo ipAddress reqHeaders E.QueryHasura (mkPassthroughRequest queryx resolvedVariables) responseErrorsConfig
+                (gqlOperationLog, resp) <- GH.runGQ env sqlGenCtx sc enableAL readOnlyMode remoteSchemaResponsePriority headerPrecedence redactActionHandlerLogs traceQueryStatus prometheusMetrics logger agentLicenseKey requestId userInfo ipAddress reqHeaders E.QueryHasura (mkPassthroughRequest queryx resolvedVariables) responseErrorsConfig
                 let httpLoggingGQInfo = (CommonHttpLogMetadata RequestModeNonBatchable Nothing, (PQHSetSingleton (gqolParameterizedQueryHash gqlOperationLog)))
                 return (httpLoggingGQInfo, fst <$> resp)
               case sequence handlerResp of

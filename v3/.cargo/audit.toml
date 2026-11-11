@@ -1,0 +1,48 @@
+# Example audit config file
+#
+# It may be located in the user home (`~/.cargo/audit.toml`) or in the project
+# root (`.cargo/audit.toml`).
+#
+# All of the options which can be passed via CLI arguments can also be
+# permanently specified in this file.
+
+[advisories]
+ignore = ["RUSTSEC-2024-0437", "RUSTSEC-2023-0071", "RUSTSEC-2026-0176", "RUSTSEC-2026-0177", "RUSTSEC-2024-0436", "RUSTSEC-2026-0194", "RUSTSEC-2026-0195", "RUSTSEC-2026-0235"] # advisory IDs to ignore e.g. ["RUSTSEC-2019-0001", ...]
+
+# RUSTSEC-2024-0437
+#
+# https://github.com/tikv/rust-prometheus/issues/538#issuecomment-2708222613
+# we ignore this there is no current fix, and because the prometheus crate
+# that uses protobuf does not parse any protobufs, only writes them.
+
+# RUSTSEC-2023-0071
+# https://rustsec.org/advisories/RUSTSEC-2023-0071
+# No fixed upgrade is available
+
+# RUSTSEC-2026-0176, RUSTSEC-2026-0177
+# https://rustsec.org/advisories/RUSTSEC-2026-0176
+# https://rustsec.org/advisories/RUSTSEC-2026-0177
+# pyo3 0.27.2 is an unused optional dependency of jiter (behind the "python"
+# feature which is not enabled). It is only present in the lockfile, never
+# compiled. Upgrading requires a major datafusion version bump (51 -> 54).
+
+# RUSTSEC-2024-0436
+# https://rustsec.org/advisories/RUSTSEC-2024-0436
+# paste is unmaintained with no maintained drop-in replacement. It is a
+# proc-macro pulled in transitively via parquet / datafusion and there is no
+# current fix, so we ignore the unmaintained warning.
+
+# RUSTSEC-2026-0194, RUSTSEC-2026-0195
+# https://rustsec.org/advisories/RUSTSEC-2026-0194
+# https://rustsec.org/advisories/RUSTSEC-2026-0195
+# quick-xml (0.37.x and 0.38.x) is pulled in transitively via iceberg 0.8.0
+# (through reqsign and opendal). The fix requires quick-xml >=0.41.0, which is a
+# breaking bump not reachable without a major iceberg/reqsign/opendal upgrade,
+# so we ignore until iceberg is bumped.
+
+# RUSTSEC-2026-0235
+# https://rustsec.org/advisories/RUSTSEC-2026-0235
+# rkyv 0.7.46 is an unused optional dependency of rust_decimal (behind its
+# "rkyv" feature, which is not enabled). It is only present in the lockfile,
+# never compiled. The fix requires rust_decimal to upgrade its optional rkyv
+# dependency from 0.7 to >=0.8.17.

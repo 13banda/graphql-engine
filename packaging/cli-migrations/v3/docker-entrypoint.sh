@@ -46,8 +46,15 @@ wait_for_port() {
 
 log "migrations-startup" "starting graphql engine temporarily on port $HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT"
 
-# start graphql engine with metadata api enabled
-$HGE_BINARY serve --enabled-apis="metadata" \
+# start graphql engine with metadata api enabled. Disable event processing so
+# the temporary server does not poll for / deliver event triggers, cron
+# triggers, scheduled events or async actions while we apply migrations and
+# metadata — this avoids competing with the migration workload for database
+# resources and avoids sending events during migration. Unlike
+# HASURA_GRAPHQL_DISABLE_EVENTING this keeps the eventing subsystem otherwise
+# intact, so source catalog migrations still create the eventing catalog tables
+# (required when applying metadata that defines event triggers on a fresh db).
+HASURA_GRAPHQL_DISABLE_EVENT_PROCESSING=true $HGE_BINARY serve --enabled-apis="metadata" \
                --server-port=${HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT}  &
 # store the pid to kill it later
 PID=$!
@@ -67,6 +74,18 @@ if [ -z ${HASURA_GRAPHQL_METADATA_DIR+x} ]; then
     HASURA_GRAPHQL_METADATA_DIR="$DEFAULT_METADATA_DIR"
 fi
 
+# By default, metadata allows inconsistent metadata.
+# Set HASURA_GRAPHQL_DISALLOW_INCONSISTENT_METADATA=true to prevent
+# persisting metadata that references non-existent database objects.
+METADATA_APPLY_FLAGS=""
+if [ -n "${HASURA_GRAPHQL_DISALLOW_INCONSISTENT_METADATA+x}" ]; then
+    DISALLOW_INCONSISTENT_METADATA=$(echo "$HASURA_GRAPHQL_DISALLOW_INCONSISTENT_METADATA" | tr '[:upper:]' '[:lower:]')
+    if [ "$DISALLOW_INCONSISTENT_METADATA" = "true" ]; then
+        log "migrations-apply" "HASURA_GRAPHQL_DISALLOW_INCONSISTENT_METADATA is set, metadata apply will disallow inconsistent metadata"
+        METADATA_APPLY_FLAGS="--disallow-inconsistent-metadata"
+    fi
+fi
+
 # apply metadata if the directory exist
 if [ -d "$HASURA_GRAPHQL_METADATA_DIR" ]; then
     rm -rf "$TEMP_PROJECT_DIR"
@@ -77,7 +96,7 @@ if [ -d "$HASURA_GRAPHQL_METADATA_DIR" ]; then
     echo "version: 3" > config.yaml
     echo "endpoint: http://localhost:$HASURA_GRAPHQL_MIGRATIONS_SERVER_PORT" >> config.yaml
     echo "metadata_directory: metadata" >> config.yaml
-    hasura-cli metadata apply 
+    hasura-cli metadata apply $METADATA_APPLY_FLAGS
 else
     log "migrations-apply" "directory $HASURA_GRAPHQL_METADATA_DIR does not exist, skipping metadata"
 fi

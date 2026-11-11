@@ -1,24 +1,28 @@
 import { AiOutlineReload } from 'react-icons/ai';
-import { Button } from '../../../../new-components/Button';
-import { IndicatorCard } from '../../../../new-components/IndicatorCard';
-import { hasuraToast } from '../../../../new-components/Toasts';
-import { MetadataSelectors, useMetadata } from '../../../hasura-metadata-api';
-import { DisplayToastErrorMessage } from '../../components/DisplayErrorMessage';
+import {
+  Button,
+  DisplayToastErrorMessage,
+  IndicatorCard,
+  SkeletonList,
+  hasuraToast,
+  showErrorNotification,
+  useDestructiveAlert,
+} from '@hasura/shared/ui';
+import { useMetadata } from '@hasura/metadata/api';
 import { useTrackNativeQueryRelationships } from '../../hooks/useTrackNativeQueryRelationships/useTrackNativeQueryRelationships';
 import { ListNativeQueryRelationships } from './components';
 import { useWidget } from './hooks/useWidget';
-import Skeleton from 'react-loading-skeleton';
 import { ListNativeQueryRow } from './components/ListNativeQueryRelationships';
-import { useDestructiveAlert } from '../../../../new-components/Alert';
+import { MetadataSelectors } from '@hasura/metadata/helpers';
 import { useCallback } from 'react';
 
-export type NativeQueryRelationshipProps = {
+type NativeQueryRelationshipProps = {
   dataSourceName: string;
   nativeQueryName: string;
 };
 
 export const NativeQueryRelationships = (
-  props: NativeQueryRelationshipProps
+  props: NativeQueryRelationshipProps,
 ) => {
   const { dataSourceName, nativeQueryName } = props;
 
@@ -31,8 +35,8 @@ export const NativeQueryRelationships = (
     error: sourceNativeQueryNotFoundError,
     refetch,
     isRefetching,
-  } = useMetadata(m =>
-    MetadataSelectors.findNativeQuery(dataSourceName, nativeQueryName)(m)
+  } = useMetadata((m) =>
+    MetadataSelectors.findNativeQuery(dataSourceName, nativeQueryName)(m),
   );
 
   const handleError = useCallback((err: Error) => {
@@ -43,7 +47,7 @@ export const NativeQueryRelationships = (
         const lastItem = parsed[parsed.length - 1];
         if (Array.isArray(lastItem)) {
           const listOfReasons: string[] = [];
-          lastItem.forEach(err => {
+          lastItem.forEach((err) => {
             if ('reason' in err) {
               listOfReasons.push(err.reason);
             }
@@ -58,14 +62,13 @@ export const NativeQueryRelationships = (
         }
       } else {
         throw new Error(
-          'Error message is not an array, falling back to showing error.message in raw string format'
+          'Error message is not an array, falling back to showing error.message in raw string format',
         );
       }
     } catch {
-      hasuraToast({
-        type: 'error',
+      showErrorNotification({
         title: 'Failed to edit relationship',
-        children: <DisplayToastErrorMessage message={err.message} />,
+        error: err,
       });
     }
   }, []);
@@ -73,7 +76,7 @@ export const NativeQueryRelationships = (
   const { WidgetUI, openCreate, openEdit, closeWidget } = useWidget({
     nativeQueryName,
     dataSourceName,
-    onSubmit: params => {
+    onSubmit: (params) => {
       const { values, mode } = params;
       trackNativeQueryRelationship({
         data: {
@@ -114,7 +117,7 @@ export const NativeQueryRelationships = (
       resourceType: 'relationship',
       destroyTerm: 'remove',
       onConfirm: () =>
-        new Promise(resolve => {
+        new Promise((resolve) => {
           untrackNativeQueryRelationship({
             data: {
               name: data.name,
@@ -123,12 +126,11 @@ export const NativeQueryRelationships = (
             onSuccess: () => {
               resolve(true);
             },
-            onError: err => {
+            onError: (err) => {
               resolve(false);
-              hasuraToast({
-                type: 'error',
+              showErrorNotification({
                 title: 'Failed to delete relationship',
-                children: <DisplayToastErrorMessage message={err.message} />,
+                error: err,
               });
             },
           });
@@ -145,7 +147,7 @@ export const NativeQueryRelationships = (
     });
   };
 
-  if (isMetadataLoading) return <Skeleton count={10} />;
+  if (isMetadataLoading) return <SkeletonList count={5} />;
 
   if (sourceNativeQueryNotFoundError)
     return (
@@ -164,9 +166,9 @@ export const NativeQueryRelationships = (
           Could not find Native Query : {nativeQueryName} in metadata. Please
           reload metadata and try again.
           <Button
-            icon={<AiOutlineReload />}
+            leftIcon={AiOutlineReload}
             onClick={() => refetch()}
-            isLoading={isRefetching}
+            loading={isRefetching}
           >
             Reload Metadata
           </Button>

@@ -1,11 +1,14 @@
 import { useContext } from 'react';
+import { Flex } from '@radix-ui/themes';
 import isEmpty from 'lodash/isEmpty';
-import { isPrimitive } from './utils/helpers';
+import { isComparator, isPrimitive } from './utils/helpers';
 import { tableContext } from './TableProvider';
 import { Key } from './Key';
 import { Token } from './Token';
 import { EntryType } from './EntryType';
 import { useOperators } from './utils/comparatorsFromSchema';
+import { InputSuggestion } from './InputSuggestion';
+import clsx from 'clsx';
 
 export const Entry = ({
   k,
@@ -19,7 +22,13 @@ export const Entry = ({
   const { table } = useContext(tableContext);
   const isDisabled = k === '_where' && isEmpty(table);
   const operators = useOperators({ path });
-  const operator = operators.find(o => o.name === k);
+  const operator = operators.find((o) => o.name === k);
+
+  const entryClass = clsx({
+    'my-2': true,
+    'bg-(--gray-a3)': isDisabled,
+  });
+
   if (
     operator?.name === '_contains' ||
     operator?.name === '_contained_in' ||
@@ -29,15 +38,13 @@ export const Entry = ({
     return (
       <div
         style={{ marginLeft: 8 + (path.length + 1) * 4 + 'px' }}
-        className={`my-2 ${isDisabled ? 'bg-gray-50' : ''}`}
+        className={entryClass}
       >
-        <div className={`p-2 ${isPrimitive(v) ? ' flex gap-4' : ''}`}>
-          <span className="flex gap-4">
-            <Key k={k} path={path} v={v} />
-            <span>: </span>
-            <EntryType k={k} v={v} path={path} />
-          </span>
-        </div>
+        <Flex gap="4" className="px-2" align="center">
+          <Key k={k} path={path} v={v} />
+          <span>: </span>
+          <EntryType k={k} v={v} path={path} />
+        </Flex>
       </div>
     );
   }
@@ -45,16 +52,18 @@ export const Entry = ({
   return (
     <div
       style={{ marginLeft: 8 + (path.length + 1) * 4 + 'px' }}
-      className={`my-2 ${isDisabled ? 'bg-gray-50' : ''}`}
+      className={entryClass}
     >
-      <div className={`p-2 ${isPrimitive(v) ? ' flex gap-4' : ''}`}>
-        <span className="flex gap-4">
+      <div
+        className={`px-2 ${isPrimitive(v) ? ' flex gap-4 content-center' : ''}`}
+      >
+        <Flex gap="4" align="center">
           <Key k={k} path={path} v={v} />
           <span>: </span>
           <OpenToken v={v} />
-        </span>
+        </Flex>
         <EntryType k={k} v={v} path={path} />
-        <EndToken v={v} />
+        <EndToken v={v} path={path} k={k} />
       </div>
     </div>
   );
@@ -68,16 +77,23 @@ function OpenToken({ v }: { v: any }) {
   );
 }
 
-function EndToken({ v }: { v: any }) {
+function EndToken({ v, path, k }: { v: any; path: string[]; k: string }) {
   return Array.isArray(v) ? (
-    <div className="flex gap-2">
+    <Flex gap="2" align="center" className="pt-2">
       <Token token={']'} inline />
       <Token token={','} inline />
-    </div>
+      {isComparator(k)?.name === '_in' || isComparator(k)?.name === '_nin' ? (
+        <InputSuggestion
+          comparatorName={path[path.length - 1]}
+          componentLevelId={`${path.join('.')}-value-input`}
+          path={path}
+        />
+      ) : null}
+    </Flex>
   ) : isPrimitive(v) ? null : (
-    <div className="flex gap-2">
+    <Flex gap="2">
       <Token token={'}'} inline />
       <Token token={','} inline />
-    </div>
+    </Flex>
   );
 }

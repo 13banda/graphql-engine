@@ -1,7 +1,7 @@
 import React from 'react';
-import { StoryObj, Meta } from '@storybook/react';
+import { StoryObj, Meta } from '@storybook/react-webpack5';
 import { z } from 'zod';
-import { SimpleForm } from '../../../../new-components/Form';
+import { SimpleForm } from '@hasura/shared/ui';
 
 import { BackendOnlySection, BackEndOnlySectionProps } from './BackendOnly';
 
@@ -26,7 +26,9 @@ export const BackendOnlyEnabled: StoryObj<BackEndOnlySectionProps> = {
     (StoryComponent: React.FC) => (
       <SimpleForm
         schema={schema}
-        onSubmit={() => {}}
+        onSubmit={() => {
+          /* noop */
+        }}
         options={{ defaultValues: { backendOnly: true } }}
         className="p-4"
       >
@@ -45,7 +47,9 @@ export const BackendOnlyDisabled: StoryObj<BackEndOnlySectionProps> = {
     (StoryComponent: React.FC) => (
       <SimpleForm
         schema={schema}
-        onSubmit={() => {}}
+        onSubmit={() => {
+          /* noop */
+        }}
         options={{ defaultValues: { backendOnly: false } }}
         className="p-4"
       >

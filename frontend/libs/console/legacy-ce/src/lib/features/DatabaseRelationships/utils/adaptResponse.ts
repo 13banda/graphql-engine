@@ -1,5 +1,4 @@
-import { isSameTableObjectRelationship } from '../../DataSource';
-import { areTablesEqual } from '../../hasura-metadata-api';
+import { isSameTableObjectRelationship } from '@hasura/metadata/data-source';
 import {
   Legacy_SourceToRemoteSchemaRelationship,
   LocalTableArrayRelationship,
@@ -10,7 +9,7 @@ import {
   SourceToRemoteSchemaRelationship,
   SourceToSourceRelationship,
   Table,
-} from '../../hasura-metadata-types';
+} from '@hasura/shared/types';
 import isEqual from 'lodash/isEqual';
 import {
   LocalRelationship,
@@ -18,6 +17,7 @@ import {
   RemoteSchemaRelationship,
   SuggestedRelationship,
 } from '../types';
+import { areTablesEqual } from '@hasura/metadata/helpers';
 
 const getKeyValuePair = (arr1: string[], arr2: string[]) => {
   const result: Record<string, string> = {};
@@ -27,11 +27,15 @@ const getKeyValuePair = (arr1: string[], arr2: string[]) => {
   return result;
 };
 
+// constraint columns are compared regardless of their order
+const areColumnsEqual = (columns1: string[], columns2: string[]) =>
+  isEqual([...columns1].sort(), [...columns2].sort());
+
 type FkDefinition = {
   fromColumns?: string[];
-  fromTable: Table;
+  fromTable: Table | undefined;
   toColumns?: string[];
-  toTable: Table;
+  toTable: Table | undefined;
   mapping: Record<string, string>;
 };
 
@@ -41,20 +45,20 @@ const getFkDefinition = (
     | SameTableObjectRelationship
     | LocalTableObjectRelationship
     | LocalTableArrayRelationship,
-  suggestedRelationships: SuggestedRelationship[]
+  suggestedRelationships: SuggestedRelationship[],
 ): FkDefinition => {
   if (isSameTableObjectRelationship(relationship)) {
     const fromTable = table;
     const fromColumns = Array.isArray(
-      relationship.using.foreign_key_constraint_on
+      relationship.using.foreign_key_constraint_on,
     )
       ? relationship.using.foreign_key_constraint_on
       : [relationship.using.foreign_key_constraint_on];
 
     const matchingFkConstraint = suggestedRelationships.find(
-      suggestedRelationship =>
+      (suggestedRelationship) =>
         areTablesEqual(fromTable, suggestedRelationship.from.table) &&
-        isEqual(fromColumns.sort(), suggestedRelationship.from.columns)
+        areColumnsEqual(fromColumns, suggestedRelationship.from.columns),
     );
 
     return {
@@ -65,7 +69,7 @@ const getFkDefinition = (
       mapping: matchingFkConstraint
         ? getKeyValuePair(
             matchingFkConstraint.from.columns,
-            matchingFkConstraint.to.columns
+            matchingFkConstraint.to.columns,
           )
         : {},
     };
@@ -77,24 +81,35 @@ const getFkDefinition = (
       : relationship.using.foreign_key_constraint_on.columns;
 
   const matchingFkConstraint = suggestedRelationships.find(
-    suggestedRelationship => {
+    (suggestedRelationship) => {
       const sameFromTable = areTablesEqual(
         table,
-        suggestedRelationship.from.table
+        suggestedRelationship.from.table,
       );
 
-      const sameToColumns = isEqual(
-        toColumn.sort(),
-        suggestedRelationship.to.columns
+      const sameToColumns = areColumnsEqual(
+        toColumn,
+        suggestedRelationship.to.columns,
       );
       const sameToTable = areTablesEqual(
         relationship.using.foreign_key_constraint_on.table,
-        suggestedRelationship.to.table
+        suggestedRelationship.to.table,
       );
 
       return sameFromTable && sameToColumns && sameToTable;
-    }
+    },
   );
+
+  // the metadata names the table holding the foreign key, so the target is
+  // known even without a matching constraint
+  if (!matchingFkConstraint) {
+    return {
+      toTable: relationship.using.foreign_key_constraint_on.table,
+      toColumns: toColumn,
+      fromTable: table,
+      mapping: {},
+    };
+  }
 
   return {
     toTable: matchingFkConstraint?.to.table,
@@ -104,7 +119,7 @@ const getFkDefinition = (
     mapping: matchingFkConstraint
       ? getKeyValuePair(
           matchingFkConstraint.to.columns,
-          matchingFkConstraint.from.columns
+          matchingFkConstraint.from.columns,
         )
       : {},
   };
@@ -146,7 +161,7 @@ export const adaptLocalObjectRelationshipWithFkConstraint = ({
   const fkDefinition = getFkDefinition(
     table,
     relationship,
-    suggestedRelationships
+    suggestedRelationships,
   );
 
   const localRelationship: LocalRelationship = {
@@ -197,7 +212,7 @@ export const adaptLocalArrayRelationshipWithFkConstraint = ({
   const fkDefinition = getFkDefinition(
     table,
     relationship,
-    suggestedRelationships
+    suggestedRelationships,
   );
 
   const localRelationship: LocalRelationship = {

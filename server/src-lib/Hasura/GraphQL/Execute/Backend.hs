@@ -14,11 +14,11 @@ where
 import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.Aeson qualified as J
 import Data.Aeson.Casing qualified as J
-import Data.Aeson.Ordered qualified as JO
 import Data.Environment qualified as Env
 import Data.Kind (Type)
 import Data.Text.Extended
 import Data.Text.NonEmpty (mkNonEmptyTextUnsafe)
+import Hasura.Authentication.User (UserInfo)
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.GraphQL.Execute.Action.Types (ActionExecutionPlan)
@@ -43,7 +43,6 @@ import Hasura.RQL.Types.Schema.Options qualified as Options
 import Hasura.RemoteSchema.SchemaCache
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.Server.Types
-import Hasura.Session
 import Hasura.Tracing (MonadTrace)
 import Hasura.Tracing qualified as Tracing
 import Language.GraphQL.Draft.Syntax qualified as G
@@ -82,6 +81,7 @@ class
     QueryDB b Void (UnpreparedValue b) ->
     [HTTP.Header] ->
     Maybe G.Name ->
+    TraceQueryStatus ->
     m ((DBStepInfo b), [ModelInfoPart])
   mkDBMutationPlan ::
     forall m.
@@ -103,6 +103,7 @@ class
     Maybe G.Name ->
     Maybe (HashMap G.Name (G.Value G.Variable)) ->
     HeaderPrecedence ->
+    TraceQueryStatus ->
     m (DBStepInfo b, [ModelInfoPart])
   mkLiveQuerySubscriptionPlan ::
     forall m.
@@ -111,6 +112,7 @@ class
       MonadBaseControl IO m,
       MonadReader QueryTagsComment m
     ) =>
+    Options.RemoveEmptySubscriptionResponses ->
     UserInfo ->
     SourceName ->
     SourceConfig b ->
@@ -126,6 +128,7 @@ class
       MonadBaseControl IO m,
       MonadReader QueryTagsComment m
     ) =>
+    Options.RemoveEmptySubscriptionResponses ->
     UserInfo ->
     SourceName ->
     SourceConfig b ->
@@ -178,6 +181,7 @@ class
     [HTTP.Header] ->
     Maybe G.Name ->
     Options.StringifyNumbers ->
+    TraceQueryStatus ->
     m (DBStepInfo b, [ModelInfoPart])
 
 -- | This is a helper function to convert a remote source's relationship to a
@@ -328,7 +332,7 @@ data ExecutionStep where
     ExecutionStep
   -- | Output a plain JSON object
   ExecStepRaw ::
-    JO.Value ->
+    EncJSON ->
     ExecutionStep
   ExecStepMulti ::
     [ExecutionStep] ->

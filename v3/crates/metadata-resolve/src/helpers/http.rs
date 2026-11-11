@@ -1,13 +1,12 @@
 //! Wrapper over HTTP types which can serialized/deserialized
 
+use http::header::{HeaderMap, HeaderName, HeaderValue};
 use indexmap::IndexMap;
-use open_dds::EnvironmentValue;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use serde::{Deserialize, Serialize};
 use serde::{
     de::Error as DeError,
     ser::{Error as SerError, SerializeMap},
 };
-use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt::Display, str::FromStr};
 
 #[derive(Debug)]
@@ -20,21 +19,21 @@ impl Display for HeaderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HeaderError::InvalidHeaderName { header_name } => {
-                write!(f, "invalid HTTP header name: {}", header_name)
+                write!(f, "invalid HTTP header name: {header_name}")
             }
             HeaderError::InvalidHeaderValue { header_name } => {
-                write!(f, "invalid HTTP header value: {}", header_name)
+                write!(f, "invalid HTTP header value: {header_name}")
             }
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SerializableUrl(pub reqwest::Url);
+pub struct SerializableUrl(pub url::Url);
 
 impl SerializableUrl {
-    pub fn new(url: &str) -> Result<Self, url::ParseError> {
-        let url = reqwest::Url::parse(url)?;
+    pub fn new(url_str: &str) -> Result<Self, url::ParseError> {
+        let url = url::Url::parse(url_str)?;
         Ok(Self(url))
     }
 }
@@ -54,16 +53,15 @@ impl<'de> Deserialize<'de> for SerializableUrl {
         D: serde::Deserializer<'de>,
     {
         let url_str = String::deserialize(deserializer)?;
-        let url = reqwest::Url::parse(&url_str)
+        let url = url::Url::parse(&url_str)
             .map_err(|_| D::Error::custom(format!("Invalid URL: {url_str}")))?;
         Ok(SerializableUrl(url))
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SerializableHeaderName(pub HeaderName);
 
-#[allow(dead_code)]
 impl SerializableHeaderName {
     pub fn new(header_name_str: String) -> Result<Self, HeaderError> {
         let header_name =
@@ -97,7 +95,7 @@ impl<'de> Deserialize<'de> for SerializableHeaderName {
 pub struct SerializableHeaderMap(pub HeaderMap);
 
 impl SerializableHeaderMap {
-    pub fn new(headers: &IndexMap<String, EnvironmentValue>) -> Result<Self, HeaderError> {
+    pub fn new(headers: &IndexMap<String, String>) -> Result<Self, HeaderError> {
         let header_map = headers
             .iter()
             .map(|(k, v)| {
@@ -105,10 +103,8 @@ impl SerializableHeaderMap {
                     HeaderName::from_str(k).map_err(|_| HeaderError::InvalidHeaderName {
                         header_name: k.clone(),
                     })?,
-                    HeaderValue::from_str(&v.value).map_err(|_| {
-                        HeaderError::InvalidHeaderValue {
-                            header_name: k.clone(),
-                        }
+                    HeaderValue::from_str(v).map_err(|_| HeaderError::InvalidHeaderValue {
+                        header_name: k.clone(),
                     })?,
                 ))
             })

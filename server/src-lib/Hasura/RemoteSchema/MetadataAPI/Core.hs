@@ -21,12 +21,10 @@ import Data.Text.Extended
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.GraphQL.RemoteServer
-import Hasura.GraphQL.Schema.Common (SchemaSampledFeatureFlags)
 import Hasura.Prelude
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Metadata
 import Hasura.RQL.Types.Metadata.Object
-import Hasura.RQL.Types.Roles (RoleName)
 import Hasura.RQL.Types.SchemaCache
 import Hasura.RQL.Types.SchemaCache.Build
 import Hasura.RQL.Types.SchemaCacheTypes
@@ -34,7 +32,6 @@ import Hasura.RemoteSchema.Metadata
 import Hasura.RemoteSchema.SchemaCache.Build (addRemoteSchemaP2Setup)
 import Hasura.RemoteSchema.SchemaCache.Types
 import Hasura.Services
-import Hasura.Session (UserInfoM)
 import Hasura.Tracing qualified as Tracing
 
 -- | The payload for 'add_remote_schema', and a component of 'Metadata'.
@@ -56,13 +53,17 @@ instance J.ToJSON AddRemoteSchemaQuery where
   toJSON = J.genericToJSON hasuraJSON
   toEncoding = J.genericToEncoding hasuraJSON
 
-newtype RemoteSchemaNameQuery = RemoteSchemaNameQuery
-  { _rsnqName :: RemoteSchemaName
+data RemoteSchemaNameQuery = RemoteSchemaNameQuery
+  { _rsnqName :: RemoteSchemaName,
+    _rsnqCascade :: Maybe Bool
   }
   deriving (Show, Eq, Generic)
 
 instance J.FromJSON RemoteSchemaNameQuery where
-  parseJSON = J.genericParseJSON hasuraJSON
+  parseJSON = J.withObject "RemoteSchemaNameQuery" $ \o -> do
+    name <- o J..: "name"
+    cascade <- o J..:? "cascade"
+    pure $ RemoteSchemaNameQuery name cascade
 
 instance J.ToJSON RemoteSchemaNameQuery where
   toJSON = J.genericToJSON hasuraJSON
@@ -77,12 +78,11 @@ runAddRemoteSchema ::
     Tracing.MonadTrace m
   ) =>
   Env.Environment ->
-  SchemaSampledFeatureFlags ->
   AddRemoteSchemaQuery ->
   m EncJSON
-runAddRemoteSchema env schemaSampledFeatureFlags (AddRemoteSchemaQuery name defn comment) = do
+runAddRemoteSchema env (AddRemoteSchemaQuery name defn comment) = do
   addRemoteSchemaP1 name
-  void $ addRemoteSchemaP2Setup name env schemaSampledFeatureFlags defn
+  void $ addRemoteSchemaP2Setup name env defn
   buildSchemaCacheFor (MORemoteSchema name)
     $ MetadataModifier
     $ metaRemoteSchemas
@@ -106,28 +106,31 @@ addRemoteSchemaP1 name = do
     <<> " already exists"
 
 runRemoveRemoteSchema ::
-  (QErrM m, UserInfoM m, CacheRWM m, MetadataM m) =>
+  (QErrM m, CacheRWM m, MetadataM m) =>
   RemoteSchemaNameQuery ->
   m EncJSON
-runRemoveRemoteSchema (RemoteSchemaNameQuery rsn) = do
-  void $ removeRemoteSchemaP1 rsn
+runRemoveRemoteSchema (RemoteSchemaNameQuery rsn mCascade) = do
+  deps <- removeRemoteSchemaP1 rsn (fromMaybe False mCascade)
+  metadataModifier <- execWriterT $ do
+    traverse_ purgeSourceAndSchemaDependencies deps
+    tell $ dropRemoteSchemaInMetadata rsn
   withNewInconsistentObjsCheck
     $ buildSchemaCache
-    $ dropRemoteSchemaInMetadata rsn
+    $ metadataModifier
   pure successMsg
 
 removeRemoteSchemaP1 ::
-  (UserInfoM m, QErrM m, CacheRM m) =>
+  (QErrM m, CacheRM m) =>
   RemoteSchemaName ->
-  m [RoleName]
-removeRemoteSchemaP1 rsn = do
+  Bool ->
+  m [SchemaObjId]
+removeRemoteSchemaP1 rsn cascade = do
   sc <- askSchemaCache
   let rmSchemas = scRemoteSchemas sc
   void
     $ onNothing (HashMap.lookup rsn rmSchemas)
     $ throw400 NotExists "no such remote schema"
   let depObjs = getDependentObjs sc remoteSchemaDepId
-      roles = mapMaybe getRole depObjs
       nonPermDependentObjs = filter nonPermDependentObjPredicate depObjs
   -- report non permission dependencies (if any), this happens
   -- mostly when a remote relationship is defined with
@@ -135,15 +138,10 @@ removeRemoteSchemaP1 rsn = do
 
   -- we only report the non permission dependencies because we
   -- drop the related permissions
-  unless (null nonPermDependentObjs) $ reportDependentObjectsExist nonPermDependentObjs
-  pure roles
+  unless (cascade || null nonPermDependentObjs) $ reportDependentObjectsExist nonPermDependentObjs
+  pure nonPermDependentObjs
   where
     remoteSchemaDepId = SORemoteSchema rsn
-
-    getRole depObj =
-      case depObj of
-        SORemoteSchemaPermission _ role -> Just role
-        _ -> Nothing
 
     nonPermDependentObjPredicate (SORemoteSchemaPermission _ _) = False
     nonPermDependentObjPredicate _ = True
@@ -152,7 +150,7 @@ runReloadRemoteSchema ::
   (QErrM m, CacheRWM m, MetadataM m) =>
   RemoteSchemaNameQuery ->
   m EncJSON
-runReloadRemoteSchema (RemoteSchemaNameQuery name) = do
+runReloadRemoteSchema (RemoteSchemaNameQuery name _) = do
   remoteSchemas <- getAllRemoteSchemas <$> askSchemaCache
   unless (name `elem` remoteSchemas)
     $ throw400 NotExists
@@ -168,7 +166,7 @@ runReloadRemoteSchema (RemoteSchemaNameQuery name) = do
 
 runIntrospectRemoteSchema ::
   (CacheRM m, QErrM m) => RemoteSchemaNameQuery -> m EncJSON
-runIntrospectRemoteSchema (RemoteSchemaNameQuery rsName) = do
+runIntrospectRemoteSchema (RemoteSchemaNameQuery rsName _) = do
   sc <- askSchemaCache
   RemoteSchemaCtx {..} <-
     HashMap.lookup rsName (scRemoteSchemas sc) `onNothing` throw400 NotExists ("remote schema: " <> rsName <<> " not found")
@@ -183,10 +181,9 @@ runUpdateRemoteSchema ::
     Tracing.MonadTrace m
   ) =>
   Env.Environment ->
-  SchemaSampledFeatureFlags ->
   AddRemoteSchemaQuery ->
   m EncJSON
-runUpdateRemoteSchema env schemaSampledFeatureFlags (AddRemoteSchemaQuery name defn comment) = do
+runUpdateRemoteSchema env (AddRemoteSchemaQuery name defn comment) = do
   remoteSchemaNames <- getAllRemoteSchemas <$> askSchemaCache
   remoteSchemaMap <- _metaRemoteSchemas <$> getMetadata
 
@@ -215,7 +212,7 @@ runUpdateRemoteSchema env schemaSampledFeatureFlags (AddRemoteSchemaQuery name d
         || (isJust metadataRMSchemaURLFromEnv && isJust currentRMSchemaURLFromEnv && metadataRMSchemaURLFromEnv == currentRMSchemaURLFromEnv)
     )
     $ void
-    $ fetchRemoteSchema env schemaSampledFeatureFlags rsi
+    $ fetchRemoteSchema env (fromMaybe (_vrsdHeaders rsi) (_rsdIntrospectionHeaders defn)) rsi
 
   -- This will throw an error if the new schema fetched in incompatible
   -- with the existing permissions and relations

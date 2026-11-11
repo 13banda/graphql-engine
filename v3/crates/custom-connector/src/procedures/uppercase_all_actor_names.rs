@@ -1,18 +1,37 @@
 use std::collections::BTreeMap;
 
-use axum::{http::StatusCode, Json};
+use axum::{Json, http::StatusCode};
 use ndc_models;
 
 use crate::{
-    query::{eval_nested_field, Result},
+    arguments::check_all_arguments_used,
+    query::{Result, eval_nested_field},
     state::AppState,
 };
 
+pub(crate) fn procedure_info() -> ndc_models::ProcedureInfo {
+    ndc_models::ProcedureInfo {
+        name: "uppercase_all_actor_names".into(),
+        description: Some("Uppercase all actor names".into()),
+        arguments: BTreeMap::new(),
+        result_type: ndc_models::Type::Nullable {
+            underlying_type: Box::new(ndc_models::Type::Array {
+                element_type: Box::new(ndc_models::Type::Named {
+                    name: "actor".into(),
+                }),
+            }),
+        },
+    }
+}
+
 pub(crate) fn execute(
-    fields: &Option<ndc_models::NestedField>,
-    collection_relationships: &BTreeMap<String, ndc_models::Relationship>,
+    arguments: &BTreeMap<ndc_models::ArgumentName, serde_json::Value>,
+    fields: Option<&ndc_models::NestedField>,
+    collection_relationships: &BTreeMap<ndc_models::RelationshipName, ndc_models::Relationship>,
     state: &mut AppState,
 ) -> Result<serde_json::Value> {
+    check_all_arguments_used(arguments)?;
+
     let mut actors_list = vec![];
     let current_state = state.actors.clone();
     for (actor_id, actor) in &current_state {

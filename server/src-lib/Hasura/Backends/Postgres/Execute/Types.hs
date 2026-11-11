@@ -45,6 +45,9 @@ import Data.Text.Extended (toTxt)
 import Database.PG.Query qualified as PG
 import Database.PG.Query.Class ()
 import Database.PG.Query.Connection qualified as PG
+import Hasura.Authentication.Role (adminRoleName)
+import Hasura.Authentication.Session (SessionVariables, getSessionVariableValue, maybeRoleFromSessionVariables)
+import Hasura.Authentication.User (UserInfo (_uiRole, _uiSession))
 import Hasura.Backends.Postgres.Connection.Settings (ConnectionTemplate (..), PostgresConnectionSetMemberName)
 import Hasura.Backends.Postgres.Execute.ConnectionTemplate
 import Hasura.Backends.Postgres.SQL.DML qualified as S
@@ -56,10 +59,7 @@ import Hasura.Prelude
 import Hasura.RQL.IR.BoolExp.RemoteRelationshipPredicate
 import Hasura.RQL.Types.Common (SourceName)
 import Hasura.RQL.Types.ResizePool
-import Hasura.RQL.Types.Roles (adminRoleName)
-import Hasura.RQL.Types.Session (SessionVariables (..))
 import Hasura.SQL.Types (ExtensionsSchema, toSQL)
-import Hasura.Session (UserInfo (_uiRole, _uiSession), getSessionVariableValue, maybeRoleFromSessionVariables)
 import Kriti.Error qualified as Kriti
 import Kriti.Parser qualified as Kriti
 import Network.HTTP.Types qualified as HTTP
@@ -90,6 +90,8 @@ data PGExecCtxInfo = PGExecCtxInfo
 data PGExecTxType
   = -- | a transaction without an explicit tranasction block
     NoTxRead
+  | -- | a transaction with read-write access and without an explicit transaction block
+    NoTxReadWrite
   | -- | a transaction block with custom transaction access and isolation level.
     --  Choose defaultIsolationLevel defined in 'SourceConnConfiguration' if
     --  "Nothing" is provided for isolation level.
@@ -123,6 +125,8 @@ mkPGExecCtx defaultIsoLevel pool resizeStrategy =
       _pecRunTx = \case
         -- \| Run a read only statement without an explicit transaction block
         (PGExecCtxInfo NoTxRead _) -> PG.runTx' pool
+        -- \| Run a read-write statement without an explicit transaction block
+        (PGExecCtxInfo NoTxReadWrite _) -> PG.runTx' pool
         -- \| Run a transaction
         (PGExecCtxInfo (Tx txAccess (Just isolationLevel)) _) -> PG.runTx pool (isolationLevel, Just txAccess)
         (PGExecCtxInfo (Tx txAccess Nothing) _) -> PG.runTx pool (defaultIsoLevel, Just txAccess)

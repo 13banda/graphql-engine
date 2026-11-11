@@ -41,6 +41,8 @@ import Data.Sequence qualified as Seq
 import Data.Set qualified as S
 import Data.Text qualified as T
 import Data.Text.Extended
+import Hasura.Authentication.Role
+import Hasura.Authentication.User (UserInfoM)
 import Hasura.Base.Error
 import Hasura.EncJSON
 import Hasura.Eventing.Backend
@@ -48,7 +50,6 @@ import Hasura.Function.API
 import Hasura.Function.Cache
 import Hasura.Function.Metadata (FunctionMetadata (..))
 import Hasura.GraphQL.Schema (buildGQLContext)
-import Hasura.GraphQL.Schema.Common
 import Hasura.Incremental qualified as Inc
 import Hasura.Logging
 import Hasura.LogicalModel.Cache (LogicalModelCache, LogicalModelInfo (..))
@@ -61,6 +62,7 @@ import Hasura.Metadata.Class
 import Hasura.NativeQuery.Cache (NativeQueryCache, NativeQueryInfo (..))
 import Hasura.NativeQuery.Lenses (nqmReturns)
 import Hasura.NativeQuery.Metadata (NativeQueryMetadata (..), getNativeQueryName)
+import Hasura.NativeQuery.Validation (DisableNativeQueryValidation)
 import Hasura.Prelude
 import Hasura.QueryTags
 import Hasura.RQL.DDL.Action
@@ -90,11 +92,9 @@ import Hasura.RQL.Types.EventTrigger
 import Hasura.RQL.Types.Metadata
 import Hasura.RQL.Types.Metadata.Backend
 import Hasura.RQL.Types.Metadata.Object
-import Hasura.RQL.Types.NamingCase
 import Hasura.RQL.Types.OpenTelemetry
 import Hasura.RQL.Types.QueryCollection
 import Hasura.RQL.Types.Relationships.Remote
-import Hasura.RQL.Types.Roles
 import Hasura.RQL.Types.ScheduledTrigger
 import Hasura.RQL.Types.SchemaCache
 import Hasura.RQL.Types.SchemaCache.Build
@@ -107,11 +107,9 @@ import Hasura.RemoteSchema.SchemaCache
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.SQL.BackendMap (BackendMap)
 import Hasura.SQL.BackendMap qualified as BackendMap
-import Hasura.Server.Init.FeatureFlag qualified as FF
 import Hasura.Server.Migrate.Version
 import Hasura.Server.Types
 import Hasura.Services
-import Hasura.Session
 import Hasura.StoredProcedure.Cache (StoredProcedureCache, StoredProcedureInfo (..))
 import Hasura.StoredProcedure.Metadata (StoredProcedureMetadata (..))
 import Hasura.Table.API
@@ -162,14 +160,15 @@ action/function.
 buildRebuildableSchemaCache ::
   Logger Hasura ->
   Env.Environment ->
+  DisableNativeQueryValidation ->
   MetadataWithResourceVersion ->
   CacheDynamicConfig ->
   Maybe SchemaRegistryContext ->
   CacheBuild RebuildableSchemaCache
-buildRebuildableSchemaCache logger env metadataWithVersion dynamicConfig mSchemaRegistryContext = do
+buildRebuildableSchemaCache logger env disableNativeQueryValidation metadataWithVersion dynamicConfig mSchemaRegistryContext = do
   result <-
     flip runReaderT CatalogSync
-      $ Inc.build (buildSchemaCacheRule logger env mSchemaRegistryContext) (metadataWithVersion, dynamicConfig, initialInvalidationKeys, Nothing)
+      $ Inc.build (buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryContext) (metadataWithVersion, dynamicConfig, initialInvalidationKeys, Nothing)
 
   pure $ RebuildableSchemaCache (fst $ Inc.result result) initialInvalidationKeys (Inc.rebuildRule result)
 
@@ -199,14 +198,6 @@ newtype CacheRWT m a
       ProvidesNetwork
     )
   deriving anyclass (MonadQueryTags)
-
--- | Since 'CacheRWT' runs in a context where we have sampled the feature flags
--- we intentionally use those for 'HasFeatureFlagChecker', so that we always give
--- coherent results consistent with the 'CacheDynamicConfig'.
-instance (Monad m) => FF.HasFeatureFlagChecker (CacheRWT m) where
-  checkFlag ff = do
-    ffs <- CacheRWT $ asks _cdcSchemaSampledFeatureFlags
-    withSchemaSampledFeatureFlags ffs (FF.checkFlag ff)
 
 instance (MonadReader r m) => MonadReader r (CacheRWT m) where
   ask = lift ask
@@ -446,10 +437,11 @@ buildSchemaCacheRule ::
   ) =>
   Logger Hasura ->
   Env.Environment ->
+  DisableNativeQueryValidation ->
   Maybe SchemaRegistryContext ->
   (MetadataWithResourceVersion, CacheDynamicConfig, InvalidationKeys, Maybe StoredIntrospection)
     `arr` (SchemaCache, (SourcesIntrospectionStatus, SchemaRegistryAction))
-buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResourceVersion metadataNoDefaults interimMetadataResourceVersion, dynamicConfig, invalidationKeys, storedIntrospection) -> do
+buildSchemaCacheRule logger env disableNativeQueryValidation mSchemaRegistryContext = proc (MetadataWithResourceVersion metadataNoDefaults interimMetadataResourceVersion, dynamicConfig, invalidationKeys, storedIntrospection) -> do
   invalidationKeysDep <- Inc.newDependency -< invalidationKeys
   let metadataDefaults = _cdcMetadataDefaults dynamicConfig
       metadata@Metadata {..} = overrideMetadataDefaults metadataNoDefaults metadataDefaults
@@ -582,12 +574,12 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
         bindA
           -< do
             buildGQLContext
-              (_cdcSchemaSampledFeatureFlags dynamicConfig)
               (_cdcFunctionPermsCtx dynamicConfig)
               (_cdcRemoteSchemaPermsCtx dynamicConfig)
               (_cdcExperimentalFeatures dynamicConfig)
               (_cdcSQLGenCtx dynamicConfig)
               (_cdcApolloFederationStatus dynamicConfig)
+              (_cdcRelayMode dynamicConfig)
               (_boSources resolvedOutputs)
               (_boRemoteSchemas resolvedOutputs)
               (_boActions resolvedOutputs)
@@ -682,8 +674,7 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
       ) =>
       ( Inc.Dependency (HashMap SourceName Inc.InvalidationKey),
         Maybe LBS.ByteString,
-        BackendInfoAndSourceMetadata b,
-        SchemaSampledFeatureFlags
+        BackendInfoAndSourceMetadata b
       )
         `arr` Maybe (SourceConfig b, DBObjectsIntrospection b)
     tryResolveSource =
@@ -691,8 +682,7 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
         proc
           ( invalidationKeys,
             sourceIntrospection,
-            BackendInfoAndSourceMetadata {..},
-            schemaSampledFeatureFlags
+            BackendInfoAndSourceMetadata {..}
             )
         -> do
           let sourceName = _smName _bcasmSourceMetadata
@@ -702,9 +692,13 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
           case maybeSourceConfig of
             Nothing -> returnA -< Nothing
             Just sourceConfig -> do
-              databaseResponse <- bindA -< withSchemaSampledFeatureFlags schemaSampledFeatureFlags (resolveDatabaseMetadata logger _bcasmSourceMetadata sourceConfig)
+              databaseResponse <- bindA -< resolveDatabaseMetadata logger _bcasmSourceMetadata sourceConfig
               case databaseResponse of
-                Right databaseMetadata -> do
+                Right rawDatabaseMetadata -> do
+                  -- Apply backend-specific normalisation (e.g. Postgres drops the
+                  -- deprecated database COMMENT descriptions) before persisting and
+                  -- using the introspection.
+                  let databaseMetadata = normaliseDBObjectsIntrospection rawDatabaseMetadata
                   -- Collect database introspection to persist in the storage
                   tellA -< pure (CollectStoredIntrospection $ SourceIntrospectionItem sourceName $ encJFromJValue databaseMetadata)
                   returnA -< Just (sourceConfig, databaseMetadata)
@@ -714,8 +708,12 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
                     Nothing ->
                       -- If no stored introspection exist, re-throw the database exception
                       (| withRecordInconsistency (throwA -< databaseError) |) metadataObj
-                    Just storedMetadata -> do
-                      let inconsistencyMessage =
+                    Just rawStoredMetadata -> do
+                      -- Apply the same normalisation to stored introspection so that
+                      -- stale stored data (e.g. captured by an older server) cannot
+                      -- reintroduce database COMMENT descriptions.
+                      let storedMetadata = normaliseDBObjectsIntrospection rawStoredMetadata
+                          inconsistencyMessage =
                             T.unwords
                               [ "source " <>> sourceName,
                                 " is inconsistent because of stale database introspection is used.",
@@ -869,13 +867,9 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
       -- not forcing the evaluation here results in a measurable negative impact
       -- on memory residency as measured by our benchmark
       let !defaultNC = _cdcDefaultNamingConvention dynamicConfig
-          !isNamingConventionEnabled = EFNamingConventions `elem` (_cdcExperimentalFeatures dynamicConfig)
       !namingConv <-
         bindA
-          -<
-            if isNamingConventionEnabled
-              then getNamingCase sourceCustomization (namingConventionSupport @b) defaultNC
-              else pure HasuraCase
+          -< getNamingCase sourceCustomization (namingConventionSupport @b) defaultNC
       let resolvedCustomization = mkResolvedSourceCustomization sourceCustomization namingConv
 
       -- sql functions
@@ -1048,7 +1042,7 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
                           _lmiDescription = _nqmDescription,
                           _lmiPermissions = logicalModelPermissions
                         }
-                nqmCode <- validateNativeQuery @b env sourceName (_smConfiguration sourceMetadata) sourceConfig logicalModel preValidationNativeQuery
+                nqmCode <- validateNativeQuery @b disableNativeQueryValidation sourceConfig logicalModel preValidationNativeQuery
 
                 case maybeDependency of
                   Just dependency ->
@@ -1226,10 +1220,9 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
       remoteSchemaMap <-
         buildRemoteSchemas logger env
           -<
-            ((remoteSchemaInvalidationKeys, orderedRoles, fmap encJToLBS . siRemotes <$> storedIntrospection, _cdcSchemaSampledFeatureFlags dynamicConfig), InsOrdHashMap.elems remoteSchemas)
+            ((remoteSchemaInvalidationKeys, orderedRoles, fmap encJToLBS . siRemotes <$> storedIntrospection), InsOrdHashMap.elems remoteSchemas)
       let remoteSchemaCtxMap = HashMap.map fst remoteSchemaMap
           !defaultNC = _cdcDefaultNamingConvention dynamicConfig
-          !isNamingConventionEnabled = EFNamingConventions `elem` (_cdcExperimentalFeatures dynamicConfig)
 
       let backendInvalidationKeys = Inc.selectD #_ikBackends invalidationKeys
       backendCache <- resolveBackendCache -< (backendInvalidationKeys, BackendMap.elems backendConfigs)
@@ -1243,7 +1236,7 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
           Inc.keyed
             ( \_ exists ->
                 AB.dispatchAnyBackendArrow @BackendMetadata @BackendEventTrigger
-                  ( proc (backendInfoAndSourceMetadata :: BackendInfoAndSourceMetadata b, (dynamicConfig, invalidationKeys, storedIntrospection, defaultNC, isNamingConventionEnabled)) -> do
+                  ( proc (backendInfoAndSourceMetadata :: BackendInfoAndSourceMetadata b, (dynamicConfig, invalidationKeys, storedIntrospection, defaultNC)) -> do
                       let sourceMetadata = _bcasmSourceMetadata backendInfoAndSourceMetadata
                           sourceName = _smName sourceMetadata
                           sourceInvalidationsKeys = Inc.selectD #_ikSources invalidationKeys
@@ -1253,8 +1246,7 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
                           -<
                             ( sourceInvalidationsKeys,
                               encJToLBS <$> sourceIntrospection,
-                              backendInfoAndSourceMetadata,
-                              _cdcSchemaSampledFeatureFlags dynamicConfig
+                              backendInfoAndSourceMetadata
                             )
                       case maybeResolvedSource of
                         Nothing -> returnA -< Nothing
@@ -1262,7 +1254,7 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
                           let metadataInvalidationKey = Inc.selectD #_ikMetadata invalidationKeys
                               (tableInputs, _, _) = unzip3 $ map mkTableInputs $ InsOrdHashMap.elems $ _smTables sourceMetadata
                               scNamingConvention = _scNamingConvention $ _smCustomization sourceMetadata
-                              !namingConv = if isNamingConventionEnabled then fromMaybe defaultNC scNamingConvention else HasuraCase
+                              !namingConv = fromMaybe defaultNC scNamingConvention
                           tablesCoreInfo <-
                             buildTableCache
                               -<
@@ -1301,7 +1293,7 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
                                 $ PartiallyResolvedSource sourceMetadata sourceConfig source tablesCoreInfo eventTriggerInfoMaps
                   )
                   -<
-                    (exists, (dynamicConfig, invalidationKeys, storedIntrospection, defaultNC, isNamingConventionEnabled))
+                    (exists, (dynamicConfig, invalidationKeys, storedIntrospection, defaultNC))
             )
           |)
           (HashMap.fromList $ InsOrdHashMap.toList backendInfoAndSourceMetadata)
@@ -1706,7 +1698,8 @@ buildSchemaCacheRule logger env mSchemaRegistryContext = proc (MetadataWithResou
           withRecordInconsistencyM (mkActionMetadataObject action) $ modifyErr addActionContext do
             (resolvedDef, outObject) <- resolveAction env resolvedCustomTypes def scalarsMap
             let forwardClientHeaders = _adForwardClientHeaders resolvedDef
-            return $ ActionInfo name (outputType, outObject) resolvedDef permissionsMap forwardClientHeaders comment
+            let ignoredClientHeaders = _adIgnoredClientHeaders resolvedDef
+            return $ ActionInfo name (outputType, outObject) resolvedDef permissionsMap forwardClientHeaders ignoredClientHeaders comment
 
 buildRemoteSchemaRemoteRelationship ::
   (MonadWriter (Seq CollectItem) m) =>

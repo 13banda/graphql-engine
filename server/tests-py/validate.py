@@ -159,7 +159,7 @@ def check_event_transformed(hge_ctx,
 
 
 def test_forbidden_when_admin_secret_reqd(hge_ctx, conf):
-    if conf['url'] == '/v1/graphql' or conf['url'] == '/v1beta1/relay':
+    if conf['url'] == '/v1/graphql' or conf['url'] == '/v1/relay' or conf['url'] == '/v1beta1/relay':
         if conf['status'] == 404:
             status = [404]
         else:
@@ -199,7 +199,7 @@ def test_forbidden_when_admin_secret_reqd(hge_ctx, conf):
 
 
 def test_forbidden_webhook(hge_ctx, conf):
-    if conf['url'] == '/v1/graphql' or conf['url'] == '/v1beta1/relay':
+    if conf['url'] == '/v1/graphql' or conf['url'] == '/v1/relay' or conf['url'] == '/v1beta1/relay':
         if conf['status'] == 404:
             status = [404]
         else:
@@ -295,24 +295,22 @@ def validate_gql_ws_q(hge_ctx, conf, headers, retry=False, via_subscription=Fals
 
     if endpoint == '/v1alpha1/graphql':
         ws_client = hge_ctx.ws_client_v1alpha1
-    elif endpoint == '/v1beta1/relay':
+    elif endpoint == '/v1/relay':
         ws_client = hge_ctx.ws_client_relay
+    elif endpoint == '/v1beta1/relay':
+        ws_client = hge_ctx.ws_client_relay_v1beta1
     elif gqlws: # for `graphQL-ws` clients
         ws_client = hge_ctx.ws_client_graphql_ws
     else:
         ws_client = hge_ctx.ws_client
     print(ws_client.ws_url)
+
     if not headers or len(headers) == 0:
-        ws_client.init({})
+        ws_client.init_as_admin()
+    else:
+        ws_client.init(headers)
 
-    if ws_client.remote_closed or ws_client.is_closing:
-        ws_client.create_conn()
-        if not headers or len(headers) == 0 or hge_ctx.hge_key is None:
-            ws_client.init()
-        else:
-            ws_client.init_as_admin()
-
-    query_resp = ws_client.send_query(query, query_id='hge_test', headers=headers, timeout=15)
+    query_resp = ws_client.send_query(query, query_id='hge_test', timeout=15)
     resp = next(query_resp)
     print('websocket resp: ', resp)
 
@@ -320,7 +318,7 @@ def validate_gql_ws_q(hge_ctx, conf, headers, retry=False, via_subscription=Fals
         if retry:
             #Got query complete before payload. Retry once more
             print("Got query complete before getting query response payload. Retrying")
-            ws_client.recreate_conn()
+            ws_client.tear_down()
             return validate_gql_ws_q(hge_ctx, query, headers, exp_http_response, False)
         else:
             assert resp['type'] in ['data', 'error', 'next'], resp
@@ -394,7 +392,7 @@ def validate_http_anyq_with_allowed_responses(hge_ctx, url, query, headers, exp_
             return resp_res, test_passed
         else:
             # test should fail if none of the allowed responses work
-            raise Exception("allowed_responses did not contain the response that was expected. Please check your allowed_responses")
+            raise Exception(f"allowed_responses did not contain the response that was expected. Got:\n{resp}")
     else:
         raise Exception("allowed_responses was not a list of permissible responses")
 

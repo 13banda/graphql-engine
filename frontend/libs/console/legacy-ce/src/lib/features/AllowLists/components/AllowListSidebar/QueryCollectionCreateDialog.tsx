@@ -1,10 +1,15 @@
 import React from 'react';
 import z from 'zod';
-import { Dialog } from '../../../../new-components/Dialog';
-import { InputField, useConsoleForm } from '../../../../new-components/Form';
-import { Analytics, REDACT_EVERYTHING } from '../../../Analytics';
-import { useFireNotification } from '../../../../new-components/Notifications';
-import { useCreateQueryCollection } from '../../../QueryCollections/hooks/useCreateQueryCollection';
+import { Analytics, REDACT_EVERYTHING } from '@hasura/shared/analytics';
+import { useCreateQueryCollection } from '@hasura/metadata/api';
+import {
+  hasuraToast,
+  Dialog,
+  InputField,
+  useConsoleForm,
+  DialogFooter,
+  showErrorNotification,
+} from '@hasura/shared/ui';
 
 interface QueryCollectionCreateDialogProps {
   onClose: () => void;
@@ -16,10 +21,9 @@ const schema = z.object({
 });
 export const QueryCollectionCreateDialog: React.FC<
   QueryCollectionCreateDialogProps
-> = props => {
+> = (props) => {
   const { onClose, onCreate } = props;
-  const { createQueryCollection, isLoading } = useCreateQueryCollection();
-  const { fireNotification } = useFireNotification();
+  const { createQueryCollection, isPending } = useCreateQueryCollection();
 
   const {
     methods: { trigger, watch, setError },
@@ -30,8 +34,12 @@ export const QueryCollectionCreateDialog: React.FC<
   const name = watch('name');
 
   return (
-    <Form onSubmit={() => {}}>
-      <Dialog hasBackdrop title="Create Collection" onClose={onClose}>
+    <Form
+      onSubmit={() => {
+        /* noop */
+      }}
+    >
+      <Dialog title="Create Collection" onClose={onClose}>
         <>
           <Analytics name="AllowList" {...REDACT_EVERYTHING}>
             <div className="p-4">
@@ -39,43 +47,46 @@ export const QueryCollectionCreateDialog: React.FC<
                 id="name"
                 name="name"
                 label="New Collection Name"
-                placeholder="New Collection Name..."
+                fieldProps={{
+                  placeholder: 'New Collection Name...',
+                }}
               />
             </div>
           </Analytics>
-          <Dialog.Footer
+          <DialogFooter
             callToDeny="Cancel"
             callToAction="Create Collection"
             onClose={onClose}
             onSubmit={async () => {
               if (await trigger()) {
                 // TODO: remove as when proper form types will be available
-                createQueryCollection(name as string, {
-                  addToAllowList: true,
-                  onSuccess: () => {
-                    onClose();
-                    onCreate(name as string);
-                    fireNotification({
-                      type: 'success',
-                      title: 'Collection created',
-                      message: `Collection ${name} was created successfully`,
-                    });
+                createQueryCollection(
+                  { name, addToAllowList: true },
+                  {
+                    onSuccess: () => {
+                      onClose();
+                      onCreate(name as string);
+                      hasuraToast({
+                        type: 'success',
+                        title: 'Collection created',
+                        message: `Collection ${name} was created successfully`,
+                      });
+                    },
+                    onError: (error) => {
+                      setError('name', {
+                        type: 'manual',
+                        message: (error as Error).message,
+                      });
+                      showErrorNotification({
+                        title: 'Collection creation failed',
+                        error,
+                      });
+                    },
                   },
-                  onError: error => {
-                    setError('name', {
-                      type: 'manual',
-                      message: (error as Error).message,
-                    });
-                    fireNotification({
-                      type: 'error',
-                      title: 'Collection creation failed',
-                      message: (error as Error).message,
-                    });
-                  },
-                });
+                );
               }
             }}
-            isLoading={isLoading}
+            isLoading={isPending}
           />
         </>
       </Dialog>

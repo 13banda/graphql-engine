@@ -8,6 +8,7 @@ import Data.HashMap.Strict.Extended qualified as HashMap
 import Data.List.NonEmpty qualified as NE
 import Data.Text.Casing qualified as C
 import Data.Text.Extended
+import Hasura.Authentication.Role (adminRoleName)
 import Hasura.Base.Error
 import Hasura.GraphQL.Schema.Backend
 import Hasura.GraphQL.Schema.Common
@@ -22,7 +23,6 @@ import Hasura.RQL.IR qualified as IR
 import Hasura.RQL.Types.Common (FieldName, RelType (..), relNameToTxt)
 import Hasura.RQL.Types.Relationships.Remote
 import Hasura.RQL.Types.ResultCustomization
-import Hasura.RQL.Types.Roles (adminRoleName)
 import Hasura.RQL.Types.Schema.Options
 import Hasura.RQL.Types.SchemaCache hiding (askTableInfo)
 import Hasura.RQL.Types.Source
@@ -118,11 +118,13 @@ remoteRelationshipToSchemaField remoteSchemaCache remoteSchemaPermissions lhsFie
       <<> " not found "
   -- These are the arguments that are given by the user while executing a query
   let remoteFieldUserArguments = map snd $ HashMap.toList remoteFieldParamMap
+      -- Extract description from the target type definition
+      typeDescription = extractTypeDescription fieldTypeDefinition
   remoteFld <-
     withRemoteSchemaCustomization remoteSchemaCustomizer
       $ lift
       $ P.wrapFieldParser nestedFieldType
-      <$> remoteField remoteRelationshipIntrospection remoteSchemaRelationships remoteSchemaRoot fieldName Nothing remoteFieldUserArguments fieldTypeDefinition
+      <$> remoteField remoteRelationshipIntrospection remoteSchemaRelationships remoteSchemaRoot fieldName typeDescription remoteFieldUserArguments fieldTypeDefinition
 
   pure
     $ remoteFld
@@ -173,6 +175,16 @@ lookupNestedFieldType parentTypeName remoteSchemaIntrospection (fieldCall :| res
     Nothing -> pure fieldType
     Just rest' -> do
       lookupNestedFieldType (G.getBaseType fieldType) remoteSchemaIntrospection rest'
+
+-- | Extract description from a GraphQL TypeDefinition
+extractTypeDescription :: G.TypeDefinition [G.Name] RemoteSchemaInputValueDefinition -> Maybe G.Description
+extractTypeDescription = \case
+  G.TypeDefinitionScalar (G.ScalarTypeDefinition desc _ _) -> desc
+  G.TypeDefinitionObject (G.ObjectTypeDefinition desc _ _ _ _) -> desc
+  G.TypeDefinitionInterface (G.InterfaceTypeDefinition desc _ _ _ _) -> desc
+  G.TypeDefinitionUnion (G.UnionTypeDefinition desc _ _ _) -> desc
+  G.TypeDefinitionEnum (G.EnumTypeDefinition desc _ _ _) -> desc
+  G.TypeDefinitionInputObject (G.InputObjectTypeDefinition desc _ _ _) -> desc
 
 -- | Parser(s) for remote relationship fields to a database table.
 -- Note that when the target is a database table, an array relationship

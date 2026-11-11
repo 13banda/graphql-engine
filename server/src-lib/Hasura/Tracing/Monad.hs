@@ -12,13 +12,14 @@ import Control.Monad.Catch (MonadCatch, MonadMask, MonadThrow)
 import Control.Monad.Morph
 import Control.Monad.Trans.Control
 import Data.IORef
+import Hasura.Authentication.User (UserInfoM (..))
 import Hasura.Prelude
-import Hasura.RQL.Types.Session (UserInfoM (..))
 import Hasura.Server.Types (MonadGetPolicies (..))
 import Hasura.Tracing.Class
 import Hasura.Tracing.Context
 import Hasura.Tracing.Reporter
 import Hasura.Tracing.Sampling
+import Hasura.Tracing.TraceId
 
 --------------------------------------------------------------------------------
 -- TraceT
@@ -73,17 +74,18 @@ instance (MonadIO m, MonadBaseControl IO m) => MonadTrace (TraceT m) where
     reporter <- asks fst
     samplingDecision <- decideSampling (tcSamplingState context) policy
     metadataRef <- liftIO $ newIORef []
+    statusRef <- liftIO $ newIORef SpanStatusUnset
     let report = case samplingDecision of
           SampleNever -> id
-          SampleAlways -> runReporter reporter context name (readIORef metadataRef)
+          SampleAlways -> runReporter reporter context name SKServer (readIORef metadataRef) (readIORef statusRef)
         updatedContext =
           context
             { tcSamplingState = updateSamplingState samplingDecision (tcSamplingState context)
             }
-        traceEnv = TraceEnv updatedContext metadataRef samplingDecision
+        traceEnv = TraceEnv updatedContext metadataRef statusRef samplingDecision
     report $ local (_2 .~ Just traceEnv) body
 
-  newSpanWith spanId name (TraceT body) = TraceT do
+  newSpanWith spanId name kind (TraceT body) = TraceT do
     (reporter, traceEnv) <- ask
     case traceEnv of
       -- we are not currently in a trace: ignore this span
@@ -93,6 +95,7 @@ instance (MonadIO m, MonadBaseControl IO m) => MonadTrace (TraceT m) where
         SampleNever -> body
         SampleAlways -> do
           metadataRef <- liftIO $ newIORef []
+          statusRef <- liftIO $ newIORef SpanStatusUnset
           let subContext =
                 (teTraceContext env)
                   { tcCurrentSpan = spanId,
@@ -101,15 +104,21 @@ instance (MonadIO m, MonadBaseControl IO m) => MonadTrace (TraceT m) where
               subTraceEnv =
                 env
                   { teTraceContext = subContext,
-                    teMetadataRef = metadataRef
+                    teMetadataRef = metadataRef,
+                    teSpanStatusRef = statusRef
                   }
-          runReporter reporter subContext name (readIORef metadataRef)
+          runReporter reporter subContext name kind (readIORef metadataRef) (readIORef statusRef)
             $ local (_2 .~ Just subTraceEnv) body
 
   attachMetadata metadata = TraceT do
     asks (fmap teMetadataRef . snd) >>= \case
       Nothing -> pure ()
       Just ref -> liftIO $ modifyIORef' ref (metadata ++)
+
+  setSpanStatus status = TraceT do
+    asks (fmap teSpanStatusRef . snd) >>= \case
+      Nothing -> pure ()
+      Just ref -> liftIO $ writeIORef ref status
 
 instance (MonadIO m, MonadBaseControl IO m) => MonadTraceContext (TraceT m) where
   currentContext = TraceT $ asks $ fmap teTraceContext . snd
@@ -129,6 +138,7 @@ instance (MonadGetPolicies m) => MonadGetPolicies (TraceT m) where
 data TraceEnv = TraceEnv
   { teTraceContext :: TraceContext,
     teMetadataRef :: IORef TraceMetadata,
+    teSpanStatusRef :: IORef SpanStatus,
     teSamplingDecision :: SamplingDecision
   }
 

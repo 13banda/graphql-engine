@@ -1,9 +1,8 @@
-import { Table } from '../../../hasura-metadata-types';
-import React, { useEffect } from 'react';
+import { Table } from '@hasura/shared/types';
+import React, { useEffect, useRef } from 'react';
 import { useFormContext, useWatch } from 'react-hook-form';
 import { FaArrowAltCircleLeft, FaArrowAltCircleRight } from 'react-icons/fa';
-import Skeleton from 'react-loading-skeleton';
-import { useMetadata, MetadataSelectors } from '../../../hasura-metadata-api';
+import { useMetadata } from '@hasura/metadata/api';
 import { SourcePicker } from './SourcePicker/SourcePicker';
 import { SourceSelectorItem } from './SourcePicker/SourcePicker.types';
 import { mapItemsToSourceOptions } from './SourcePicker/SourcePicker.utils';
@@ -12,8 +11,10 @@ import {
   getDefaultSourceSelectorItem,
   mapMetadataSourceToSelectorItems,
 } from './TablePicker.utils';
+import { SkeletonList } from '@hasura/shared/ui';
+import { MetadataSelectors } from '@hasura/metadata/helpers';
 
-export const TablePicker: React.VFC<TablePickerProps> = ({
+export const TablePicker: React.FC<TablePickerProps> = ({
   type,
   disabled = false,
   isCurrentSource = false,
@@ -33,7 +34,7 @@ export const TablePicker: React.VFC<TablePickerProps> = ({
 
   const items: SourceSelectorItem[] = mapMetadataSourceToSelectorItems(
     metadataSources || [],
-    filterDataSource
+    filterDataSource,
   );
 
   const defaultValue = isCurrentSource
@@ -44,13 +45,25 @@ export const TablePicker: React.VFC<TablePickerProps> = ({
       })
     : undefined;
 
+  // `defaultValue` is recomputed from the watched form values on every render,
+  // so we intentionally only re-run the apply effect when its resolved `.type`
+  // changes (depending on the object itself would re-run on every keystroke and
+  // fight the user's own selection, since `setValue` updates the watched
+  // value). We keep the latest `defaultValue` in a ref — written from an effect
+  // so no ref is touched during render — and read it when applying.
+  const defaultValueRef = useRef(defaultValue);
   useEffect(() => {
-    if (defaultValue) {
-      setValue(type, mapItemsToSourceOptions([defaultValue])[0]);
-    }
-  }, [defaultValue?.type]);
+    defaultValueRef.current = defaultValue;
+  });
 
-  if (!metadataSources) return <Skeleton count={5} height={20} />;
+  useEffect(() => {
+    const latestDefaultValue = defaultValueRef.current;
+    if (latestDefaultValue) {
+      setValue(type, mapItemsToSourceOptions([latestDefaultValue])[0]);
+    }
+  }, [defaultValue?.type, setValue, type]);
+
+  if (!metadataSources) return <SkeletonList count={5} />;
 
   return (
     <div className="h-full">
@@ -61,9 +74,9 @@ export const TablePicker: React.VFC<TablePickerProps> = ({
           label={type === 'fromSource' ? 'From Source' : 'To Reference'}
           labelIcon={
             type === 'fromSource' ? (
-              <FaArrowAltCircleRight className="fill-emerald-700 ml-1.5" />
+              <FaArrowAltCircleRight className="fill-emerald-700 h-4 w-4 ml-1.5" />
             ) : (
-              <FaArrowAltCircleLeft className="fill-violet-700 ml-1.5" />
+              <FaArrowAltCircleLeft className="fill-violet-700 h-4 w-4 ml-1.5" />
             )
           }
           disabled={disabled}

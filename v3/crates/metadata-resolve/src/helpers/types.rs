@@ -1,12 +1,17 @@
-use crate::stages::{object_boolean_expressions, relationships, scalar_types};
-use crate::types::error::{BooleanExpressionError, Error};
+use crate::stages::{
+    boolean_expressions, graphql_config, object_relationships, scalar_boolean_expressions,
+};
+use crate::types::error::Error;
 
 use crate::types::subgraph::{
     Qualified, QualifiedBaseType, QualifiedTypeName, QualifiedTypeReference,
 };
-use lang_graphql::ast::common as ast;
+use graphql_types as ast;
 
-use open_dds::{data_connector::DataConnectorColumnName, types::CustomTypeName};
+use open_dds::{
+    data_connector::{DataConnectorColumnName, DataConnectorOperatorName},
+    types::CustomTypeName,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -14,80 +19,137 @@ use std::str::FromStr;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NdcColumnForComparison {
     pub column: DataConnectorColumnName,
-    pub equal_operator: String,
+    pub equal_operator: DataConnectorOperatorName,
 }
 
-/// try to add `new_graphql_type` to `existing_graphql_types`, returning an error
-/// if there is a name conflict
-pub fn store_new_graphql_type(
-    existing_graphql_types: &mut BTreeSet<ast::TypeName>,
-    new_graphql_type: Option<&ast::TypeName>,
-) -> Result<(), Error> {
-    if let Some(new_graphql_type) = new_graphql_type {
-        // Fail on conflicting graphql type names
-        if !(existing_graphql_types.insert(new_graphql_type.clone())) {
-            return Err(Error::ConflictingGraphQlType {
-                graphql_type_name: new_graphql_type.clone(),
-            });
+/// Track the root fields of the GraphQL schema while resolving the metadata.
+/// This is used to ensure that the schema has unique root fields for Query, Mutation and Subscription.
+// NOTE: The `ast::Name` is cheap to clone, so storing them directly without references
+pub struct TrackGraphQLRootFields {
+    pub query: BTreeSet<ast::Name>,
+    pub mutation: BTreeSet<ast::Name>,
+    pub subscription: BTreeSet<ast::Name>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DuplicateRootFieldError {
+    #[error("Cannot add query root field {0} as it already in use")]
+    Query(ast::Name),
+    #[error("Cannot add mutation root field {0} as it already in use")]
+    Mutation(ast::Name),
+    #[error("Cannot add subscription root field {0} as it already in use")]
+    Subscription(ast::Name),
+}
+
+impl TrackGraphQLRootFields {
+    pub fn new() -> Self {
+        Self {
+            query: BTreeSet::new(),
+            mutation: BTreeSet::new(),
+            subscription: BTreeSet::new(),
         }
     }
-    Ok(())
+    pub fn track_query_root_field(
+        &mut self,
+        name: &ast::Name,
+    ) -> Result<(), DuplicateRootFieldError> {
+        if !self.query.insert(name.clone()) {
+            return Err(DuplicateRootFieldError::Query(name.clone()));
+        }
+        Ok(())
+    }
+    pub fn track_mutation_root_field(
+        &mut self,
+        name: &ast::Name,
+    ) -> Result<(), DuplicateRootFieldError> {
+        if !self.mutation.insert(name.clone()) {
+            return Err(DuplicateRootFieldError::Mutation(name.clone()));
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)] // to be used later
+    pub fn track_subscription_root_field(
+        &mut self,
+        name: &ast::Name,
+    ) -> Result<(), DuplicateRootFieldError> {
+        if !self.subscription.insert(name.clone()) {
+            return Err(DuplicateRootFieldError::Subscription(name.clone()));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
 /// we do not want to store our types like this, but occasionally it is useful
 /// for pattern matching
-pub enum TypeRepresentation<'a, ObjectType> {
-    Scalar(&'a scalar_types::ScalarTypeRepresentation),
+pub enum TypeRepresentation<'a, ObjectType, ScalarType> {
+    Scalar(&'a ScalarType),
     Object(&'a ObjectType),
-    BooleanExpression(&'a object_boolean_expressions::ObjectBooleanExpressionType),
+    /// New object boolean expression type
+    BooleanExpressionObject(&'a boolean_expressions::ResolvedObjectBooleanExpressionType),
+    /// New scalar boolean expression type
+    BooleanExpressionScalar(&'a scalar_boolean_expressions::ResolvedScalarBooleanExpressionType),
 }
 
 /// validate whether a given CustomTypeName exists within `object_types`, `scalar_types` or
 /// `object_boolean_expression_types`
-pub fn get_type_representation<'a, ObjectType>(
+pub fn get_type_representation<'a, ObjectType, ScalarType>(
     custom_type_name: &Qualified<CustomTypeName>,
     object_types: &'a BTreeMap<Qualified<CustomTypeName>, ObjectType>,
-    scalar_types: &'a BTreeMap<Qualified<CustomTypeName>, scalar_types::ScalarTypeRepresentation>,
-    object_boolean_expression_types: &'a BTreeMap<
-        Qualified<CustomTypeName>,
-        object_boolean_expressions::ObjectBooleanExpressionType,
-    >,
-) -> Result<TypeRepresentation<'a, ObjectType>, Error> {
-    match object_types.get(custom_type_name) {
-        Some(object_type_representation) => {
-            Ok(TypeRepresentation::Object(object_type_representation))
-        }
-        None => match scalar_types.get(custom_type_name) {
-            Some(scalar_type_representation) => {
-                Ok(TypeRepresentation::Scalar(scalar_type_representation))
-            }
-            None => match object_boolean_expression_types.get(custom_type_name) {
-                Some(object_boolean_expression_type) => Ok(TypeRepresentation::BooleanExpression(
-                    object_boolean_expression_type,
-                )),
-                None => Err(Error::UnknownType {
-                    data_type: custom_type_name.clone(),
-                }),
-            },
-        },
-    }
+    scalar_types: &'a BTreeMap<Qualified<CustomTypeName>, ScalarType>,
+    boolean_expression_types: &'a boolean_expressions::BooleanExpressionTypes,
+) -> Result<TypeRepresentation<'a, ObjectType, ScalarType>, Qualified<CustomTypeName>> {
+    object_types
+        .get(custom_type_name)
+        .map(|object_type_representation| TypeRepresentation::Object(object_type_representation))
+        .or_else(|| {
+            scalar_types
+                .get(custom_type_name)
+                .map(|scalar_type_representation| {
+                    TypeRepresentation::Scalar(scalar_type_representation)
+                })
+        })
+        .or_else(|| {
+            boolean_expression_types
+                .objects
+                .get(custom_type_name)
+                .map(|boolean_expression_type| {
+                    TypeRepresentation::BooleanExpressionObject(boolean_expression_type)
+                })
+        })
+        .or_else(|| {
+            boolean_expression_types
+                .scalars
+                .get(
+                    &boolean_expressions::BooleanExpressionTypeIdentifier::FromBooleanExpressionType(
+                        custom_type_name.clone(),
+                    ),
+                )
+                .map(|boolean_expression_type| {
+                    TypeRepresentation::BooleanExpressionScalar(boolean_expression_type)
+                })
+        })
+        .ok_or_else(||
+             custom_type_name.clone()
+        )
 }
 
 pub(crate) fn get_object_type_for_boolean_expression<'a>(
-    object_boolean_expression_type: &object_boolean_expressions::ObjectBooleanExpressionType,
+    boolean_expression_type: &boolean_expressions::ResolvedObjectBooleanExpressionType,
     object_types: &'a BTreeMap<
         Qualified<CustomTypeName>,
-        relationships::ObjectTypeWithRelationships,
+        object_relationships::ObjectTypeWithRelationships,
     >,
-) -> Result<&'a relationships::ObjectTypeWithRelationships, Error> {
+) -> Result<&'a object_relationships::ObjectTypeWithRelationships, Error> {
     object_types
-        .get(&object_boolean_expression_type.object_type)
+        .get(&boolean_expression_type.object_type)
         .ok_or(Error::from(
-            BooleanExpressionError::UnsupportedTypeInObjectBooleanExpressionType {
-                type_name: object_boolean_expression_type.object_type.clone(),
-            },
-        ))
+        boolean_expressions::BooleanExpressionError::UnsupportedTypeInObjectBooleanExpressionType {
+            type_name: boolean_expression_type.object_type.clone(),
+            boolean_expression_type_name: boolean_expression_type.name.clone(),
+        },
+    ))
 }
 
 // Get the underlying object type by resolving Custom ObjectType, Array and
@@ -118,9 +180,16 @@ pub fn unwrap_custom_type_name(
     }
 }
 
+pub fn unwrap_qualified_type_name(type_reference: &QualifiedTypeReference) -> &QualifiedTypeName {
+    match &type_reference.underlying_type {
+        QualifiedBaseType::List(inner_type) => unwrap_qualified_type_name(inner_type),
+        QualifiedBaseType::Named(type_name) => type_name,
+    }
+}
+
 /// Helper function to create GraphQL compliant name
-pub fn mk_name(name: &str) -> Result<ast::Name, Error> {
-    ast::Name::from_str(name).map_err(|_| Error::InvalidGraphQlName {
+pub fn mk_name(name: &str) -> Result<ast::Name, graphql_config::GraphqlConfigError> {
+    ast::Name::from_str(name).map_err(|_| graphql_config::GraphqlConfigError::InvalidGraphQlName {
         name: name.to_string(),
     })
 }

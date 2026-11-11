@@ -1,16 +1,9 @@
-import {
-  DEFAULT_STALE_TIME,
-  Options,
-  useMetadata,
-} from '../../../hasura-metadata-api/useMetadata';
-import { Metadata } from '../../../hasura-metadata-types';
+import { Options, useMetadata } from '@hasura/metadata/api';
+import { Metadata } from '@hasura/shared/types';
 import { ReactQueryUIWrapper } from './ReactQueryUIWrapper';
 import { CommonProps } from './types';
-const ID_PREFIX = 'metadata-provider';
-
-export const TestIds = {
-  renderContent: ID_PREFIX + '-render-content',
-};
+import type { JSX } from 'react';
+const DEFAULT_STALE_TIME = 5 * 60000; // 5 minutes as default stale time
 
 /**
  *

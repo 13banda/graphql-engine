@@ -1,4 +1,4 @@
-import { EventDataNode } from 'antd/lib/tree';
+import type { JSX } from 'react';
 
 export type HasuraRsFields = string[];
 
@@ -39,10 +39,7 @@ export type RemoteField = {
 };
 
 export type InputArgumentValueType =
-  | string
-  | boolean
-  | number
-  | InputArgumentsType;
+  string | boolean | number | InputArgumentsType;
 
 export type InputArgumentsType = {
   [key: string]: InputArgumentValueType;
@@ -50,24 +47,3 @@ export type InputArgumentsType = {
 
 // we should extend RemoteRelationship type from `metadata/types.ts` once we have
 // the correct types in place, for both old and new format
-export type RemoteRelationship = {
-  name: string;
-  definition: {
-    to_remote_schema: {
-      lhs_fields: string[];
-      remote_field: RemoteField;
-      remote_schema: string;
-    };
-  };
-};
-
-export interface AntdTreeNode extends EventDataNode {
-  title: JSX.Element | string;
-  key: string;
-  checkable: boolean;
-  depth: number;
-  type: 'field' | 'arg';
-  disabled?: boolean;
-  argValue?: ArgValue | null;
-  children?: TreeNode[];
-}

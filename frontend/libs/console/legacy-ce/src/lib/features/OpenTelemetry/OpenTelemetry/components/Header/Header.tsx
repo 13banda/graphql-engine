@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react';
-import * as React from 'react';
-
+import { Flex } from '@radix-ui/themes';
 import { HeroEnabled } from './Hero/HeroEnabled';
 import { HeroDisabled } from './Hero/HeroDisabled';
 import { HeroSkeleton } from './Hero/HeroSkeleton';
@@ -28,18 +27,16 @@ type HeaderLayoutProps = {
   hero: ReactNode;
 };
 
-export function HeaderLayout(props: HeaderLayoutProps) {
+function HeaderLayout(props: HeaderLayoutProps) {
   return (
     <>
       {/* The following markup has been stolen from the Prometheus page */}
       <div>
-        <div className="flex items-center gap-4">
-          <h1 className="text-xl font-semibold">
-            OpenTelemetry <sup>(Beta)</sup>
-          </h1>
+        <Flex align="center" gap="4">
+          <h1 className="text-xl font-semibold">OpenTelemetry</h1>
 
           {props.badge}
-        </div>
+        </Flex>
         <p className="text-muted">
           Export your OpenTelemetry traces from Hasura GraphQL Engine.{' '}
         </p>

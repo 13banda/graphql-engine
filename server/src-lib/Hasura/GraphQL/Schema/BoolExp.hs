@@ -137,14 +137,18 @@ boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAg
       P.fieldOptional fieldName Nothing <$> case fieldInfo of
         -- field_name: field_type_comparison_exp
         FIColumn (SCIScalarColumn columnInfo) ->
-          let redactionExp = fromMaybe NoRedaction $ getRedactionExprForColumn selectPermissions' (ciColumn columnInfo)
+          let !redactionExp = fromMaybe NoRedaction $ getRedactionExprForColumn selectPermissions' (ciColumn columnInfo)
            in lift $ fmap (AVColumn columnInfo redactionExp) <$> comparisonExps @b (ciType columnInfo)
         FIColumn (SCIObjectColumn nestedObjectInfo@NestedObjectInfo {..}) -> do
           SourceInfo {..} <- asks getter
           logicalModelInfo <-
             HashMap.lookup _noiType _siLogicalModels
               `onNothing` throw500 ("Logical model " <> _noiType <<> " not found in source " <>> _siName)
+          -- NOTE: AVNestedObject omits the RelationshipFilters wrapper that AVRelationship uses to inject spiFilter (see d874b75b02).
+          -- If the nested logical model type ever gains a meaningful row-level spiFilter, AND it in here as RelTargetNativeQuery does.
           lift $ fmap (AVNestedObject nestedObjectInfo) <$> logicalModelBoolExp logicalModelInfo
+        -- NOTE: When SCIArrayColumn filtering is implemented, it will also need RelationshipFilters wrapping (see d874b75b02).
+        -- Array elements have "rows" with potential per-element permissions; omitting that wrapper would be an oracle bypass.
         FIColumn (SCIArrayColumn _) -> empty -- TODO(dmoverton)
         -- field_name: field_type_bool_exp
         FIRelationship relationshipInfo -> do
@@ -153,7 +157,7 @@ boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAg
               logicalModelInfo <- _nqiReturns <$> askNativeQueryInfo nativeQueryName
               let remoteLogicalModelPermissions =
                     (fmap . fmap) (partialSQLExpToUnpreparedValue)
-                      $ maybe annBoolExpTrue spiFilter
+                      $ maybe annBoolExpFalse spiFilter
                       $ getSelPermInfoForLogicalModel roleName logicalModelInfo
               remoteBoolExp <- lift $ logicalModelBoolExp logicalModelInfo
               pure $ fmap (AVRelationship relationshipInfo . RelationshipFilters remoteLogicalModelPermissions) remoteBoolExp
@@ -161,7 +165,7 @@ boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAg
               remoteTableInfo <- askTableInfo $ remoteTable
               let remoteTablePermissions =
                     (fmap . fmap) (partialSQLExpToUnpreparedValue)
-                      $ maybe annBoolExpTrue spiFilter
+                      $ maybe annBoolExpFalse spiFilter
                       $ tableSelectPermissions roleName remoteTableInfo
               remoteBoolExp <- lift $ tableBoolExp remoteTableInfo
               pure $ fmap (AVRelationship relationshipInfo . RelationshipFilters remoteTablePermissions) remoteBoolExp
@@ -181,7 +185,14 @@ boolExpInternal gqlName selectPermissions fieldInfos description memoizeKey mkAg
                      in lift $ fmap (CFBEScalar redactionExp) <$> comparisonExps @b (ColumnScalar scalarType)
                   ReturnsTable table -> do
                     info <- askTableInfo table
-                    lift $ fmap (CFBETable table) <$> tableBoolExp info
+                    let tablePermissions =
+                          (fmap . fmap) partialSQLExpToUnpreparedValue
+                            -- TODO I _think_, but didn't verify, that annBoolExpFalse here (and above) is unreachable
+                            -- (tableBoolExp/logicalModelBoolExp return `empty` first when permissions are absent).
+                            -- Using annBoolExpFalse rather than annBoolExpTrue so we fail closed if wrong.
+                            $ maybe annBoolExpFalse spiFilter
+                            $ tableSelectPermissions roleName info
+                    lift $ fmap (CFBETable table . RelationshipFilters tablePermissions) <$> tableBoolExp info
                   ReturnsOthers -> hoistMaybe Nothing
             _ -> hoistMaybe Nothing
 

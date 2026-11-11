@@ -1,15 +1,18 @@
 import React from 'react';
 import z from 'zod';
 
-import { useConsoleForm } from '../../../../../../new-components/Form';
+import {
+  useConsoleForm,
+  hasuraToast,
+  showErrorNotification,
+} from '@hasura/shared/ui';
 import { ConnectPostgresModal } from './ConnectPostgresModal';
 import { DynamicDBRoutingForm } from './DynamicDBRoutingForm';
 import { generatePostgresRequestPayload } from '../../utils/generateRequests';
 import { adaptPostgresConnectionInfo } from '../../utils/adaptResponse';
 import { useDynamicDbRouting } from './hooks/useDynamicDbRouting';
-import { ConnectionSet } from '../../../../../../metadata/types';
-import { PostgresConfiguration } from '../../../../../hasura-metadata-types';
-import { hasuraToast } from '../../../../../../new-components/Toasts';
+import { PostgresConfiguration } from '@hasura/shared/types';
+
 import { ValidateModal } from './ValidateModal';
 
 export const schema = z.object({
@@ -23,7 +26,7 @@ export const schema = z.object({
             checked: z.boolean(),
             key: z.string(),
             value: z.string(),
-          })
+          }),
         )
         .optional(),
       session_variables: z
@@ -32,7 +35,7 @@ export const schema = z.object({
             checked: z.boolean(),
             key: z.string(),
             value: z.string(),
-          })
+          }),
         )
         .optional(),
       operation_type: z.string(),
@@ -47,7 +50,7 @@ interface DynamicDBRoutingProps {
 
 const loadFormData = (): z.infer<typeof schema>['validation'] => {
   const data = localStorage.getItem('dynamic-db-routing-context');
-  return data ? JSON.parse(data) : null;
+  return data ? JSON.parse(data) : undefined;
 };
 
 export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
@@ -102,32 +105,34 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
   const formTemplate = watch('connection_template');
   const modalTemplate = watch('validation.connection_template');
 
-  // keep form template and modal template in sync
+  // keep form template and modal template in sync. The `!==` guards make these
+  // idempotent, so re-running when either value (or the stable `setValue`)
+  // changes converges without an update loop.
   React.useEffect(() => {
     if (modalTemplate && modalTemplate && formTemplate !== modalTemplate) {
       setValue('connection_template', modalTemplate);
     }
-  }, [modalTemplate]);
+  }, [modalTemplate, formTemplate, setValue]);
 
   React.useEffect(() => {
     if (formTemplate && formTemplate && modalTemplate !== formTemplate) {
       setValue('validation.connection_template', formTemplate);
     }
-  }, [formTemplate]);
+  }, [formTemplate, modalTemplate, setValue]);
 
   React.useEffect(() => {
     if (connectionTemplate) {
       setValue('connection_template', connectionTemplate);
     }
-  }, [connectionTemplate]);
+  }, [connectionTemplate, setValue]);
 
-  const connectionSetMembers = connectionSet.map(connection => {
+  const connectionSetMembers = connectionSet.map((connection) => {
     const { name, connection_info } = connection;
     return {
       name,
       configuration: {
         connectionInfo: adaptPostgresConnectionInfo(
-          connection_info as PostgresConfiguration['connection_info']
+          connection_info as PostgresConfiguration['connection_info'],
         ),
       },
     };
@@ -142,16 +147,16 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
       {isModalOpen && (
         <ConnectPostgresModal
           alreadyUseNames={connectionSetMembers.map(
-            connection => connection.name
+            (connection) => connection.name,
           )}
-          onSubmit={values => {
+          onSubmit={(values) => {
             const payload = {
               name: values.name,
               connection_info: generatePostgresRequestPayload({
                 driver: 'postgres',
                 values,
               }).details.configuration.connection_info,
-            } as ConnectionSet;
+            };
             addConnection(payload, {
               onSuccess: () => {
                 hasuraToast({
@@ -159,11 +164,10 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
                   title: 'Connection added',
                 });
               },
-              onError: e => {
-                hasuraToast({
-                  type: 'error',
+              onError: (e) => {
+                showErrorNotification({
                   title: 'Failed to add connection',
-                  message: e.message,
+                  error: e,
                 });
               },
             });
@@ -175,12 +179,12 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
       {editingConnectionSetMember && (
         <ConnectPostgresModal
           alreadyUseNames={connectionSetMembers
-            .map(connection => connection.name)
-            .filter(name => name !== editingConnectionSetMember)}
+            .map((connection) => connection.name)
+            .filter((name) => name !== editingConnectionSetMember)}
           defaultValues={connectionSetMembers.find(
-            connection => connection.name === editingConnectionSetMember
+            (connection) => connection.name === editingConnectionSetMember,
           )}
-          onSubmit={values => {
+          onSubmit={(values) => {
             updateConnection(
               editingConnectionSetMember,
               {
@@ -189,7 +193,7 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
                   driver: 'postgres',
                   values,
                 }).details.configuration.connection_info,
-              } as ConnectionSet,
+              },
               {
                 onSuccess: () => {
                   hasuraToast({
@@ -197,14 +201,13 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
                     title: 'Connection updated',
                   });
                 },
-                onError: e => {
-                  hasuraToast({
-                    type: 'error',
+                onError: (e) => {
+                  showErrorNotification({
                     title: 'Failed to update connection',
-                    message: e.message,
+                    error: e,
                   });
                 },
-              }
+              },
             );
 
             setEditingConnectionSetMember(undefined);
@@ -213,7 +216,7 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
         />
       )}
       <Form
-        onSubmit={values => {
+        onSubmit={(values) => {
           updateConnectionTemplate(values.connection_template, {
             onSuccess: () => {
               hasuraToast({
@@ -221,11 +224,10 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
                 title: 'Connection template updated',
               });
             },
-            onError: e => {
-              hasuraToast({
-                type: 'error',
+            onError: (e) => {
+              showErrorNotification({
                 title: 'Failed to update connection template',
-                message: e.message,
+                error: e,
               });
             },
           });
@@ -241,10 +243,10 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
           onOpenValidate={() => setIsValidateModalOpen(true)}
           connectionSetMembers={connectionSetMembers}
           onAddConnection={() => setIsModalOpen(true)}
-          onEditConnection={connectionName => {
+          onEditConnection={(connectionName) => {
             setEditingConnectionSetMember(connectionName);
           }}
-          onRemoveConnection={connectionName => {
+          onRemoveConnection={(connectionName) => {
             removeConnection(connectionName, {
               onSuccess: () => {
                 hasuraToast({
@@ -252,11 +254,10 @@ export const DynamicDBRouting = (props: DynamicDBRoutingProps) => {
                   title: 'Connection removed',
                 });
               },
-              onError: e => {
-                hasuraToast({
-                  type: 'error',
+              onError: (e) => {
+                showErrorNotification({
                   title: 'Failed to remove connection',
-                  message: e.message,
+                  error: e,
                 });
               },
             });

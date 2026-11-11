@@ -1,56 +1,122 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt};
 
+use metadata_resolve::data_connectors::NdcVersion;
 use reqwest::header::{HeaderMap, HeaderValue};
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 
+use tokio_util::io::StreamReader;
 use tracing_util::{SpanVisibility, Successful};
 
-use crate::ndc::response::handle_response_with_size_limit;
+use super::{
+    NdcErrorResponse, NdcExplainResponse, NdcMutationRequest, NdcMutationResponse, NdcQueryRequest,
+    NdcQueryResponse,
+};
+
+// Add the new type imports
+use ndc_models::{
+    RelationalDeleteRequest, RelationalDeleteResponse, RelationalInsertRequest,
+    RelationalInsertResponse, RelationalUpdateRequest, RelationalUpdateResponse,
+};
+
+use futures::TryStreamExt;
+use tokio_stream::{Stream, StreamExt};
 
 /// Error type for the NDC API client interactions
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(
-        "request to connector failed with status code {}: {0}",
-        .0.status().map_or_else(|| "N/A".to_string(), |s| s.to_string())
+        "request to connector failed with status code {status_code}: {0}",
+        status_code = .0.status().map_or_else(|| "N/A".to_string(), |s| s.to_string()) 
     )]
     Reqwest(#[from] reqwest::Error),
 
     #[error("unable to decode JSON response from connector: {0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("internal IO error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("UTF-8 error: {0}")]
+    Utf8Error(#[from] std::string::FromUtf8Error),
+
+    #[error("IO error: {0}")]
+    IOError(#[from] std::io::Error),
 
     #[error("invalid connector base URL")]
     InvalidBaseURL,
 
-    #[error("invalid header value characters in project_id: {0}")]
-    ProjectIdHeaderValueConversion(#[from] reqwest::header::InvalidHeaderValue),
+    #[error("invalid header value characters: {0}")]
+    InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
 
     #[error("response received from connector is too large: {0}")]
     ResponseTooLarge(String),
 
-    #[error("connector error: {0}")]
+    #[error("{0}")]
     Connector(ConnectorError),
 
     #[error("invalid connector error: {0}")]
     InvalidConnector(InvalidConnectorError),
+
+    #[error("Error while executing pre ndc request plugin: {0}")]
+    PreNdcRequestPluginError(#[from] pre_ndc_request_plugin::execute::Error),
+
+    #[error("Error while executing pre ndc response plugin: {0}")]
+    PreNdcResponsePluginError(#[from] pre_ndc_response_plugin::execute::Error),
 }
 
 impl tracing_util::TraceableError for Error {
     fn visibility(&self) -> tracing_util::ErrorVisibility {
-        tracing_util::ErrorVisibility::Internal
+        match self {
+            // Invalid connector errors with 5xx status codes are considered user errors
+            // (connector implementation issues, not engine issues)
+            Self::InvalidConnector(InvalidConnectorError { status, .. })
+                if status.is_server_error() =>
+            {
+                tracing_util::ErrorVisibility::User
+            }
+
+            // TODO some of these other cases seem like User errors also...
+
+            // All other errors are internal
+            _ => tracing_util::ErrorVisibility::Internal,
+        }
     }
 }
 
-#[derive(Debug, Clone, Error)]
-#[error("connector returned status code {status} with message: {}", error_response.message)]
+#[derive(Debug, Clone)]
 pub struct ConnectorError {
     pub status: reqwest::StatusCode,
-    pub error_response: ndc_models::ErrorResponse,
+    pub error_response: NdcErrorResponse,
 }
+
+impl ConnectorError {
+    fn display_message(&self) -> Option<String> {
+        let details = self.error_response.details();
+        if let Some(cause) = details.get("cause").and_then(|v| v.as_str()) {
+            return Some(cause.to_string());
+        }
+        if let Some(msg) = details.as_str() {
+            return Some(msg.to_string());
+        }
+        None
+    }
+}
+
+impl fmt::Display for ConnectorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(msg) = self.display_message() {
+            write!(f, "{msg}")
+        } else {
+            write!(
+                f,
+                "connector error: connector returned status code {status} with message: {}, details: {}",
+                self.error_response.message(),
+                self.error_response.details(),
+                status = self.status
+            )
+        }
+    }
+}
+
+impl std::error::Error for ConnectorError {}
 
 #[derive(Debug, Clone, Error)]
 #[error("invalid connector error with status {status} and {content}")]
@@ -72,10 +138,10 @@ pub struct Configuration<'s> {
 /// POST on /query/explain endpoint
 ///
 /// <https://hasura.github.io/ndc-spec/specification/explain.html?highlight=%2Fexplain#request>
-pub async fn explain_query_post(
+pub(crate) async fn explain_query_post(
     configuration: Configuration<'_>,
-    query_request: &ndc_models::QueryRequest,
-) -> Result<ndc_models::ExplainResponse, Error> {
+    query_request: &NdcQueryRequest,
+) -> Result<NdcExplainResponse, Error> {
     let tracer = tracing_util::global_tracer();
     tracer
         .in_span_async(
@@ -86,11 +152,41 @@ pub async fn explain_query_post(
                 Box::pin(async {
                     let url = append_path(configuration.base_path, &["query", "explain"])?;
                     let response_size_limit = configuration.response_size_limit;
-                    let request =
-                        construct_request(configuration, reqwest::Method::POST, url, |r| {
-                            r.json(query_request)
-                        });
-                    execute_request(request, response_size_limit).await
+
+                    match query_request {
+                        NdcQueryRequest::V01(req) => {
+                            let request = construct_request(
+                                configuration,
+                                NdcVersion::V01,
+                                reqwest::Method::POST,
+                                url,
+                                |r| r.json(req),
+                            );
+                            let response = execute_request(
+                                request,
+                                response_size_limit,
+                                NdcErrorResponse::V01,
+                            )
+                            .await?;
+                            Ok(NdcExplainResponse::V01(response))
+                        }
+                        NdcQueryRequest::V02(req) => {
+                            let request = construct_request(
+                                configuration,
+                                NdcVersion::V02,
+                                reqwest::Method::POST,
+                                url,
+                                |r| r.json(req),
+                            );
+                            let response = execute_request(
+                                request,
+                                response_size_limit,
+                                NdcErrorResponse::V02,
+                            )
+                            .await?;
+                            Ok(NdcExplainResponse::V02(response))
+                        }
+                    }
                 })
             },
         )
@@ -100,10 +196,10 @@ pub async fn explain_query_post(
 /// POST on /mutation/explain endpoint
 ///
 /// <https://hasura.github.io/ndc-spec/specification/explain.html?highlight=%2Fexplain#request-1>
-pub async fn explain_mutation_post(
+pub(crate) async fn explain_mutation_post(
     configuration: Configuration<'_>,
-    mutation_request: &ndc_models::MutationRequest,
-) -> Result<ndc_models::ExplainResponse, Error> {
+    mutation_request: &NdcMutationRequest,
+) -> Result<NdcExplainResponse, Error> {
     let tracer = tracing_util::global_tracer();
     tracer
         .in_span_async(
@@ -114,11 +210,41 @@ pub async fn explain_mutation_post(
                 Box::pin(async {
                     let url = append_path(configuration.base_path, &["mutation", "explain"])?;
                     let response_size_limit = configuration.response_size_limit;
-                    let request =
-                        construct_request(configuration, reqwest::Method::POST, url, |r| {
-                            r.json(mutation_request)
-                        });
-                    execute_request(request, response_size_limit).await
+
+                    match mutation_request {
+                        NdcMutationRequest::V01(req) => {
+                            let request = construct_request(
+                                configuration,
+                                NdcVersion::V01,
+                                reqwest::Method::POST,
+                                url,
+                                |r| r.json(req),
+                            );
+                            let response = execute_request(
+                                request,
+                                response_size_limit,
+                                NdcErrorResponse::V01,
+                            )
+                            .await?;
+                            Ok(NdcExplainResponse::V01(response))
+                        }
+                        NdcMutationRequest::V02(req) => {
+                            let request = construct_request(
+                                configuration,
+                                NdcVersion::V02,
+                                reqwest::Method::POST,
+                                url,
+                                |r| r.json(req),
+                            );
+                            let response = execute_request(
+                                request,
+                                response_size_limit,
+                                NdcErrorResponse::V02,
+                            )
+                            .await?;
+                            Ok(NdcExplainResponse::V02(response))
+                        }
+                    }
                 })
             },
         )
@@ -128,10 +254,10 @@ pub async fn explain_mutation_post(
 /// POST on /mutation endpoint
 ///
 /// <https://hasura.github.io/ndc-spec/specification/mutations/index.html>
-pub async fn mutation_post(
+pub(crate) async fn mutation_post(
     configuration: Configuration<'_>,
-    mutation_request: &ndc_models::MutationRequest,
-) -> Result<ndc_models::MutationResponse, Error> {
+    mutation_request: &NdcMutationRequest,
+) -> Result<NdcMutationResponse, Error> {
     let tracer = tracing_util::global_tracer();
     tracer
         .in_span_async(
@@ -142,11 +268,41 @@ pub async fn mutation_post(
                 Box::pin(async {
                     let url = append_path(configuration.base_path, &["mutation"])?;
                     let response_size_limit = configuration.response_size_limit;
-                    let request =
-                        construct_request(configuration, reqwest::Method::POST, url, |r| {
-                            r.json(mutation_request)
-                        });
-                    execute_request(request, response_size_limit).await
+
+                    match mutation_request {
+                        NdcMutationRequest::V01(req) => {
+                            let request = construct_request(
+                                configuration,
+                                NdcVersion::V01,
+                                reqwest::Method::POST,
+                                url,
+                                |r| r.json(req),
+                            );
+                            let response = execute_request(
+                                request,
+                                response_size_limit,
+                                NdcErrorResponse::V01,
+                            )
+                            .await?;
+                            Ok(NdcMutationResponse::V01(response))
+                        }
+                        NdcMutationRequest::V02(req) => {
+                            let request = construct_request(
+                                configuration,
+                                NdcVersion::V02,
+                                reqwest::Method::POST,
+                                url,
+                                |r| r.json(req),
+                            );
+                            let response = execute_request(
+                                request,
+                                response_size_limit,
+                                NdcErrorResponse::V02,
+                            )
+                            .await?;
+                            Ok(NdcMutationResponse::V02(response))
+                        }
+                    }
                 })
             },
         )
@@ -156,10 +312,10 @@ pub async fn mutation_post(
 /// POST on /query endpoint
 ///
 /// <https://hasura.github.io/ndc-spec/specification/queries/index.html>
-pub async fn query_post(
+pub(crate) async fn query_post(
     configuration: Configuration<'_>,
-    query_request: &ndc_models::QueryRequest,
-) -> Result<ndc_models::QueryResponse, Error> {
+    query_request: &NdcQueryRequest,
+) -> Result<NdcQueryResponse, Error> {
     let tracer = tracing_util::global_tracer();
     tracer
         .in_span_async(
@@ -170,15 +326,278 @@ pub async fn query_post(
                 Box::pin(async {
                     let url = append_path(configuration.base_path, &["query"])?;
                     let response_size_limit = configuration.response_size_limit;
-                    let request =
-                        construct_request(configuration, reqwest::Method::POST, url, |r| {
-                            r.json(query_request)
-                        });
-                    execute_request(request, response_size_limit).await
+
+                    match query_request {
+                        NdcQueryRequest::V01(req) => {
+                            let request = construct_request(
+                                configuration,
+                                NdcVersion::V01,
+                                reqwest::Method::POST,
+                                url,
+                                |r| r.json(req),
+                            );
+                            let response = execute_request(
+                                request,
+                                response_size_limit,
+                                NdcErrorResponse::V01,
+                            )
+                            .await?;
+                            Ok(NdcQueryResponse::V01(response))
+                        }
+                        NdcQueryRequest::V02(req) => {
+                            let request = construct_request(
+                                configuration,
+                                NdcVersion::V02,
+                                reqwest::Method::POST,
+                                url,
+                                |r| r.json(req),
+                            );
+                            let response = execute_request(
+                                request,
+                                response_size_limit,
+                                NdcErrorResponse::V02,
+                            )
+                            .await?;
+                            Ok(NdcQueryResponse::V02(response))
+                        }
+                    }
                 })
             },
         )
         .await
+}
+
+/// POST on undocumented /query/rel endpoint
+pub async fn query_relational_post(
+    configuration: Configuration<'_>,
+    request: &ndc_models::RelationalQuery,
+) -> Result<ndc_models::RelationalQueryResponse, Error> {
+    let tracer = tracing_util::global_tracer();
+
+    tracer
+        .in_span_async(
+            "query_rel_post",
+            "Post relation for query",
+            SpanVisibility::Internal,
+            || {
+                Box::pin(async {
+                    let url = append_path(configuration.base_path, &["query", "relational"])?;
+                    let response_size_limit = configuration.response_size_limit;
+
+                    let request = construct_request(
+                        configuration,
+                        NdcVersion::V02,
+                        reqwest::Method::POST,
+                        url,
+                        |r| r.json(request),
+                    );
+                    let response =
+                        execute_request(request, response_size_limit, NdcErrorResponse::V02)
+                            .await?;
+                    Ok(response)
+                })
+            },
+        )
+        .await
+}
+
+/// POST on /mutation/rel/insert endpoint
+///
+/// Sends a relational insert request to the connector
+pub async fn mutation_relational_insert_post(
+    configuration: Configuration<'_>,
+    request: &RelationalInsertRequest,
+) -> Result<RelationalInsertResponse, Error> {
+    let tracer = tracing_util::global_tracer();
+
+    tracer
+        .in_span_async(
+            "mutation_rel_insert_post",
+            "Post relational insert mutation",
+            SpanVisibility::Internal,
+            || {
+                Box::pin(async {
+                    let url = append_path(configuration.base_path, &["mutation", "rel", "insert"])?;
+                    let response_size_limit = configuration.response_size_limit;
+
+                    let request = construct_request(
+                        configuration,
+                        NdcVersion::V02,
+                        reqwest::Method::POST,
+                        url,
+                        |r| r.json(request),
+                    );
+                    let response =
+                        execute_request(request, response_size_limit, NdcErrorResponse::V02)
+                            .await?;
+                    Ok(response)
+                })
+            },
+        )
+        .await
+}
+
+/// POST on /mutation/rel/update endpoint
+///
+/// Sends a relational update request to the connector
+pub async fn mutation_relational_update_post(
+    configuration: Configuration<'_>,
+    request: &RelationalUpdateRequest,
+) -> Result<RelationalUpdateResponse, Error> {
+    let tracer = tracing_util::global_tracer();
+
+    tracer
+        .in_span_async(
+            "mutation_rel_update_post",
+            "Post relational update mutation",
+            SpanVisibility::Internal,
+            || {
+                Box::pin(async {
+                    let url = append_path(configuration.base_path, &["mutation", "rel", "update"])?;
+                    let response_size_limit = configuration.response_size_limit;
+
+                    let request = construct_request(
+                        configuration,
+                        NdcVersion::V02,
+                        reqwest::Method::POST,
+                        url,
+                        |r| r.json(request),
+                    );
+                    let response =
+                        execute_request(request, response_size_limit, NdcErrorResponse::V02)
+                            .await?;
+                    Ok(response)
+                })
+            },
+        )
+        .await
+}
+
+/// POST on /mutation/rel/delete endpoint
+///
+/// Sends a relational delete request to the connector
+pub async fn mutation_relational_delete_post(
+    configuration: Configuration<'_>,
+    request: &RelationalDeleteRequest,
+) -> Result<RelationalDeleteResponse, Error> {
+    let tracer = tracing_util::global_tracer();
+
+    tracer
+        .in_span_async(
+            "mutation_rel_delete_post",
+            "Post relational delete mutation",
+            SpanVisibility::Internal,
+            || {
+                Box::pin(async {
+                    let url = append_path(configuration.base_path, &["mutation", "rel", "delete"])?;
+                    let response_size_limit = configuration.response_size_limit;
+
+                    let request = construct_request(
+                        configuration,
+                        NdcVersion::V02,
+                        reqwest::Method::POST,
+                        url,
+                        |r| r.json(request),
+                    );
+                    let response =
+                        execute_request(request, response_size_limit, NdcErrorResponse::V02)
+                            .await?;
+                    Ok(response)
+                })
+            },
+        )
+        .await
+}
+
+pub async fn query_relational_stream(
+    configuration: Configuration<'_>,
+    request: &ndc_models::RelationalQuery,
+) -> Result<impl Stream<Item = Result<Vec<serde_json::Value>, Error>> + use<>, Error> {
+    let tracer = tracing_util::global_tracer();
+
+    tracer
+        .in_span_async(
+            "query_rel_stream",
+            "Stream relational query",
+            SpanVisibility::Internal,
+            move || {
+                Box::pin(async move {
+                    let url =
+                        append_path(configuration.base_path, &["query", "relational", "stream"])?;
+
+                    let request_builder = construct_request(
+                        configuration,
+                        NdcVersion::V02,
+                        reqwest::Method::POST,
+                        url,
+                        |r| r.json(request),
+                    );
+
+                    // Inject trace headers so streaming requests propagate the active trace
+                    // context to connectors, same as non-streaming requests.
+                    let trace_headers = tracing_util::get_trace_headers();
+                    let response = request_builder
+                        .headers(trace_headers)
+                        .send()
+                        .await
+                        .map_err(Error::Reqwest)?;
+
+                    if !response.status().is_success() {
+                        return Err(Error::Connector(ConnectorError {
+                            status: response.status(),
+                            error_response: NdcErrorResponse::V02(response.json().await?),
+                        }));
+                    }
+                    let byte_stream = response
+                        .error_for_status()
+                        .map_err(Error::Reqwest)?
+                        .bytes_stream()
+                        .map_err(std::io::Error::other);
+                    let reader = StreamReader::new(byte_stream);
+                    let lines = tokio_util::codec::FramedRead::new(
+                        reader,
+                        tokio_util::codec::LinesCodec::new(),
+                    );
+                    let parsed_stream = lines.map(
+                        |line_result: Result<String, tokio_util::codec::LinesCodecError>| {
+                            let line = line_result
+                                .map_err(|e| Error::IOError(std::io::Error::other(e)))?;
+                            if line.is_empty() {
+                                return Ok(Vec::new());
+                            }
+                            // Check for JSON-encoded error lines (e.g. [500, "big internal error"])
+                            if let Some(connector_error) = parse_ndjson_error_line(&line) {
+                                return Err(Error::Connector(connector_error));
+                            }
+                            serde_json::from_str::<Vec<serde_json::Value>>(&line)
+                                .map_err(Error::Serde)
+                        },
+                    );
+                    Ok(parsed_stream)
+                })
+            },
+        )
+        .await
+}
+
+/// Parse a line from an NDJSON stream that represents a connector error.
+///
+/// Connectors may emit error lines as JSON arrays `[<status_code>, "<message>"]`
+/// (e.g. `[500, "big internal error"]`). This function detects such lines and
+/// converts them into a `ConnectorError` with the appropriate HTTP status code.
+fn parse_ndjson_error_line(line: &str) -> Option<ConnectorError> {
+    let parsed: (u16, String) = serde_json::from_str(line).ok()?;
+    let status = reqwest::StatusCode::from_u16(parsed.0).ok()?;
+    if status.is_success() {
+        return None;
+    }
+    Some(ConnectorError {
+        status,
+        error_response: NdcErrorResponse::V02(ndc_models::ErrorResponse {
+            message: parsed.1,
+            details: serde_json::Value::Null,
+        }),
+    })
 }
 
 // Private utility functions
@@ -187,7 +606,7 @@ pub async fn query_post(
 fn append_path(url: &reqwest::Url, path: &[&str]) -> Result<reqwest::Url, Error> {
     let mut url = url.clone();
     url.path_segments_mut()
-        .map_err(|_| Error::InvalidBaseURL)?
+        .map_err(|()| Error::InvalidBaseURL)?
         .pop_if_empty()
         .extend(path);
     Ok(url)
@@ -195,6 +614,7 @@ fn append_path(url: &reqwest::Url, path: &[&str]) -> Result<reqwest::Url, Error>
 
 fn construct_request(
     configuration: Configuration,
+    ndc_version: NdcVersion,
     method: reqwest::Method,
     url: reqwest::Url,
     modify: impl FnOnce(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
@@ -211,6 +631,12 @@ fn construct_request(
                 request_builder = modify(request_builder);
                 // Set headers from configuration
                 request_builder = request_builder.headers(configuration.headers.into_owned());
+                // Set X-Hasura-NDC-Version
+                let version = match ndc_version {
+                    NdcVersion::V01 => "0.1.0",
+                    NdcVersion::V02 => "0.2.0",
+                };
+                request_builder = request_builder.header(ndc_models::VERSION_HEADER_NAME, version);
                 // Return the prepared request
                 Successful::new(request_builder)
             },
@@ -219,10 +645,16 @@ fn construct_request(
 }
 
 /// Execute a request and deserialize the JSON response
-async fn execute_request<T: DeserializeOwned>(
+async fn execute_request<TResponse, TResponseError, F>(
     request: reqwest::RequestBuilder,
     response_size_limit: Option<usize>,
-) -> Result<T, Error> {
+    to_error: F,
+) -> Result<TResponse, Error>
+where
+    TResponse: DeserializeOwned,
+    TResponseError: DeserializeOwned,
+    F: FnOnce(TResponseError) -> NdcErrorResponse + Send,
+{
     let tracer = tracing_util::global_tracer();
 
     let response = tracer
@@ -260,7 +692,7 @@ async fn execute_request<T: DeserializeOwned>(
                         };
                         Ok(result)
                     } else {
-                        Err(construct_error(response).await)
+                        Err(construct_error(response, to_error).await)
                     }
                 })
             },
@@ -269,14 +701,18 @@ async fn execute_request<T: DeserializeOwned>(
 }
 
 /// Build an error from the response status and content
-async fn construct_error(response: reqwest::Response) -> Error {
+async fn construct_error<TResponseError, F>(response: reqwest::Response, to_error: F) -> Error
+where
+    TResponseError: DeserializeOwned,
+    F: FnOnce(TResponseError) -> NdcErrorResponse,
+{
     let status = response.status();
     match response.json().await {
-        Ok(body) => match ndc_models::ErrorResponse::deserialize(&body) {
+        Ok(body) => match TResponseError::deserialize(&body) {
             Ok(error_response) => {
                 let connector_error = ConnectorError {
                     status,
-                    error_response,
+                    error_response: to_error(error_response),
                 };
                 Error::Connector(connector_error)
             }
@@ -292,6 +728,49 @@ async fn construct_error(response: reqwest::Response) -> Error {
             content: serde_json::Value::Null,
         }),
     }
+}
+
+/// Handle response return from an NDC request by applying the size limit and
+/// deserializing into a JSON value
+async fn handle_response_with_size_limit<T: for<'de> serde::Deserialize<'de>>(
+    response: reqwest::Response,
+    size_limit: usize,
+) -> Result<T, Error> {
+    if let Some(content_length) = &response.content_length() {
+        // Check with content length
+        if *content_length > size_limit as u64 {
+            Err(Error::ResponseTooLarge(format!(
+                "Received content length {content_length} exceeds the limit {size_limit}"
+            )))
+        } else {
+            Ok(response.json().await?)
+        }
+    } else {
+        // If no content length found, then check chunk-by-chunk
+        handle_response_by_chunks_with_size_limit(response, size_limit).await
+    }
+}
+
+/// Handle response by chunks. For each chunk consumed, check if the total size exceeds the limit.
+///
+/// This logic is separated in a function to allow testing.
+async fn handle_response_by_chunks_with_size_limit<T: for<'de> serde::Deserialize<'de>>(
+    response: reqwest::Response,
+    size_limit: usize,
+) -> Result<T, Error> {
+    let mut size = 0;
+    let mut buf = bytes::BytesMut::new();
+    let mut response = response;
+    while let Some(chunk) = response.chunk().await? {
+        size += chunk.len();
+        if size > size_limit {
+            return Err(Error::ResponseTooLarge(format!(
+                "Size exceeds the limit {size_limit}"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(serde_json::from_slice(&buf)?)
 }
 
 #[cfg(test)]
@@ -336,5 +815,97 @@ mod tests {
         let paths = ["query", "explain"];
         let result = append_path(&url, &paths).unwrap();
         assert_eq!(result.as_str(), "http://hasura.io/ndc/query/explain");
+    }
+
+    use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn test_content_length() {
+        let mut server = mockito::Server::new_async().await;
+        let test_api = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"message": "hello"}"#)
+            .create();
+        let response = reqwest::get(server.url() + "/test").await.unwrap();
+        test_api.assert();
+        let err = super::handle_response_with_size_limit::<serde_json::Value>(response, 10)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "response received from connector is too large: Received content length 20 exceeds the limit 10"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chunk_by_chunk() {
+        let mut server = mockito::Server::new_async().await;
+        let test_api = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"message": "hello"}"#)
+            .create();
+        let response = reqwest::get(server.url() + "/test").await.unwrap();
+        test_api.assert();
+        let err =
+            super::handle_response_by_chunks_with_size_limit::<serde_json::Value>(response, 5)
+                .await
+                .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "response received from connector is too large: Size exceeds the limit 5"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_success() {
+        let json = serde_json::json!(
+            [
+                {"name": "Alice"},
+                {"name": "Bob"},
+                {"name": "Charlie"}
+            ]
+        );
+        let mut server = mockito::Server::new_async().await;
+        let test_api = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::to_vec(&json).unwrap())
+            .create();
+        let response = reqwest::get(server.url() + "/test").await.unwrap();
+        test_api.assert();
+        let res = super::handle_response_with_size_limit::<serde_json::Value>(response, 100)
+            .await
+            .unwrap();
+        assert_eq!(json, res);
+    }
+
+    #[tokio::test]
+    async fn test_success_by_chunks() {
+        let json = serde_json::json!(
+            [
+                {"name": "Alice"},
+                {"name": "Bob"},
+                {"name": "Charlie"}
+            ]
+        );
+        let mut server = mockito::Server::new_async().await;
+        let test_api = server
+            .mock("GET", "/test")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::to_vec(&json).unwrap())
+            .create();
+        let response = reqwest::get(server.url() + "/test").await.unwrap();
+        test_api.assert();
+        let res =
+            super::handle_response_by_chunks_with_size_limit::<serde_json::Value>(response, 100)
+                .await
+                .unwrap();
+        assert_eq!(json, res);
     }
 }

@@ -1,8 +1,14 @@
 import React from 'react';
-import { Button } from './../../../new-components/Button';
+import { Flex } from '@radix-ui/themes';
+import { Button, Tooltip } from '@hasura/shared/ui';
 import { AlertHeader } from './AlertsHeader';
-import { FaBell, FaTimes } from 'react-icons/fa';
-import Tooltip from '../../../components/Common/Tooltip/Tooltip';
+import {
+  FaBell,
+  FaTimes,
+  FaExclamationTriangle,
+  FaCheck,
+  FaTrash,
+} from 'react-icons/fa';
 import {
   useSlackIntegration,
   SlackOauthStatus,
@@ -10,9 +16,8 @@ import {
 import globals from '../../../Globals';
 import { useGetSlackState } from '../hooks/useGetSlackState';
 import { SlackButtonSVG } from './SlackButtonSvg';
-import { FaExclamationTriangle, FaCheck, FaTrash } from 'react-icons/fa';
 import { SlackDeleteConfirmationDialog } from './SlackDeleteConfirmationDialog';
-import { Analytics } from '../../Analytics';
+import { Analytics } from '@hasura/shared/analytics';
 
 type TileProp = {
   statusIcon: React.ReactNode;
@@ -23,7 +28,7 @@ type TileProp = {
 
 const getSlackIntegrationStatusTileProps = (
   slackStatus: SlackOauthStatus,
-  onAction: () => void
+  onAction: () => void,
 ): TileProp | null => {
   switch (slackStatus.status) {
     case 'error': {
@@ -33,7 +38,7 @@ const getSlackIntegrationStatusTileProps = (
         ),
         actionName: 'dismiss-slack-integration-error',
         actionIcon: (
-          <Tooltip message="Dismiss">
+          <Tooltip content="Dismiss">
             <FaTimes
               className="fill-current cursor-pointer text-muted hover:text-gray-800 ml-2"
               onClick={onAction}
@@ -50,7 +55,7 @@ const getSlackIntegrationStatusTileProps = (
         ),
         actionName: 'delete-slack-integration',
         actionIcon: (
-          <Tooltip message="Remove Slack Integration">
+          <Tooltip content="Remove Slack Integration">
             <FaTrash
               className="fill-current cursor-pointer text-muted hover:text-gray-800 ml-2"
               onClick={onAction}
@@ -77,14 +82,14 @@ type SlackIntegrationStatusTileProps = {
   onAction: () => void;
 };
 
-export const SlackIntegrationStatusTile: React.FC<
-  SlackIntegrationStatusTileProps
-> = props => {
+const SlackIntegrationStatusTile: React.FC<SlackIntegrationStatusTileProps> = (
+  props,
+) => {
   const { status, onAction } = props;
 
   const slackIntegrationTileProps = getSlackIntegrationStatusTileProps(
     status,
-    onAction
+    onAction,
   );
 
   if (!slackIntegrationTileProps) return null;
@@ -92,15 +97,18 @@ export const SlackIntegrationStatusTile: React.FC<
   const { statusIcon, actionName, actionIcon, message } =
     slackIntegrationTileProps;
   return (
-    <div className="flex justify-between border rounded mx-6 p-2 mb-4 text-gray-500">
-      <div className="flex justify-start items-center">
+    <Flex
+      justify="between"
+      className="border rounded mx-6 p-2 mb-4 text-gray-500"
+    >
+      <Flex justify="start" align="center">
         {statusIcon}
         {message}
-      </div>
+      </Flex>
       <Analytics name={`settings-schema-registry-slack-alerts-${actionName}`}>
-        <div className="flex">{actionIcon}</div>
+        <Flex>{actionIcon}</Flex>
       </Analytics>
-    </div>
+    </Flex>
   );
 };
 
@@ -111,7 +119,7 @@ type SlackIntegrationStateProps = {
   onDismiss: () => void;
 };
 
-export const SlackIntegrationState = (props: SlackIntegrationStateProps) => {
+const SlackIntegrationState = (props: SlackIntegrationStateProps) => {
   const { slackIntegrationStatus, onIntegrationSlack, onDelete, onDismiss } =
     props;
   const isButtonDisabled = slackIntegrationStatus.status === 'authenticating';
@@ -120,22 +128,22 @@ export const SlackIntegrationState = (props: SlackIntegrationStateProps) => {
     case 'idle':
     case 'authenticating':
       return (
-        <div className="flex justify-center mb-4">
+        <Flex justify="center" className="mb-4">
           <Analytics name="settings-schema-registry-add-to-slack-btn">
             <Button
               onClick={onIntegrationSlack}
               mode="default"
               data-testid="onboarding-wizard-neon-connect-db-button"
-              isLoading={isButtonDisabled}
+              loading={isButtonDisabled}
               disabled={isButtonDisabled}
             >
-              <div className="flex justify-center">
+              <Flex justify="center">
                 <SlackButtonSVG />
                 <p className="ml-2">Add to Slack</p>
-              </div>
+              </Flex>
             </Button>
           </Analytics>
-        </div>
+        </Flex>
       );
     case 'authenticated': {
       return (
@@ -187,7 +195,11 @@ export const SlackAlerts: React.FC<SlackAlertsProps> = ({ onClose }) => {
     useSlackIntegration(onCloseDeleteConfirmation);
 
   const [slackIntegrationStatus, setSlackIntegrationStatus] =
-    React.useState<SlackOauthStatus>(slackOauthStatus);
+    React.useState<SlackOauthStatus>(() =>
+      !doesSlackIntegrationExist && slackOauthStatus.status === 'authenticated'
+        ? { status: 'idle' }
+        : slackOauthStatus,
+    );
 
   const onIntegrateSlack = () => {
     startSlackOAuth();
@@ -207,19 +219,34 @@ export const SlackAlerts: React.FC<SlackAlertsProps> = ({ onClose }) => {
     }
   }, [slackIntegrationStatus]);
 
-  React.useEffect(() => {
-    setSlackIntegrationStatus(slackOauthStatus);
+  // Mirror the OAuth status coming from the integration hook. When either the
+  // OAuth status or whether an integration already exists changes, re-sync the
+  // local state during render (guarded by the previous values). This keeps
+  // user-driven overrides (e.g. dismissing an error -> idle) in place until the
+  // next real change, and avoids the extra render pass of an effect.
+  const [prevSync, setPrevSync] = React.useState({
+    slackOauthStatus,
+    doesSlackIntegrationExist,
+  });
+  if (
+    prevSync.slackOauthStatus !== slackOauthStatus ||
+    prevSync.doesSlackIntegrationExist !== doesSlackIntegrationExist
+  ) {
+    setPrevSync({ slackOauthStatus, doesSlackIntegrationExist });
     if (
       !doesSlackIntegrationExist &&
       slackOauthStatus.status === 'authenticated'
-    )
+    ) {
       setSlackIntegrationStatus({ status: 'idle' });
-  }, [slackOauthStatus, doesSlackIntegrationExist]);
+    } else {
+      setSlackIntegrationStatus(slackOauthStatus);
+    }
+  }
 
   return (
-    <div className="ml-[-14px]">
+    <div className="-ml-4">
       <AlertHeader
-        icon={<FaBell className="w-9 h-9 mr-md mt-xs fill-current" />}
+        icon={<FaBell className="w-9 h-9 mr-4 mt-2 fill-current" />}
         title="Slack Alerts"
         description="Integrate with a Slack channel to enable alerts."
       />

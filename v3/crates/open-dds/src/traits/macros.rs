@@ -1,21 +1,23 @@
-/// Macro to use serde's deserialize and schamars' JsonSchema impl OpenDd for any type using serde_path_to_error with path information
+/// Macro to use serde's deserialize and schemars' JsonSchema impl OpenDd for any type.
+/// For simple leaf types (String, bool, i32, etc.), serde_path_to_error is not needed
+/// since the error path would always be empty. We use serde_json::from_value directly
+/// to avoid the TrackedSeed/Wrap overhead.
 #[macro_export]
 macro_rules! impl_OpenDd_default_for {
     ($ty: ty) => {
         impl open_dds::traits::OpenDd for $ty {
             fn deserialize(
                 json: serde_json::Value,
+                path: jsonpath::JSONPath,
             ) -> Result<Self, open_dds::traits::OpenDdDeserializeError> {
-                ::serde_path_to_error::deserialize(json).map_err(|e| {
-                    open_dds::traits::OpenDdDeserializeError {
-                        path: open_dds::traits::JSONPath::from_serde_path(e.path()),
-                        error: e.into_inner(),
-                    }
-                })
+                serde_json::from_value(json)
+                    .map_err(|e| open_dds::traits::OpenDdDeserializeError { path, error: e })
             }
 
-            fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-                <Self as ::schemars::JsonSchema>::json_schema(gen)
+            fn json_schema(
+                generator: &mut schemars::r#gen::SchemaGenerator,
+            ) -> schemars::schema::Schema {
+                <Self as ::schemars::JsonSchema>::json_schema(generator)
             }
 
             fn _schema_name() -> String {
@@ -38,35 +40,30 @@ macro_rules! seq_impl {
             where
             T: OpenDd $(+ $tbound1 $(+ $tbound2)*)*, $($typaram: $bound1 $(+ $bound2)*,)*
         {
-            fn deserialize(json: serde_json::Value) -> Result<Self, OpenDdDeserializeError> {
+            fn deserialize(json: serde_json::Value, path: jsonpath::JSONPath) -> Result<Self, OpenDdDeserializeError> {
                 match json {
                     serde_json::Value::Array(arr) => arr
                         .into_iter()
                         .enumerate()
-                        .map(|(idx, json)| {
-                            T::deserialize(json).map_err(|e| OpenDdDeserializeError {
-                                path: e.path.prepend_index(idx),
-                                error: e.error,
-                            })
-                        })
+                        .map(|(idx, json)| open_dds::traits::deserialize_index(json, path.clone(), idx))
                         .collect::<Result<$ty<T $(, $typaram)*>, OpenDdDeserializeError>>(),
                     _ => Err(OpenDdDeserializeError {
                         error: serde::de::Error::invalid_type(
                             serde::de::Unexpected::Other("not an array"),
                             &"array",
                         ),
-                        path: JSONPath::new(),
+                        path,
                     }),
                 }
             }
 
-            fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
+            fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> Schema {
                 SchemaObject {
                     instance_type: Some(InstanceType::Array.into()),
                     array: Some(Box::new(ArrayValidation {
                         // None omits `unique_items` key in the serialized schema
                         unique_items: if $is_unique { Some(true) } else { None },
-                        items: Some(gen_subschema_for::<T>(gen).into()),
+                        items: Some(gen_subschema_for::<T>(generator).into()),
                         ..Default::default()
                     })),
                     ..Default::default()
@@ -92,17 +89,14 @@ macro_rules! map_impl {
             V: OpenDd,
             $($typaram: $bound1 $(+ $bound2)*),*
         {
-            fn deserialize(json: serde_json::Value) -> Result<Self, OpenDdDeserializeError> {
+            fn deserialize(json: serde_json::Value, path: jsonpath::JSONPath) -> Result<Self, OpenDdDeserializeError> {
                 match json {
                     serde_json::Value::Object(map) => map
                         .into_iter()
                         .map(|(k, v)| {
                             Ok((
-                                K::deserialize(serde_json::Value::String(k.clone()))?,
-                                V::deserialize(v).map_err(|e| OpenDdDeserializeError {
-                                    path: e.path.prepend_key(k),
-                                    error: e.error,
-                                })?,
+                                K::deserialize(serde_json::Value::String(k.clone()), path.clone())?,
+                                open_dds::traits::deserialize_key::<V>(v, path.clone(), k)?,
                             ))
                         })
                         .collect::<Result<$ty<K, V $(, $typaram)*>, OpenDdDeserializeError>>(),
@@ -111,13 +105,13 @@ macro_rules! map_impl {
                             serde::de::Unexpected::Other("not an object"),
                             &"object",
                         ),
-                        path: JSONPath::new(),
+                        path,
                     }),
                 }
             }
 
-            fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> Schema {
-                let subschema = gen_subschema_for::<V>(gen);
+            fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> Schema {
+                let subschema = gen_subschema_for::<V>(generator);
                 SchemaObject {
                     instance_type: Some(InstanceType::Object.into()),
                     object: Some(Box::new(ObjectValidation {
@@ -149,9 +143,135 @@ macro_rules! impl_JsonSchema_with_OpenDd_for {
                 <$ty as open_dds::traits::OpenDd>::_schema_name()
             }
 
-            fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-                <$ty as open_dds::traits::OpenDd>::json_schema(gen)
+            fn json_schema(
+                generator: &mut schemars::r#gen::SchemaGenerator,
+            ) -> schemars::schema::Schema {
+                <$ty as open_dds::traits::OpenDd>::json_schema(generator)
             }
         }
+    };
+}
+
+/// Macro to implement newtype wrappers for string identifiers
+#[macro_export]
+macro_rules! str_newtype {
+    // Internal: common implementation for all variants
+    (@base $name:ident over $oldtype:ty | doc $doc:expr) => {
+        #[derive(
+            Clone,
+            Debug,
+            Hash,
+            Eq,
+            Ord,
+            PartialEq,
+            PartialOrd,
+            serde::Serialize,
+            serde::Deserialize,
+            ref_cast::RefCast,
+            derive_more::with_trait::Display,
+            opendds_derive::OpenDd,
+        )]
+        #[repr(transparent)]
+        #[doc = $doc]
+        pub struct $name($oldtype);
+
+        impl AsRef<$oldtype> for $name {
+            fn as_ref(&self) -> &$oldtype {
+                &self.0
+            }
+        }
+
+        impl From<$oldtype> for $name {
+            fn from(value: $oldtype) -> Self {
+                $name(value)
+            }
+        }
+
+        impl From<$name> for $oldtype {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl core::borrow::Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                self.0.as_str()
+            }
+        }
+
+        impl core::borrow::Borrow<$oldtype> for $name {
+            fn borrow(&self) -> &$oldtype {
+                &self.0
+            }
+        }
+
+        impl $name {
+            pub fn new(value: $oldtype) -> Self {
+                $name(value)
+            }
+
+            pub fn as_str(&self) -> &str {
+                self.0.as_str()
+            }
+
+            pub fn into_inner(self) -> $oldtype {
+                self.0
+            }
+
+            pub fn inner(&self) -> &$oldtype {
+                &self.0
+            }
+        }
+
+        $crate::impl_JsonSchema_with_OpenDd_for!($name);
+    };
+
+    // Case 1: over String
+    ($name:ident over String | doc $doc:expr) => {
+        str_newtype! {@base $name over String | doc $doc}
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                $name(value.into())
+            }
+        }
+    };
+
+    // Case 2: over SmolStr
+    ($name:ident over smol_str::SmolStr | doc $doc:expr) => {
+        str_newtype! {@base $name over smol_str::SmolStr | doc $doc}
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                $name(value.into())
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                $name(value.into())
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0.into()
+            }
+        }
+    };
+
+    // Case 3: over $oldtype (not String or SmolStr)
+    ($name:ident over $oldtype:ty | doc $doc:expr) => {
+        str_newtype! {@base $name over $oldtype | doc $doc}
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0.into()
+            }
+        }
+    };
+
+    // Case 4: no over clause - default to SmolStr
+    ($name:ident | doc $doc:expr) => {
+        str_newtype! {$name over smol_str::SmolStr | doc $doc}
     };
 }

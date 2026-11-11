@@ -433,6 +433,7 @@ jobs:
       GRAPHQL_ENGINE_TESTS: /build/_server_output/graphql-engine-tests
       MIX_FILES_FOLDER: /build/_server_output/mix
       HASURA_BIGQUERY_SERVICE_ACCOUNT_FILE: gcloud-service-key.json
+      HASURA_DEBUGGING_ASSERT_CORRECT_BIGQUERY_INTROSPECTION: "true"
     working_directory: ~/graphql-engine
     steps:
       - attach_workspace:
@@ -615,7 +616,7 @@ jobs:
       - run:
           name: sign macos (arm64) cli-ext
           command: |
-            codesign --sign - ~/build/_cli_ext_output/cli-ext-hasura-node16-macos-arm64
+            codesign --sign - ~/build/_cli_ext_output/cli-ext-hasura-node24-macos-arm64
       - store_artifacts:
           path: ~/build/_cli_ext_output
           destination: cli_ext

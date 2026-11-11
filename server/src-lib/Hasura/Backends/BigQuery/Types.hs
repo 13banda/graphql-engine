@@ -1,6 +1,5 @@
 {-# LANGUAGE DeriveAnyClass #-}
 {-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE UndecidableInstances #-}
 
 -- | Types for BigQuery
 module Hasura.Backends.BigQuery.Types
@@ -339,27 +338,15 @@ data Aggregate
 
 newtype CountType field = CountType {getCountType :: Countable (ColumnName, AnnRedactionExp 'BigQuery field)}
 
-deriving stock instance (Backend.Backend 'BigQuery) => Foldable CountType
-
-deriving stock instance (Backend.Backend 'BigQuery) => Functor CountType
-
-deriving stock instance (Backend.Backend 'BigQuery) => Traversable CountType
-
 deriving stock instance
   ( Backend.Backend 'BigQuery,
-    Eq field,
-    Eq (Backend.AggregationPredicates 'BigQuery field),
-    Eq (Backend.BooleanOperators 'BigQuery field),
-    Eq (Backend.FunctionArgumentExp 'BigQuery field)
+    Eq field
   ) =>
   Eq (CountType field)
 
 deriving stock instance
   ( Backend.Backend 'BigQuery,
-    Show field,
-    Show (Backend.AggregationPredicates 'BigQuery field),
-    Show (Backend.BooleanOperators 'BigQuery field),
-    Show (Backend.FunctionArgumentExp 'BigQuery field)
+    Show field
   ) =>
   Show (CountType field)
 
@@ -602,8 +589,15 @@ instance ToJSON Decimal where
   toJSON (Decimal x) = J.toJSON x
 
 -- | Convert 'Scientific' to 'Text'
+--
+-- 'Fixed' formatting is linear in the exponent, and the input may be untrusted,
+-- so fall back to exponent notation outside of +/-1024 (as aeson's encoder
+-- does). Such values are far outside the range of BigQuery's decimal types anyway.
 scientificToText :: Scientific -> Text
-scientificToText num = toStrict $ toLazyText $ formatScientificBuilder Fixed Nothing num
+scientificToText num = toStrict $ toLazyText $ formatScientificBuilder format Nothing num
+  where
+    e = base10Exponent num
+    format = if e < -1024 || e > 1024 then Generic else Fixed
 
 -- | BigQuery's conception of a \"big\" fixed precision decimal.
 newtype BigDecimal = BigDecimal Text
@@ -883,6 +877,8 @@ data ArgumentExp v
   deriving stock (Eq, Show, Functor, Foldable, Traversable, Generic)
 
 instance (Hashable v) => Hashable (ArgumentExp v)
+
+instance (NFData a) => NFData (ArgumentExp a)
 
 type ComputedFieldImplicitArguments = HashMap FunctionArgName ColumnName
 

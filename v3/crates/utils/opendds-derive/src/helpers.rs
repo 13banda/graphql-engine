@@ -2,9 +2,8 @@ use super::container::JsonSchemaMetadata;
 use quote::quote;
 
 pub fn get_title_and_desc_from_doc(attrs: &[syn::Attribute]) -> (Option<String>, Option<String>) {
-    let doc = match get_doc(attrs) {
-        None => return (None, None),
-        Some(doc) => doc,
+    let Some(doc) = get_doc(attrs) else {
+        return (None, None);
     };
 
     if doc.starts_with('#') {
@@ -71,28 +70,25 @@ fn get_doc(attrs: &[syn::Attribute]) -> Option<String> {
     // https://github.com/rust-lang/rust/issues/32088
     if lines.iter().all(|l| l.starts_with('*')) {
         for line in &mut lines {
-            *line = line[1..].trim()
+            *line = line[1..].trim();
         }
         while let Some(&"") = lines.first() {
             lines.remove(0);
         }
-    };
+    }
 
     none_if_empty(lines.join("\n"))
 }
 
 fn none_if_empty(s: String) -> Option<String> {
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 pub fn apply_schema_metadata(
     schema_expr: &proc_macro2::TokenStream,
     json_schema_metadata: JsonSchemaMetadata,
 ) -> proc_macro2::TokenStream {
+    let id = json_schema_metadata.id;
     let title = json_schema_metadata.title;
     let description = json_schema_metadata
         .description
@@ -100,11 +96,7 @@ pub fn apply_schema_metadata(
         .map(|s| quote! { metadata.description = Some(#s.to_owned()); })
         .unwrap_or_default();
 
-    let examples = json_schema_metadata
-        .example
-        .as_ref()
-        .map(|eg| quote! { metadata.examples = [#eg()].to_vec(); })
-        .unwrap_or_default();
+    let examples = set_metadata_examples(&json_schema_metadata.examples);
 
     quote! {
         let schema = {
@@ -112,11 +104,20 @@ pub fn apply_schema_metadata(
         };
         let mut schema_object = schema.into_object();
         let metadata = schema_object.metadata();
+        metadata.id = Some(#id.to_owned());
         metadata.title = Some(#title.to_owned());
-        metadata.id = Some(format!("https://hasura.io/jsonschemas/metadata/{}", Self::_schema_name()));
         #description
         #examples
         schemars::schema::Schema::Object(schema_object)
+    }
+}
+
+pub fn set_metadata_examples(example_fns: &[syn::Path]) -> proc_macro2::TokenStream {
+    if example_fns.is_empty() {
+        return quote! {};
+    }
+    quote! {
+        metadata.examples = vec![#(#example_fns()),*];
     }
 }
 

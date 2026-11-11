@@ -11,7 +11,7 @@ module Hasura.GraphQL.Transport.WebSocket.Server
     WSConn,
     WSErrorMessage (..),
     WSEvent (EMessageSent),
-    WSEventInfo (WSEventInfo, _wseiEventType, _wseiOperationId, _wseiOperationName, _wseiParameterizedQueryHash, _wseiQueryExecutionTime, _wseiResponseSize),
+    WSEventInfo (WSEventInfo, _wseiEventType, _wseiOperationId, _wseiOperationName, _wseiParameterizedQueryHash, _wseiQueryExecutionTime, _wseiResponseSize, _wseiStreamingResumeCursor),
     WSHandlers (WSHandlers),
     WSId,
     WSKeepAliveMessageAction,
@@ -28,8 +28,11 @@ module Hasura.GraphQL.Transport.WebSocket.Server
     getData,
     getRawWebSocketConnection,
     getWSId,
+    setConnInitialized,
     mkWSServerErrorCode,
     sendMsg,
+    sendMsgUnconditional,
+    sendMsgKeepAlive,
     shutdown,
 
     -- * exported for testing
@@ -40,7 +43,6 @@ where
 import Control.Concurrent.Async qualified as A
 import Control.Concurrent.Async.Lifted.Safe qualified as LA
 import Control.Concurrent.Extended (sleep)
-import Control.Concurrent.STM (readTVarIO)
 import Control.Concurrent.STM qualified as STM
 import Control.Exception.Lifted
 import Control.Monad.Trans.Control qualified as MC
@@ -75,13 +77,15 @@ import Hasura.Server.Prometheus
   ( DynamicGraphqlOperationLabel (..),
     PrometheusMetrics (..),
     recordMetricWithLabel,
+    pmWebsocketMsgDropped,
+    pmWebsocketMsgQueued,
   )
 import Hasura.Server.Types (ExperimentalFeature (..), MonadGetPolicies (runGetPrometheusMetricsGranularity))
 import ListT qualified
 import Network.Wai.Extended (IpAddress)
 import Network.Wai.Handler.Warp qualified as Warp
 import Network.WebSockets qualified as WS
-import Refined (unrefine)
+import Refined (Positive, Refined, unrefine)
 import StmContainers.Map qualified as STMMap
 import System.IO.Error qualified as E
 import System.Metrics.Prometheus.Counter qualified as Prometheus.Counter
@@ -110,6 +114,7 @@ $(J.deriveToJSON hasuraJSON ''MessageDetails)
 
 data WSEvent
   = EConnectionRequest
+  | EConnectionTimeout
   | EAccepted
   | ERejected
   | EMessageReceived !MessageDetails
@@ -135,7 +140,15 @@ data WSEventInfo = WSEventInfo
     _wseiOperationName :: !(Maybe OperationName),
     _wseiQueryExecutionTime :: !(Maybe Double),
     _wseiResponseSize :: !(Maybe Int64),
-    _wseiParameterizedQueryHash :: !(Maybe ParameterizedQueryHash)
+    _wseiParameterizedQueryHash :: !(Maybe ParameterizedQueryHash),
+    -- | For a streaming subscription's data push: the cursor value in effect
+    -- just before the poll that produced it, i.e. what the client should use
+    -- as this batch's cursor's @initial_value@ to resume from exactly this
+    -- point if the connection's send queue is ever too full to accept this
+    -- operation's data (see
+    -- 'Hasura.GraphQL.Transport.WebSocket.cancelOperationOnOvercapacity').
+    -- 'Nothing' for everything else.
+    _wseiStreamingResumeCursor :: !(Maybe J.Value)
   }
   deriving (Show, Eq)
 
@@ -200,8 +213,32 @@ data WSConn a = WSConn
   { _wcConnId :: !WSId,
     _wcLogger :: !(L.Logger L.Hasura),
     _wcConnRaw :: !WS.Connection,
-    _wcSendQ :: !(STM.TQueue WSQueueResponse),
-    _wcExtraData :: !a
+    -- | The main send queue. Never evicts: once '_wcMainQCount' reaches
+    -- '_wcMainQCapacity', 'sendMsg' rejects further data instead, and it's
+    -- up to the caller to write a cancellation message for the operation
+    -- that tried to write (via 'sendMsgUnconditional', which always
+    -- succeeds) instead of the data. That cancellation message, and any
+    -- other control message, is what's allowed to push the queue's true
+    -- depth beyond '_wcMainQCapacity' -- bounded by however many operations
+    -- are concurrently active on the connection, not unbounded.
+    _wcMainQ :: !(STM.TQueue WSQueueResponse),
+    -- | Tracks '_wcMainQ's current depth, since 'STM.TQueue' has no O(1)
+    -- length. Every write to '_wcMainQ' (whether via 'sendMsg' or
+    -- 'sendMsgUnconditional') must increment this in the same transaction,
+    -- and every read in the send loop must decrement it likewise.
+    _wcMainQCount :: !(STM.TVar Int),
+    _wcMainQCapacity :: !Int,
+    -- | A single-slot, coalescing "queue" for keepalive traffic
+    -- ('SMConnKeepAlive'/'SMPing') only. Keepalives carry no information of
+    -- their own and are always superseded by the next tick, so a new one
+    -- can simply overwrite any not-yet-sent one -- and, more importantly,
+    -- they never compete with real messages for '_wcMainQ's capacity. The
+    -- send loop only drains this when '_wcMainQ' is empty, so keepalive
+    -- traffic never delays a real message either.
+    _wcKeepAliveSlot :: !(STM.TMVar WSQueueResponse),
+    _wsConnInitTimer :: !WSConnInitTimeout,
+    _wcExtraData :: !a,
+    _wcPrometheusMetrics :: !PrometheusMetrics
   }
 
 getRawWebSocketConnection :: WSConn a -> WS.Connection
@@ -215,6 +252,10 @@ getWSId = _wcConnId
 
 closeConn :: WSConn a -> BL.ByteString -> IO ()
 closeConn wsConn = closeConnWithCode wsConn 1000 -- 1000 is "normal close"
+
+setConnInitialized :: WSConn a -> IO ()
+setConnInitialized wsConn =
+  STM.atomically $ STM.writeTMVar (_wsConnInitTimer wsConn) Initialized
 
 -- | Closes a connection with code 1012, which means "Server is restarting"
 -- good clients will implement a retry logic with a backoff of a few seconds
@@ -232,12 +273,54 @@ sendMsgAndCloseConn wsConn errCode bs serverErr = do
   WS.sendTextData (_wcConnRaw wsConn) (encodeServerMsg serverErr)
   WS.sendCloseCode (_wcConnRaw wsConn) errCode bs
 
--- writes to a queue instead of the raw connection
--- so that sendMsg doesn't block
-sendMsg :: WSConn a -> WSQueueResponse -> IO ()
-sendMsg wsConn !resp = do
+-- | Writes data to the main queue instead of the raw connection, so sending
+-- doesn't block -- unless the queue is already at capacity, in which case
+-- this rejects the write (returning 'False') rather than evicting anything
+-- already queued. Callers are expected to react to a 'False' result by
+-- writing a cancellation message for whichever operation this data belonged
+-- to via 'sendMsgUnconditional' instead (see
+-- 'Hasura.GraphQL.Transport.WebSocket.cancelOperationOnOvercapacity']),
+-- since a client waiting on data that will now never arrive is worse than
+-- one told explicitly to retry.
+sendMsg :: WSConn a -> WSQueueResponse -> IO Bool
+sendMsg WSConn{_wcMainQ, _wcMainQCount, _wcMainQCapacity, _wcPrometheusMetrics} !resp = do
   $assertNFHere resp -- so we don't write thunks to mutable vars
-  STM.atomically $ STM.writeTQueue (_wcSendQ wsConn) resp
+  accepted <- STM.atomically $ do
+    count <- STM.readTVar _wcMainQCount
+    if count >= _wcMainQCapacity
+      then pure False
+      else do
+        STM.writeTQueue _wcMainQ resp
+        STM.writeTVar _wcMainQCount (count + 1)
+        pure True
+  if accepted
+    then Prometheus.Counter.inc (pmWebsocketMsgQueued _wcPrometheusMetrics)
+    else Prometheus.Counter.inc (pmWebsocketMsgDropped _wcPrometheusMetrics)
+  pure accepted
+
+-- | Like 'sendMsg', but always succeeds, regardless of the main queue's
+-- current depth -- for control/signal messages (completions, errors,
+-- connection acks, pongs) which must never be silently dropped, and are
+-- small and bounded in number (at most a handful per operation lifecycle),
+-- unlike the data traffic 'sendMsg' guards.
+sendMsgUnconditional :: WSConn a -> WSQueueResponse -> IO ()
+sendMsgUnconditional WSConn{_wcMainQ, _wcMainQCount, _wcPrometheusMetrics} !resp = do
+  $assertNFHere resp -- so we don't write thunks to mutable vars
+  STM.atomically $ do
+    STM.writeTQueue _wcMainQ resp
+    STM.modifyTVar' _wcMainQCount (+ 1)
+  Prometheus.Counter.inc (pmWebsocketMsgQueued _wcPrometheusMetrics)
+
+-- | For keepalive traffic ('SMConnKeepAlive'/'SMPing') only: writes to the
+-- single-slot, coalescing '_wcKeepAliveSlot' instead of '_wcMainQ', so a
+-- keepalive tick never competes with real messages for queue capacity.
+-- Overwrites any not-yet-sent keepalive rather than blocking or queuing a
+-- second one -- they're fully interchangeable, so only the latest is ever
+-- worth keeping.
+sendMsgKeepAlive :: WSConn a -> WSQueueResponse -> IO ()
+sendMsgKeepAlive WSConn{_wcKeepAliveSlot} !resp = do
+  $assertNFHere resp -- so we don't write thunks to mutable vars
+  STM.atomically $ STM.writeTMVar _wcKeepAliveSlot resp
 
 type ConnMap a = STMMap.Map WSId (WSConn a)
 
@@ -380,7 +463,7 @@ websocketConnectionReaper getLatestConfig getSchemaCache ws@(WSServer _ userConf
   forever $ do
     (currAuthMode, currEnableAllowlist, currCorsPolicy, currSqlGenCtx, currExperimentalFeatures, currDefaultNamingCase) <- getLatestConfig
     currAllowlist <- scAllowlist <$> getSchemaCache
-    SecuritySensitiveUserConfig prevAuthMode prevEnableAllowlist prevAllowlist prevCorsPolicy prevSqlGenCtx prevExperimentalFeatures prevDefaultNamingCase <- readTVarIO userConfRef
+    SecuritySensitiveUserConfig prevAuthMode prevEnableAllowlist prevAllowlist prevCorsPolicy prevSqlGenCtx prevExperimentalFeatures prevDefaultNamingCase <- STM.readTVarIO userConfRef
     -- check and close all connections if required
     checkAndReapConnections
       (currAuthMode, prevAuthMode)
@@ -421,7 +504,7 @@ websocketConnectionReaper getLatestConfig getSchemaCache ws@(WSServer _ userConf
             hasBigqueryStringNumericInputChanged = bigqueryStringNumericInput currSqlGenCtx /= bigqueryStringNumericInput prevSqlGenCtx
             hasHideAggregationPredicatesChanged = (EFHideAggregationPredicates `elem` currExperimentalFeatures) /= (EFHideAggregationPredicates `elem` prevExperimentalFeatures)
             hasHideStreamFieldsChanged = (EFHideStreamFields `elem` currExperimentalFeatures) /= (EFHideStreamFields `elem` prevExperimentalFeatures)
-            hasDefaultNamingCaseChanged = hasNamingConventionChanged (prevExperimentalFeatures, prevDefaultNamingCase) (currExperimentalFeatures, currDefaultNamingCase)
+            hasDefaultNamingCaseChanged = hasNamingConventionChanged prevDefaultNamingCase currDefaultNamingCase
         if
           -- if CORS policy has changed, close all connections
           | hasCorsPolicyChanged ->
@@ -499,10 +582,12 @@ websocketConnectionReaper getLatestConfig getSchemaCache ws@(WSServer _ userConf
                 (\conf -> conf {ssucExperimentalFeatures = currExperimentalFeatures, ssucDefaultNamingCase = currDefaultNamingCase})
           | otherwise -> pure ()
 
+-- | This is called for each client websocket connection
 createServerApp ::
   (MonadIO m, MC.MonadBaseControl IO m, LA.Forall (LA.Pure m), MonadWSLog m, MonadGetPolicies m) =>
   IO MetricsConfig ->
   WSConnectionInitTimeout ->
+  Refined Positive Int ->
   WSServer a ->
   PrometheusMetrics ->
   -- | user provided handlers
@@ -510,12 +595,12 @@ createServerApp ::
   -- | aka WS.ServerApp
   HasuraServerApp m
 {-# INLINE createServerApp #-}
-createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger writeLog) _ serverStatus) prometheusMetrics wsHandlers !ipAddress !pendingConn = do
+createServerApp getMetricsConfig wsConnInitTimeout wsQueueSize (WSServer logger@(L.Logger writeLog) _ serverStatus) prometheusMetrics wsHandlers !ipAddress !pendingConn = do
   wsId <- WSId <$> liftIO UUID.nextRandom
   logWSLog logger $ WSLog wsId EConnectionRequest Nothing
-  -- NOTE: this timer is specific to `graphql-ws`. the server has to close the connection
   -- if the client doesn't send a `connection_init` message within the timeout period
-  wsConnInitTimer <- liftIO $ getNewWSTimer (unrefine $ unWSConnectionInitTimeout wsConnInitTimeout)
+  -- the server has to close the connection
+  wsConnInitTimer <- liftIO newWSConnInitTimeout
   status <- liftIO $ STM.readTVarIO serverStatus
   case status of
     AcceptingConns _ -> logUnexpectedExceptions $ do
@@ -550,11 +635,31 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
                 $ "Client exception: "
                 <> show e
               throwIO e,
+            Handler $ \case
+              -- This represents a clean shutdown at the websocket layer by client, without a
+              -- graceful 'Complete' message at the graphql-ws layer. Raised from receiveData.
+              -- This might get raised if Presumably we have correctly cleaned up by this point:
+              WS.CloseRequest {} -> pure ()
+              -- This is quite common, and easy to induce with `websocat --no-close` and CTRL-C
+              WS.ConnectionClosed ->
+                writeLog
+                  $ L.UnstructuredLog L.LevelDebug
+                  $ fromString
+                  $ "Websocket client closed without sending the proper close control messages"
+              -- I haven't observed these, so make them INFO-level
+              e ->
+                writeLog
+                  $ L.UnstructuredLog L.LevelInfo
+                  $ fromString
+                  $ "A Websocket client may be misbehaving. This was raised while handling the connection: "
+                  <> show e,
+            -- Anything not caught above will be re-raised. Nonexhaustive list of things observed here:
+            --   - tryReceive: timeout (Connection timed out)
             Handler $ \(e :: SomeException) -> do
               writeLog
                 $ L.UnstructuredLog L.LevelError
                 $ fromString
-                $ "Unexpected exception raised in websocket. Please report this as a bug: "
+                $ "Exception raised in websocket: "
                 <> show e
               throwIO e
           ]
@@ -573,8 +678,10 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
     onAccept wsConnInitTimer wsId (AcceptWith a acceptWithParams keepAlive onJwtExpiry) = do
       conn <- liftIO $ WS.acceptRequestWith pendingConn acceptWithParams
       logWSLog logger $ WSLog wsId EAccepted Nothing
-      sendQ <- liftIO STM.newTQueueIO
-      let !wsConn = WSConn wsId logger conn sendQ a
+      mainQ <- liftIO STM.newTQueueIO
+      mainQCount <- liftIO $ STM.newTVarIO 0
+      keepAliveSlot <- liftIO STM.newEmptyTMVarIO
+      let !wsConn = WSConn wsId logger conn mainQ mainQCount (fromIntegral (unrefine wsQueueSize)) keepAliveSlot wsConnInitTimer a prometheusMetrics
       -- TODO there are many thunks here. Difficult to trace how much is retained, and
       --      how much of that would be shared anyway.
       --      Requires a fork of 'wai-websockets' and 'websockets', it looks like.
@@ -632,7 +739,18 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
             let send = do
                   labelMe "WebSocket send"
                   forever $ do
-                    WSQueueResponse msg wsInfo wsTimer <- liftIO $ STM.atomically $ STM.readTQueue sendQ
+                    -- mainQ is always drained first: keepAliveSlot is only
+                    -- ever read once mainQ is empty, so keepalive traffic
+                    -- can never delay a real message.
+                    WSQueueResponse msg wsInfo wsTimer <-
+                      liftIO
+                        $ STM.atomically
+                        $ ( do
+                              resp <- STM.readTQueue mainQ
+                              STM.modifyTVar' mainQCount (subtract 1)
+                              pure resp
+                          )
+                        `STM.orElse` STM.takeTMVar keepAliveSlot
                     messageQueueTime <- liftIO $ realToFrac <$> wsTimer
                     (messageWriteTime, _) <- liftIO $ withElapsedTime $ WS.sendTextData conn msg
                     let messageLength = BL.length msg
@@ -657,31 +775,52 @@ createServerApp getMetricsConfig wsConnInitTimeout (WSServer logger@(L.Logger wr
                         (realToFrac messageWriteTime)
                     logWSLog logger $ WSLog wsId (EMessageSent messageDetails) wsInfo
 
+            let connInitTimer = liftIO $ do
+                  labelMe "WebSocket connInitTimer"
+                  runTimer (unrefine $ unWSConnectionInitTimeout wsConnInitTimeout) wsConnInitTimer
+
             -- withAsync lets us be very sure that if e.g. an async exception is raised while we're
             -- forking that the threads we launched will be cleaned up. See also below.
-            LA.withAsync rcv $ \rcvRef -> do
-              LA.withAsync send $ \sendRef -> do
-                LA.withAsync (liftIO $ labelMe "WebSocket keepAlive" >> keepAlive wsConn) $ \keepAliveRef -> do
-                  LA.withAsync (liftIO $ labelMe "WebSocket onJwtExpiry" >> onJwtExpiry wsConn) $ \onJwtExpiryRef -> do
-                    -- once connection is accepted, check the status of the timer, and if it's expired, close the connection for `graphql-ws`
-                    timeoutStatus <- liftIO $ getWSTimerState wsConnInitTimer
-                    when (timeoutStatus == Done && subProtocol == GraphQLWS)
-                      $ liftIO
-                      $ closeConnWithCode wsConn 4408 "Connection initialisation timed out"
-
-                    -- terminates on WS.ConnectionException and JWT expiry
-                    let waitOnRefs = [keepAliveRef, onJwtExpiryRef, rcvRef, sendRef]
-                    -- withAnyCancel re-raises exceptions from forkedThreads, and is guarenteed to cancel in
-                    -- case of async exceptions raised while blocking here:
-                    try (LA.waitAnyCancel waitOnRefs) >>= \case
-                      -- NOTE: 'websockets' is a bit of a rat's nest at the moment wrt
-                      -- exceptions; for now handle all ConnectionException by closing
-                      -- and cleaning up, see: https://github.com/jaspervdj/websockets/issues/48
-                      Left (_ :: WS.ConnectionException) -> do
-                        logWSLog logger $ WSLog (_wcConnId wsConn) ECloseReceived Nothing
-                      -- this will happen when jwt is expired
-                      Right _ -> do
-                        logWSLog logger $ WSLog (_wcConnId wsConn) EJwtExpired Nothing
+            LA.withAsync connInitTimer $ \connInitTimerRef -> do
+              LA.withAsync rcv $ \rcvRef -> do
+                LA.withAsync send $ \sendRef -> do
+                  LA.withAsync (liftIO $ labelMe "WebSocket keepAlive" >> keepAlive wsConn) $ \keepAliveRef -> do
+                    LA.withAsync (liftIO $ labelMe "WebSocket onJwtExpiry" >> onJwtExpiry wsConn) $ \onJwtExpiryRef -> do
+                      -- Wait for connection init status, and then wait for any of the threads to terminate
+                      -- The code below will block until the status is updated by either the timer thread or the GraphQL protocol connection initialization.
+                      liftIO (STM.atomically $ STM.takeTMVar wsConnInitTimer) >>= \case
+                        TimedOut -> do
+                          -- send close message
+                          let timeoutMessage = "Connection initialisation timed out"
+                          case subProtocol of
+                            GraphQLWS ->
+                              -- https://github.com/enisdenjo/graphql-ws/blob/master/PROTOCOL.md#connectioninit
+                              liftIO $ closeConnWithCode wsConn 4408 timeoutMessage
+                            Apollo ->
+                              -- 1011 is an unexpected condition prevented the request from being fulfilled.
+                              -- NOTE: The protocol spec does not define a close code for connection timeouts, so we're using the close code from the reference implementation.
+                              -- https://github.com/apollographql/subscriptions-transport-ws/blob/36f3f6f780acc1a458b768db13fd39c65e5e6518/src/server.ts#L159
+                              liftIO $ closeConnWithCode wsConn 1011 timeoutMessage
+                          -- log connection timeout
+                          logWSLog logger $ WSLog (_wcConnId wsConn) EConnectionTimeout Nothing
+                          -- terminate all threads
+                          mapM_ LA.cancel [keepAliveRef, onJwtExpiryRef, rcvRef, sendRef]
+                        Initialized -> do
+                          -- terminate the timer thread
+                          LA.cancel connInitTimerRef
+                          -- terminates on WS.ConnectionException and JWT expiry
+                          let waitOnRefs = [keepAliveRef, onJwtExpiryRef, rcvRef, sendRef]
+                          -- withAnyCancel re-raises exceptions from forkedThreads, and is guarenteed to cancel in
+                          -- case of async exceptions raised while blocking here:
+                          try (LA.waitAnyCancel waitOnRefs) >>= \case
+                            -- NOTE: 'websockets' is a bit of a rat's nest at the moment wrt
+                            -- exceptions; for now handle all ConnectionException by closing
+                            -- and cleaning up, see: https://github.com/jaspervdj/websockets/issues/48
+                            Left (_ :: WS.ConnectionException) -> do
+                              logWSLog logger $ WSLog (_wcConnId wsConn) ECloseReceived Nothing
+                            -- this will happen when jwt is expired
+                            Right _ -> do
+                              logWSLog logger $ WSLog (_wcConnId wsConn) EJwtExpired Nothing
 
     onConnClose wsConn = \case
       ShuttingDown -> pure ()

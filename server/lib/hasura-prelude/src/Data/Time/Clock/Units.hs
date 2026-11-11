@@ -84,9 +84,8 @@ import Data.Aeson
 import Data.Hashable
 import Data.Proxy
 import Data.Text (unpack)
-import Data.Time.Clock
+import Data.Time.Clock hiding (Seconds)
 import GHC.TypeLits
-import Numeric (readFloat)
 import Text.Read qualified as TR
 import Prelude
 
@@ -158,7 +157,9 @@ instance (KnownNat picosPerUnit) => Num (TimeUnit picosPerUnit) where
   fromInteger a = TimeUnit . picosecondsToDiffTime $ a * natNum @picosPerUnit
 
 instance (KnownNat picosPerUnit) => Read (TimeUnit picosPerUnit) where
-  readsPrec _ = map (first fromRational) . readFloat
+  -- Use readsPrec @Double (which internally bounds-checks exponents) rather than
+  -- readFloat (vulnerable to DoS via huge exponents, HSEC-2023-0007).
+  readsPrec p = map (first (fromRational . toRational)) . (readsPrec p :: ReadS Double)
 
 instance (KnownNat picosPerUnit) => Fractional (TimeUnit picosPerUnit) where
   TimeUnit a / TimeUnit b =

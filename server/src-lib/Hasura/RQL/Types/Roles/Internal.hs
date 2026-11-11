@@ -59,11 +59,9 @@ data CombineRolePermInfo (b :: BackendType) = CombineRolePermInfo
   }
 
 instance
-  ( Backend b,
-    Semigroup (CheckPermission (DelPermInfo b)),
+  ( Semigroup (CheckPermission (DelPermInfo b)),
     Semigroup (CheckPermission (InsPermInfo b)),
-    Semigroup (CheckPermission (UpdPermInfo b)),
-    Semigroup (CombinedSelPermInfo b)
+    Semigroup (CheckPermission (UpdPermInfo b))
   ) =>
   Semigroup (CombineRolePermInfo b)
   where
@@ -76,11 +74,9 @@ instance
         (delPermL <> delPermR)
 
 instance
-  ( Backend b,
-    Monoid (CheckPermission (DelPermInfo b)),
+  ( Monoid (CheckPermission (DelPermInfo b)),
     Monoid (CheckPermission (InsPermInfo b)),
-    Monoid (CheckPermission (UpdPermInfo b)),
-    Monoid (Maybe (CombinedSelPermInfo b))
+    Monoid (CheckPermission (UpdPermInfo b))
   ) =>
   Monoid (CombineRolePermInfo b)
   where
@@ -95,8 +91,13 @@ rolePermInfoToCombineRolePermInfo RolePermInfo {..} =
     (maybeToCheckPermission _permDel)
   where
     modifySingleSelectPerm SelPermInfo {..} =
-      let colsWithRedactionExp = spiCols $> RedactIfFalse spiFilter
-          scalarCompFieldsWithRedactionExp = spiComputedFields $> RedactIfFalse spiFilter
+      let colsWithRedactionExp = buildFieldAccessFilter <$> spiCols
+          scalarCompFieldsWithRedactionExp = buildFieldAccessFilter <$> spiComputedFields
+          buildFieldAccessFilter redactExp =
+            FieldAccessFilter
+              { _fafPermissionFilter = spiFilter,
+                _fafRedactionExp = redactExp
+              }
        in CombinedSelPermInfo
             [colsWithRedactionExp]
             [scalarCompFieldsWithRedactionExp]

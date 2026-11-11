@@ -12,12 +12,14 @@
 --    NOTE: Please have a look at the `server/documentation/migration-guidelines.md`
 --       before adding any new migration if you haven't already looked at it.
 module Hasura.Backends.Postgres.DDL.Source
-  ( ToMetadataFetchQuery,
+  ( ToMetadataFetchQuery (..),
     FetchTableMetadata (..),
     FetchFunctionMetadata (..),
     prepareCatalog,
     postDropSourceHook,
     resolveDatabaseMetadata,
+    pgStripImportedDescriptions,
+    pgFunctionMetadataQuery,
     resolveSourceConfig,
     logPGSourceCatalogMigrationLockedQueries,
     -- naughty exports, forgive me padre
@@ -48,13 +50,13 @@ import Hasura.Logging
 import Hasura.Prelude
 import Hasura.RQL.Types.Backend
 import Hasura.RQL.Types.BackendType
+import Hasura.RQL.Types.Column (RawColumnInfo (..))
 import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.EventTrigger (RecreateEventTriggers (..))
 import Hasura.RQL.Types.Metadata (SourceMetadata (..), _cfmDefinition)
 import Hasura.RQL.Types.NamingCase
 import Hasura.RQL.Types.Source
 import Hasura.RQL.Types.SourceCustomization
-import Hasura.Server.Init.FeatureFlag qualified as FF
 import Hasura.Server.Migrate.Internal
 import Hasura.Server.Migrate.Version qualified as Version
 import Hasura.Table.Cache
@@ -164,14 +166,12 @@ resolveDatabaseMetadata ::
     FetchFunctionMetadata pgKind,
     FetchTableMetadata pgKind,
     MonadIO m,
-    MonadBaseControl IO m,
-    FF.HasFeatureFlagChecker m
+    MonadBaseControl IO m
   ) =>
   SourceMetadata ('Postgres pgKind) ->
   SourceConfig ('Postgres pgKind) ->
   m (Either QErr (DBObjectsIntrospection ('Postgres pgKind)))
 resolveDatabaseMetadata sourceMetadata sourceConfig = do
-  enableNamingConventionSep2023 <- FF.checkFlag FF.namingConventionSep2023
   runExceptT $ _pecRunTx (_pscExecCtx sourceConfig) (PGExecCtxInfo (Tx PG.ReadOnly Nothing) InternalRawQuery) do
     tablesMeta <- fetchTableMetadata $ HashMap.keysSet $ InsOrdHashMap.toHashMap $ _smTables sourceMetadata
     let allFunctions =
@@ -181,9 +181,7 @@ resolveDatabaseMetadata sourceMetadata sourceConfig = do
     functionsMeta <- fetchFunctionMetadata @pgKind allFunctions
     pgScalars <- fetchPgScalars
     let customization = _smCustomization sourceMetadata
-        tCase
-          | enableNamingConventionSep2023 = fromMaybe HasuraCase $ _scNamingConvention customization
-          | otherwise = HasuraCase
+        tCase = fromMaybe HasuraCase $ _scNamingConvention customization
         scalarsMap = HashMap.fromList do
           scalar <- Set.toList pgScalars
           name <- afold @(Either QErr) $ mkScalarTypeName tCase scalar
@@ -194,6 +192,47 @@ resolveDatabaseMetadata sourceMetadata sourceConfig = do
     getComputedFieldFunctionsMetadata :: TableMetadata ('Postgres pgKind) -> [FunctionName ('Postgres pgKind)]
     getComputedFieldFunctionsMetadata =
       map (_cfdFunction . _cfmDefinition) . InsOrdHashMap.elems . _tmComputedFields
+
+-- | Unconditionally drop the table, column and function descriptions that
+-- originate from PostgreSQL @COMMENT@s from a source's database introspection.
+-- Importing database comments into the GraphQL schema is deprecated, so the
+-- introspection SQL no longer fetches them; this additionally strips them from any
+-- introspection restored from stored introspection (the offline fallback), which
+-- may have been captured by an older server, so they cannot be reintroduced. Only
+-- the description fields are cleared: structural function metadata (signature,
+-- volatility, return/argument types, ...), scalars and logical models are left
+-- untouched.
+--
+-- Used as the 'normaliseDBObjectsIntrospection' implementation for
+-- Postgres-family backends.
+pgStripImportedDescriptions ::
+  forall pgKind.
+  DBObjectsIntrospection ('Postgres pgKind) ->
+  DBObjectsIntrospection ('Postgres pgKind)
+pgStripImportedDescriptions introspection =
+  introspection
+    { _rsTables = fmap stripTableComments (_rsTables introspection),
+      _rsFunctions = fmap stripFunctionComments (_rsFunctions introspection)
+    }
+  where
+    stripTableComments :: DBTableMetadata ('Postgres pgKind) -> DBTableMetadata ('Postgres pgKind)
+    stripTableComments tableMeta =
+      tableMeta
+        { _ptmiDescription = Nothing,
+          _ptmiColumns = fmap stripColumnComment (_ptmiColumns tableMeta)
+        }
+    stripColumnComment :: RawColumnInfo ('Postgres pgKind) -> RawColumnInfo ('Postgres pgKind)
+    stripColumnComment column = column {rciDescription = Nothing}
+
+    -- Strip the database COMMENT from every overload of every function. For
+    -- Postgres this only affects computed-field automatic descriptions (tracked
+    -- functions do not expose the database comment); it is applied to all
+    -- overloads for completeness.
+    stripFunctionComments :: FunctionOverloads ('Postgres pgKind) -> FunctionOverloads ('Postgres pgKind)
+    stripFunctionComments (FunctionOverloads overloads) =
+      FunctionOverloads (fmap stripFunctionComment overloads)
+    stripFunctionComment :: RawFunctionInfo ('Postgres pgKind) -> RawFunctionInfo ('Postgres pgKind)
+    stripFunctionComment info = info {rfiDescription = Nothing}
 
 -- | Initialise catalog tables for a source, including those required by the event delivery subsystem.
 prepareCatalog ::
@@ -245,6 +284,8 @@ prepareCatalog sourceConfig = _pecRunTx (_pscExecCtx sourceConfig) (PGExecCtxInf
 
            CREATE UNIQUE INDEX hdb_source_catalog_version_one_row
            ON hdb_catalog.hdb_source_catalog_version((version IS NOT NULL));
+           # See server/src-rsr/pg_source_migrations/4_to_5.sql
+           ALTER TABLE hdb_catalog.hdb_source_catalog_version REPLICA IDENTITY FULL;
         |]
       pure ()
 
@@ -429,13 +470,19 @@ instance FetchFunctionMetadata 'Cockroach where
   fetchFunctionMetadata _ = pure mempty
 
 -- | Fetch Postgres metadata for all user functions
+-- | The introspection query used to fetch function metadata. Exposed so its shape
+-- can be asserted in tests. Importing database COMMENTs is deprecated, so it no
+-- longer reads @pg_description@/@obj_description@.
+pgFunctionMetadataQuery :: PG.Query
+pgFunctionMetadataQuery = $(makeRelativeToProject "src-rsr/pg_function_metadata.sql" >>= PG.sqlFromFile)
+
 pgFetchFunctionMetadata :: (MonadTx m) => Set.HashSet QualifiedFunction -> m (DBFunctionsMetadata ('Postgres pgKind))
 pgFetchFunctionMetadata functions = do
   results <-
     liftTx
       $ PG.withQE
         defaultTxErrorHandler
-        $(makeRelativeToProject "src-rsr/pg_function_metadata.sql" >>= PG.sqlFromFile)
+        pgFunctionMetadataQuery
         [PG.ViaJSON functions]
         True
   pure

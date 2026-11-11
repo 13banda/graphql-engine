@@ -53,6 +53,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Text.Extended (toTxt, (<<>), (<>>))
 import Data.Tuple (swap)
+import Hasura.Authentication.Session (SessionVariable, SessionVariables, getSessionVariableValue)
 import Hasura.Backends.DataConnector.API qualified as API
 import Hasura.Backends.DataConnector.Adapter.Backend
 import Hasura.Backends.DataConnector.Adapter.Types
@@ -71,7 +72,6 @@ import Hasura.RQL.Types.Common
 import Hasura.RQL.Types.Relationships.Local (RelInfo (..), RelMapping (..), RelTarget (..))
 import Hasura.SQL.AnyBackend qualified as AB
 import Hasura.SQL.Types (CollectableType (..))
-import Hasura.Session
 import Numeric (showIntAtBase)
 import Witch qualified
 
@@ -397,6 +397,8 @@ translateBoolExp sourceName columnStack = \case
     redactionExpName <- recordRedactionExpression sourceName redactionExp
     mkIfZeroOrMany API.And <$> traverse (translateOp columnSelector (Witch.from . columnTypeToScalarType $ ciType c) redactionExpName) opExps
   BoolField (AVNestedObject NestedObjectInfo {..} nestedExp) ->
+    -- NOTE: No row-level permission filter from the nested type is applied before recursing (see d874b75b02).
+    -- If nested logical model types gain spiFilter semantics, AND that filter into nestedExp before this call.
     translateBoolExp sourceName (pushColumn columnStack _noiColumn) nestedExp
   BoolField (AVRelationship relationshipInfo (RelationshipFilters {rfTargetTablePermissions, rfFilter})) -> do
     (relationshipName, API.Relationship {..}) <- recordTableRelationshipFromRelInfo sourceName relationshipInfo

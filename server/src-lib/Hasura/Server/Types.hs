@@ -1,4 +1,7 @@
 {-# LANGUAGE TemplateHaskell #-}
+-- GHC 9.14: deriveJSON generates redundant (FromJSON a, ToJSON a) constraints for
+-- ExtPersistedQueryRequest because 'a' is a phantom type parameter unused in any field.
+{-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
 module Hasura.Server.Types
   ( ExperimentalFeature (..),
@@ -10,17 +13,23 @@ module Hasura.Server.Types
     mdDbIdToDbUid,
     MaintenanceMode (..),
     EventingMode (..),
+    EventProcessingMode (..),
     ReadOnlyMode (..),
     DbVersion (DbVersion),
     PGVersion (PGVersion),
     pgToDbVersion,
     RequestId (..),
-    CheckFeatureFlag (..),
     getRequestId,
     ApolloFederationStatus (..),
     TriggersErrorLogLevelStatus (..),
+    RedactEventTriggerLogsStatus (..),
+    RedactScheduledTriggerLogsStatus (..),
+    RedactActionHandlerLogsStatus (..),
     isApolloFederationEnabled,
     isTriggersErrorLogLevelEnabled,
+    isRedactEventTriggerLogsEnabled,
+    isRedactScheduledTriggerLogsEnabled,
+    isRedactActionHandlerLogsEnabled,
     ModelInfoLogState (..),
     GranularPrometheusMetricsState (..),
     OpenTelemetryExporterState (..),
@@ -33,21 +42,23 @@ module Hasura.Server.Types
     MonadGetPolicies (..),
     RemoteSchemaResponsePriority (..),
     HeaderPrecedence (..),
+    TraceQueryStatus (..),
   )
 where
 
 import Control.Lens qualified as Lens
-import Data.Aeson hiding (json)
+import Data.Aeson
 import Data.Aeson.Casing qualified as J
 import Data.Aeson.Lens
 import Data.Aeson.TH qualified as J
 import Data.Text (intercalate, unpack)
 import Database.PG.Query qualified as PG
+import Hasura.Authentication.Header (getRequestHeader)
+import Hasura.Authentication.Headers
 import Hasura.GraphQL.Transport.HTTP.Protocol qualified as GH
 import Hasura.Prelude hiding (intercalate)
 import Hasura.RQL.Types.ApiLimit
-import Hasura.Server.Init.FeatureFlag (CheckFeatureFlag (..))
-import Hasura.Server.Utils
+import Hasura.Server.Utils (generateFingerprint)
 import Network.HTTP.Types qualified as HTTP
 
 newtype RequestId = RequestId {unRequestId :: Text}
@@ -105,6 +116,8 @@ data ExperimentalFeature
   | EFHideStreamFields
   | EFGroupByAggregations
   | EFDisablePostgresArrays
+  | EFNoNullUnboundVariableDefault
+  | EFRemoveEmptySubscriptionResponses
   deriving (Bounded, Enum, Eq, Generic, Show)
 
 experimentalFeatureKey :: ExperimentalFeature -> Text
@@ -120,6 +133,8 @@ experimentalFeatureKey = \case
   EFHideStreamFields -> "hide_stream_fields"
   EFGroupByAggregations -> "group_by_aggregations"
   EFDisablePostgresArrays -> "disable_postgres_arrays"
+  EFNoNullUnboundVariableDefault -> "no_null_unbound_variable_default"
+  EFRemoveEmptySubscriptionResponses -> "remove_empty_subscription_responses"
 
 instance Hashable ExperimentalFeature
 
@@ -134,7 +149,7 @@ instance FromJSON ExperimentalFeature where
       experimentalFeatures :: [(Text, ExperimentalFeature)]
       experimentalFeatures =
         [ (experimentalFeatureKey ef, ef)
-          | ef <- [minBound .. maxBound]
+        | ef <- [minBound .. maxBound]
         ]
 
 instance ToJSON ExperimentalFeature where
@@ -160,6 +175,15 @@ data ReadOnlyMode = ReadOnlyModeEnabled | ReadOnlyModeDisabled
 -- `EventDisabled` mode disables Event Triggers, Async Actions, Scheduled Events and source catalaog migrations.
 -- This is an internal feature and will not be exposed to users.
 data EventingMode = EventingEnabled | EventingDisabled
+  deriving (Show, Eq)
+
+-- | EventProcessingMode decides whether the eventing background processing should run.
+-- `EventProcessingDisabled` stops the event trigger, cron, scheduled event and async action
+-- pollers from running, but unlike `EventingDisabled` it leaves the eventing subsystem
+-- otherwise intact: source catalog migrations still run, so the eventing catalog tables are
+-- created as normal. This is intended for transient instances (e.g. migration jobs) that need
+-- to set up a fresh database but must not deliver/send any events while doing so.
+data EventProcessingMode = EventProcessingEnabled | EventProcessingDisabled
   deriving (Show, Eq)
 
 -- | Whether or not to enable apollo federation fields.
@@ -194,6 +218,61 @@ isTriggersErrorLogLevelEnabled = \case
 
 instance ToJSON TriggersErrorLogLevelStatus where
   toJSON = toJSON . isTriggersErrorLogLevelEnabled
+
+-- | Whether the request body, session variables and webhook response body of an
+-- Event Trigger should be redacted from the @event-trigger@ delivery logs.
+-- Defaults to 'RedactEventTriggerLogsDisabled' so that existing log output
+-- is unchanged unless the operator opts in.
+data RedactEventTriggerLogsStatus = RedactEventTriggerLogsEnabled | RedactEventTriggerLogsDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance FromJSON RedactEventTriggerLogsStatus where
+  parseJSON = fmap (bool RedactEventTriggerLogsDisabled RedactEventTriggerLogsEnabled) . parseJSON
+
+isRedactEventTriggerLogsEnabled :: RedactEventTriggerLogsStatus -> Bool
+isRedactEventTriggerLogsEnabled = \case
+  RedactEventTriggerLogsEnabled -> True
+  RedactEventTriggerLogsDisabled -> False
+
+instance ToJSON RedactEventTriggerLogsStatus where
+  toJSON = toJSON . isRedactEventTriggerLogsEnabled
+
+-- | Whether the request body, session variables and webhook response body of a
+-- Scheduled/Cron/one-off trigger should be redacted from the
+-- @scheduled-trigger@ delivery logs. Defaults to
+-- 'RedactScheduledTriggerLogsDisabled' so that existing log output is
+-- unchanged unless the operator opts in.
+data RedactScheduledTriggerLogsStatus = RedactScheduledTriggerLogsEnabled | RedactScheduledTriggerLogsDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance FromJSON RedactScheduledTriggerLogsStatus where
+  parseJSON = fmap (bool RedactScheduledTriggerLogsDisabled RedactScheduledTriggerLogsEnabled) . parseJSON
+
+isRedactScheduledTriggerLogsEnabled :: RedactScheduledTriggerLogsStatus -> Bool
+isRedactScheduledTriggerLogsEnabled = \case
+  RedactScheduledTriggerLogsEnabled -> True
+  RedactScheduledTriggerLogsDisabled -> False
+
+instance ToJSON RedactScheduledTriggerLogsStatus where
+  toJSON = toJSON . isRedactScheduledTriggerLogsEnabled
+
+-- | Whether the request body (and any request transform context) of an Action
+-- handler webhook call should be redacted from the @action-handler-log@ logs.
+-- Defaults to 'RedactActionHandlerLogsDisabled' so that existing log output
+-- is unchanged unless the operator opts in.
+data RedactActionHandlerLogsStatus = RedactActionHandlerLogsEnabled | RedactActionHandlerLogsDisabled
+  deriving stock (Show, Eq, Ord, Generic)
+
+instance FromJSON RedactActionHandlerLogsStatus where
+  parseJSON = fmap (bool RedactActionHandlerLogsDisabled RedactActionHandlerLogsEnabled) . parseJSON
+
+isRedactActionHandlerLogsEnabled :: RedactActionHandlerLogsStatus -> Bool
+isRedactActionHandlerLogsEnabled = \case
+  RedactActionHandlerLogsEnabled -> True
+  RedactActionHandlerLogsDisabled -> False
+
+instance ToJSON RedactActionHandlerLogsStatus where
+  toJSON = toJSON . isRedactActionHandlerLogsEnabled
 
 data ModelInfoLogState
   = ModelInfoLogOff
@@ -398,3 +477,18 @@ instance ToJSON HeaderPrecedence where
   toJSON = \case
     ConfiguredHeadersFirst -> Bool True
     ClientHeadersFirst -> Bool False
+
+data TraceQueryStatus
+  = TraceQueryEnabled
+  | TraceQueryDisabled
+  deriving (Eq, Show, Generic)
+
+instance FromJSON TraceQueryStatus where
+  parseJSON = withBool "TraceQueryStatus" $ \case
+    False -> pure TraceQueryDisabled
+    True -> pure TraceQueryEnabled
+
+instance ToJSON TraceQueryStatus where
+  toJSON = \case
+    TraceQueryDisabled -> Bool False
+    TraceQueryEnabled -> Bool True

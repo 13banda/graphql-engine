@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
-use axum::{http::StatusCode, Json};
+use axum::{Json, http::StatusCode};
 use ndc_models;
 
 use crate::{
+    arguments::{check_all_arguments_used, parse_object_argument},
     collections::actors::filter_actors_by_name,
-    query::{parse_object_argument, Result},
+    query::Result,
     state::{AppState, Row},
     types::name_query::parse_name_query_object,
 };
@@ -32,10 +33,16 @@ pub(crate) fn function_info() -> ndc_models::FunctionInfo {
 }
 
 pub(crate) fn rows(
-    arguments: &BTreeMap<String, serde_json::Value>,
+    arguments: &BTreeMap<ndc_models::ArgumentName, serde_json::Value>,
     state: &AppState,
 ) -> Result<Vec<Row>> {
-    let name_object = parse_object_argument("name", arguments)?;
+    let mut arguments = arguments
+        .iter()
+        .map(|(k, v)| (k.clone(), v))
+        .collect::<BTreeMap<_, _>>();
+    let name_object = parse_object_argument("name", &mut arguments)?;
+    check_all_arguments_used(&arguments)?;
+
     let (filter_first_name, filter_last_name) = parse_name_query_object(name_object)?;
 
     let filtered_actors = filter_actors_by_name(state, filter_first_name, filter_last_name)

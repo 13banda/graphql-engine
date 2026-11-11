@@ -8,7 +8,7 @@ module Hasura.Backends.Postgres.SQL.DML
     BoolExp (..),
     TopLevelCTE (CTEDelete, CTEInsert, CTESelect, CTEUpdate, CTEUnsafeRawSQL),
     InnerCTE (..),
-    CompareOp (SContainedIn, SContains, SEQ, SGT, SGTE, SHasKey, SHasKeysAll, SHasKeysAny, SILIKE, SIREGEX, SLIKE, SLT, SLTE, SMatchesFulltext, SNE, SNILIKE, SNIREGEX, SNLIKE, SNREGEX, SNSIMILAR, SREGEX, SSIMILAR),
+    CompareOp (SContainedIn, SContains, SEQ, SGT, SGTE, SHasKey, SHasKeysAll, SHasKeysAny, SILIKE, SIREGEX, SJsonbPathExists, SJsonbPathMatch, SLIKE, SLT, SLTE, SMatchesFulltext, SNE, SNILIKE, SNIREGEX, SNLIKE, SNREGEX, SNSIMILAR, SREGEX, SSIMILAR),
     CountType (CTDistinct, CTSimple, CTStar),
     DistinctExpr (DistinctOn, DistinctSimple),
     Extractor (..),
@@ -18,13 +18,14 @@ module Hasura.Backends.Postgres.SQL.DML
     FunctionDefinitionListItem (..),
     FunctionArgs (FunctionArgs),
     FunctionExp (FunctionExp),
+    UnqualifiedFunctionExp (UnqualifiedFunctionExp),
     GroupByExp (GroupByExp),
     HavingExp (HavingExp),
     JoinCond (..),
     JoinExpr (JoinExpr),
     JoinType (Inner, LeftOuter),
     Lateral (Lateral),
-    LimitExp (LimitExp),
+    LimitExp (LimitExp, FetchFirstWithTiesExp),
     NullsOrder (NullsFirst, NullsLast),
     OffsetExp (OffsetExp),
     OrderByExp (..),
@@ -106,9 +107,11 @@ module Hasura.Backends.Postgres.SQL.DML
   )
 where
 
+import Control.DeepSeq (NFData (rnf))
 import Data.Aeson qualified as J
 import Data.Aeson.Casing qualified as J
 import Data.HashMap.Strict qualified as HashMap
+import Data.Hashable (Hashable (hashWithSalt))
 import Data.Int (Int64)
 import Data.String (fromString)
 import Data.Text (pack)
@@ -162,13 +165,26 @@ mkSelect =
 dummySelectList :: [Extractor]
 dummySelectList = [Extractor (SEUnsafe "1") Nothing]
 
-newtype LimitExp
+-- | https://www.postgresql.org/docs/current/sql-select.html#SQL-LIMIT
+data LimitExp
   = LimitExp SQLExp
-  deriving (Show, Eq, NFData, Data, Hashable)
+  | -- | `FETCH FIRST n WITH TIES`
+    FetchFirstWithTiesExp SQLExp
+  deriving (Show, Eq, Data)
+
+instance NFData LimitExp where
+  rnf (LimitExp se) = rnf se
+  rnf (FetchFirstWithTiesExp se) = rnf se
+
+instance Hashable LimitExp where
+  hashWithSalt salt (LimitExp se) = hashWithSalt salt (0 :: Int, se)
+  hashWithSalt salt (FetchFirstWithTiesExp se) = hashWithSalt salt (1 :: Int, se)
 
 instance ToSQL LimitExp where
   toSQL (LimitExp se) =
     "LIMIT" <~> toSQL se
+  toSQL (FetchFirstWithTiesExp se) =
+    "FETCH FIRST" <~> toSQL se <~> "ROWS WITH TIES"
 
 newtype OffsetExp
   = OffsetExp SQLExp
@@ -196,6 +212,14 @@ instance Hashable OrderByItem
 instance ToSQL OrderByItem where
   toSQL (OrderByItem expr ordering nullsOrder) =
     toSQL expr <~> toSQL ordering <~> toSQL nullsOrder
+
+instance J.FromJSON OrderByItem where
+  parseJSON = J.withObject "OrderByItem" $ \o -> do
+    colText <- o J..: "column"
+    orderByType <- o J..:? "type"
+    nulls <- o J..:? "nulls"
+    let expr = SEUnsafe colText
+    pure $ OrderByItem expr orderByType nulls
 
 -- | Order by ascending or descending
 data OrderType = OTAsc | OTDesc
@@ -754,6 +778,22 @@ instance ToSQL FunctionExp where
   toSQL (FunctionExp qf args alsM) =
     toSQL qf <> toSQL args <~> toSQL alsM
 
+-- | A built-in function call.
+data UnqualifiedFunctionExp = UnqualifiedFunctionExp
+  { ufeName :: FunctionName,
+    ufeArgs :: FunctionArgs,
+    ufeAlias :: Maybe FunctionAlias
+  }
+  deriving (Show, Eq, Generic, Data)
+
+instance NFData UnqualifiedFunctionExp
+
+instance Hashable UnqualifiedFunctionExp
+
+instance ToSQL UnqualifiedFunctionExp where
+  toSQL (UnqualifiedFunctionExp uf args alsM) =
+    toSQL uf <> toSQL args <~> toSQL alsM
+
 -- | See @from_item@ in <https://www.postgresql.org/docs/current/sql-select.html>
 data FromItem
   = -- | A simple table
@@ -762,6 +802,8 @@ data FromItem
     FIIdentifier TableIdentifier
   | -- | A function call (that should return a relation (@SETOF@) and not a scalar)
     FIFunc FunctionExp
+  | -- | An unqualified function call (hopefully a built-in)
+    FIUnqualifiedFunc UnqualifiedFunctionExp
   | -- | @unnest@ converts (an) array(s) to a relation.
     --
     --   We have:
@@ -796,6 +838,7 @@ instance ToSQL FromItem where
   toSQL (FIIdentifier iden) =
     toSQL iden
   toSQL (FIFunc funcExp) = toSQL funcExp
+  toSQL (FIUnqualifiedFunc funcExp) = toSQL funcExp
   -- unnest(expressions) alias(columns)
   toSQL (FIUnnest args tableAlias cols) =
     "UNNEST"
@@ -978,6 +1021,8 @@ data CompareOp
   | SHasKey
   | SHasKeysAny
   | SHasKeysAll
+  | SJsonbPathExists
+  | SJsonbPathMatch
   | SMatchesFulltext
   deriving (Eq, Generic, Data)
 
@@ -1010,6 +1055,8 @@ instance Show CompareOp where
     SHasKey -> "?"
     SHasKeysAny -> "?|"
     SHasKeysAll -> "?&"
+    SJsonbPathExists -> "@?"
+    SJsonbPathMatch -> "@@"
     SMatchesFulltext -> "@"
 
 instance ToSQL CompareOp where

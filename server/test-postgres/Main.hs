@@ -26,7 +26,6 @@ import Hasura.App
 import Hasura.Backends.Postgres.Connection.Settings
 import Hasura.Backends.Postgres.Execute.Types
 import Hasura.Base.Error
-import Hasura.GraphQL.Schema.Common
 import Hasura.Logging
 import Hasura.Prelude
 import Hasura.RQL.DDL.Schema.Cache
@@ -51,6 +50,7 @@ import System.Exit (exitFailure)
 import System.Metrics qualified as EKG
 import Test.Hasura.EventTriggerCleanupSuite qualified as EventTriggerCleanupSuite
 import Test.Hasura.Server.MigrateSuite qualified as MigrateSuite
+import Test.Hasura.Server.SourceCatalogSuite qualified as SourceCatalogSuite
 import Test.Hasura.StreamingSubscriptionSuite qualified as StreamingSubscriptionSuite
 import Test.Hspec
 
@@ -107,9 +107,12 @@ main = do
                 Options.Don'tStringifyNumbers
                 Options.Don'tDangerouslyCollapseBooleans
                 Options.Don'tAllowNullInNonNullableVariables
+                Options.DefaultUnboundNullableVariablesToNull
+                Options.PreserveEmptyResponses
                 Options.RemoteForwardAccurately
                 Options.Don'tOptimizePermissionFilters
                 Options.EnableBigQueryStringNumericInput
+                Options.DisableNamingConventionSep2023
             maintenanceMode = MaintenanceModeDisabled
             readOnlyMode = ReadOnlyModeDisabled
             staticConfig =
@@ -130,13 +133,12 @@ main = do
                 emptyMetadataDefaults
                 ApolloFederationDisabled
                 (_default closeWebsocketsOnMetadataChangeOption)
-                (SchemaSampledFeatureFlags [])
+                RelayModeEnabled
             cacheBuildParams = CacheBuildParams httpManager (mkPgSourceResolver print) mkMSSQLSourceResolver staticConfig
 
         (_appInit, appEnv) <-
           lowerManagedT
             $ initialiseAppEnv
-              envMap
               globalCtx
               serveOptions
               Nothing
@@ -156,7 +158,7 @@ main = do
             snd
               <$> (liftEitherM . runExceptT . _pecRunTx pgContext (PGExecCtxInfo (Tx PG.ReadWrite Nothing) InternalRawQuery))
                 (migrateCatalog (Just sourceConfig) defaultPostgresExtensionsSchema maintenanceMode =<< liftIO getCurrentTime)
-          schemaCache <- runCacheBuild cacheBuildParams $ buildRebuildableSchemaCache logger envMap metadataWithVersion dynamicConfig Nothing
+          schemaCache <- runCacheBuild cacheBuildParams $ buildRebuildableSchemaCache logger envMap (soDisableNativeQueryValidation serveOptions) metadataWithVersion dynamicConfig Nothing
           pure (_mwrvMetadata metadataWithVersion, schemaCache)
 
         cacheRef <- newMVar schemaCache
@@ -170,6 +172,7 @@ main = do
       $ beforeAll setupCacheRef
       $ describe "Hasura.Server.Migrate"
       $ MigrateSuite.suite sourceConfig pgContext pgConnInfo
+    describe "Source catalog suite" $ SourceCatalogSuite.suite pgContext pgConnInfo
     describe "Streaming subscription suite" $ streamingSubscriptionSuite
     describe "Event trigger log cleanup suite" $ eventTriggerLogCleanupSuite
 

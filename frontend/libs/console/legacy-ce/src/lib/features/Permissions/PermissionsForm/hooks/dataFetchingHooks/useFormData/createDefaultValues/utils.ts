@@ -1,26 +1,26 @@
 import isEqual from 'lodash/isEqual';
-import { TableColumn } from '../../../../../../DataSource';
-
-import type {
-  DeletePermissionDefinition,
-  InsertPermissionDefinition,
-  Permission,
-  SelectPermissionDefinition,
-  UpdatePermissionDefinition,
-} from '../../../../../../hasura-metadata-types';
-
-import { permissionToKey } from '../../../../../utils';
-import { createDefaultValues } from '../../../../components/RowPermissionsBuilder';
-
-import type { QueryType } from '../../../../../types';
+import { TableColumn } from '@hasura/metadata/data-source';
 import {
-  ComputedField,
-  MetadataDataSource,
-  TableEntry,
-} from '../../../../../../../metadata/types';
+  type DeletePermissionDefinition,
+  type InsertPermissionDefinition,
+  type TablePermission,
+  type SelectPermissionDefinition,
+  type UpdatePermissionDefinition,
+  type DataQueryType,
+  type ComputedField,
+  type MetadataTable,
+  type Source,
+  permissionToKey,
+} from '@hasura/shared/types';
+import { createDefaultValues } from '../../../../components/RowPermissionsBuilder';
+import { PermissionsSchema } from '../../../../../schema';
 
-export const getCheckType = (
-  check?: Record<string, unknown> | null
+export type DefaultPermissionValues = PermissionsSchema & {
+  operators?: Record<string, unknown>;
+};
+
+const getCheckType = (
+  check?: Record<string, unknown> | null,
 ): 'none' | 'no_checks' | 'custom' => {
   if (!check) {
     return 'none';
@@ -34,28 +34,20 @@ export const getCheckType = (
 };
 
 interface GetRowCountArgs {
-  currentQueryPermissions?: Record<string, any>;
+  currentQueryPermissions?: SelectPermissionDefinition;
 }
 
-export const getRowCount = ({ currentQueryPermissions }: GetRowCountArgs) => {
-  return `${currentQueryPermissions?.limit ?? 0}`;
-};
-
-interface GetCheckArgs {
-  currentQueryPermissions?: Record<string, any>;
-  type: 'check' | 'filter';
-}
-
-export const getCheck = ({ currentQueryPermissions, type }: GetCheckArgs) => {
-  const check = currentQueryPermissions?.[type];
-  return check ? JSON.stringify(check) : '';
+const getRowCount = ({ currentQueryPermissions }: GetRowCountArgs) => {
+  return currentQueryPermissions?.limit
+    ? String(currentQueryPermissions.limit)
+    : '';
 };
 
 interface GetPresetArgs {
   currentQueryPermissions?: Record<string, any>;
 }
 
-export const getPresets = ({ currentQueryPermissions }: GetPresetArgs) => {
+const getPresets = ({ currentQueryPermissions }: GetPresetArgs) => {
   const set = Object.entries(currentQueryPermissions?.set || {}) as Array<
     [string, string]
   >;
@@ -74,38 +66,30 @@ export const getPresets = ({ currentQueryPermissions }: GetPresetArgs) => {
 };
 
 const getColumns = (
-  permissionColumns: string[],
-  tableColumns: TableColumn[]
+  permissionColumns: string[] | '*',
+  tableColumns: TableColumn[],
 ) => {
   return tableColumns.reduce<Record<string, boolean>>((acc, each) => {
-    const columnIncluded = permissionColumns?.includes(each.name);
+    const columnIncluded =
+      permissionColumns === '*' ||
+      (Array.isArray(permissionColumns) &&
+        permissionColumns.includes(each.name));
     acc[each.name] = !!columnIncluded;
     return acc;
   }, {});
 };
 
-const getComputedFields = (
-  permissionComputedFields: string[],
-  tableComputedFields: ComputedField[]
-) => {
-  return tableComputedFields.reduce<Record<string, boolean>>((acc, each) => {
-    const computedFieldIncluded = permissionComputedFields?.includes(each.name);
-    acc[each.name] = !!computedFieldIncluded;
-    return acc;
-  }, {});
-};
-
-export const createPermission = {
+const createPermission = {
   insert: (
     permission: InsertPermissionDefinition,
-    tableColumns: TableColumn[]
+    tableColumns: TableColumn[],
   ) => {
     const check = permission.check || {};
     const checkType = getCheckType(permission.check);
     const presets = getPresets({
       currentQueryPermissions: permission,
     });
-    const columns = getColumns(permission?.columns || [], tableColumns);
+    const columns = getColumns(permission?.columns ?? [], tableColumns);
     const backendOnly: boolean = permission?.backend_only || false;
 
     return {
@@ -122,9 +106,8 @@ export const createPermission = {
   select: (
     permission: SelectPermissionDefinition,
     tableColumns: TableColumn[],
-    tableComputedFields: ComputedField[],
     tableName: string,
-    metadataSource: MetadataDataSource | undefined
+    metadataSource: Source | undefined,
   ) => {
     const { filter, operators: ops } = createDefaultValues({
       tableName,
@@ -136,17 +119,17 @@ export const createPermission = {
     const filterType = getCheckType(permission?.filter);
 
     const columns = getColumns(permission?.columns || [], tableColumns);
-    const computed_fields = getComputedFields(
-      permission?.computed_fields || [],
-      tableComputedFields
-    );
+    const computed_fields = permission?.computed_fields ?? [];
 
     const rowCount = getRowCount({
       currentQueryPermissions: permission,
     });
     const aggregationEnabled: boolean = permission?.allow_aggregations || false;
+    const customRootFieldEnabled =
+      Boolean(permission.query_root_fields?.length) ||
+      Boolean(permission.subscription_root_fields?.length);
 
-    const selectPermissions = {
+    const selectPermissions: Partial<DefaultPermissionValues> = {
       // Needs to be cast to const for the zod schema to accept it as a literal for the discriminated union
       queryType: 'select' as const,
       filter,
@@ -156,8 +139,9 @@ export const createPermission = {
       rowCount,
       aggregationEnabled,
       operators: ops,
-      query_root_fields: permission.query_root_fields || null,
-      subscription_root_fields: permission.subscription_root_fields || null,
+      customRootFieldEnabled,
+      query_root_fields: permission.query_root_fields ?? [],
+      subscription_root_fields: permission.subscription_root_fields ?? [],
       comment: permission.comment ?? '',
     };
 
@@ -169,7 +153,7 @@ export const createPermission = {
   },
   update: (
     permission: UpdatePermissionDefinition,
-    tableColumns: TableColumn[]
+    tableColumns: TableColumn[],
   ) => {
     const check = permission?.check || {};
     const filter = permission?.filter || {};
@@ -219,21 +203,21 @@ export const createPermission = {
 };
 
 interface GetCurrentPermissionArgs {
-  table?: TableEntry;
+  table?: MetadataTable;
   roleName: string;
-  queryType: QueryType;
+  queryType: DataQueryType;
 }
 
-export const getCurrentPermission = ({
+const getCurrentPermission = ({
   table,
   roleName,
   queryType,
 }: GetCurrentPermissionArgs) => {
   const key = permissionToKey[queryType];
-  const currentPermission = table?.[key] as Permission[];
+  const currentPermission = table?.[key] as TablePermission[];
 
   const currentPermissionsForSelectedRole = currentPermission?.find(
-    permission => permission.role === roleName
+    (permission) => permission.role === roleName,
   );
 
   if (currentPermissionsForSelectedRole) {
@@ -253,20 +237,19 @@ export const getCurrentPermission = ({
 };
 
 interface ObjArgs {
-  queryType: QueryType;
-  selectedTable: TableEntry;
+  queryType: DataQueryType;
+  selectedTable: MetadataTable;
   tableColumns: TableColumn[];
   tableComputedFields: ComputedField[];
   roleName: string;
   tableName: string;
-  metadataSource: MetadataDataSource | undefined;
+  metadataSource: Source | undefined;
 }
 
 export const createPermissionsObject = ({
   queryType,
   selectedTable,
   tableColumns,
-  tableComputedFields,
   roleName,
   tableName,
   metadataSource,
@@ -281,21 +264,20 @@ export const createPermissionsObject = ({
     case 'insert':
       return createPermission.insert(
         selectedPermission.permission,
-        tableColumns
+        tableColumns,
       );
     case 'select':
       return createPermission.select(
         selectedPermission.permission as SelectPermissionDefinition,
         tableColumns,
-        tableComputedFields,
         tableName,
         // selectedTable.configuration,
-        metadataSource
+        metadataSource,
       );
     case 'update':
       return createPermission.update(
         selectedPermission.permission,
-        tableColumns
+        tableColumns,
       );
     case 'delete':
       return createPermission.delete(selectedPermission.permission);

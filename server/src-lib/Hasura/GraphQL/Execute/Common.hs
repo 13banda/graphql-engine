@@ -3,16 +3,16 @@ module Hasura.GraphQL.Execute.Common
   )
 where
 
-import Data.Aeson.Ordered qualified as JO
+import Hasura.Authentication.User (UserInfo)
 import Hasura.Base.Error
 import Hasura.GraphQL.Execute.Backend
 import Hasura.GraphQL.Transport.HTTP.Protocol
 import Hasura.Prelude
+import Hasura.RQL.IR.Root (RFRawPayload)
 import Hasura.RQL.Types.GraphqlSchemaIntrospection
 import Hasura.RQL.Types.SchemaCache
 import Hasura.Server.Init (AllowListStatus)
 import Hasura.Server.Types (RequestId)
-import Hasura.Session
 import Hasura.Tracing qualified as Tracing
 import Network.HTTP.Types qualified as HTTP
 import Network.Wai.Extended qualified as Wai
@@ -43,7 +43,7 @@ class (Monad m) => MonadGQLExecutionCheck m where
 
   executeIntrospection ::
     UserInfo ->
-    JO.Value ->
+    RFRawPayload ->
     SetGraphqlIntrospectionOptions ->
     m (Either QErr ExecutionStep)
 

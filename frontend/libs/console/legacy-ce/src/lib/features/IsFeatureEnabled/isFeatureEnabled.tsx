@@ -1,6 +1,5 @@
 import type { ReactElement } from 'react';
-import type { PartialDeep } from 'type-fest';
-
+import type { DeepPartial } from '@hasura/shared/types';
 import type { Feature } from './features';
 import { type HasuraPlan, useHasuraPlan } from './store';
 import type { ConditionalPickDeepCompatibilityProperties } from './types-utils';
@@ -79,7 +78,7 @@ export type Compatibility = {
  * TODO: after the completion of the API (when ALL the environments are managed) check if this
  * variable shape management is still needed or not
  */
-export type Match<PASSED_COMPATIBILITY extends Compatibility> =
+type Match<PASSED_COMPATIBILITY extends Compatibility> =
   ConditionalPickDeepCompatibilityProperties<PASSED_COMPATIBILITY, 'enabled'>;
 
 /**
@@ -87,7 +86,7 @@ export type Match<PASSED_COMPATIBILITY extends Compatibility> =
  * The final type received by the consumers will include ONLY the properties that are originally
  * passed as 'enabled' in the compatibility object.
  */
-export type ElaboratingMatch = PartialDeep<{
+export type ElaboratingMatch = DeepPartial<{
   ce: true;
   ee: {
     withLicense: true;
@@ -98,8 +97,8 @@ export type ElaboratingMatch = PartialDeep<{
 type CompatibilityCheckResult<COMPATIBILITY extends Compatibility> = {
   status: 'enabled' | 'disabled';
 
-  doMatch: PartialDeep<Match<COMPATIBILITY>>;
-  doNotMatch: PartialDeep<Match<COMPATIBILITY>>;
+  doMatch: DeepPartial<Match<COMPATIBILITY>>;
+  doNotMatch: DeepPartial<Match<COMPATIBILITY>>;
 
   current: {
     hasuraPlan: HasuraPlan;
@@ -125,7 +124,7 @@ export function checkCompatibility<PASSED_COMPATIBILITY extends Compatibility>(
   compatibility: PASSED_COMPATIBILITY,
   currentState: {
     hasuraPlan: HasuraPlan;
-  }
+  },
 ): CompatibilityCheckResult<PASSED_COMPATIBILITY> {
   const doMatch: ElaboratingMatch = {};
   const doNotMatch: ElaboratingMatch = {};
@@ -218,9 +217,7 @@ export function checkCompatibility<PASSED_COMPATIBILITY extends Compatibility>(
  *   return <div>Enjoy Prometheus!</div>
  * }
  */
-export function useIsFeatureEnabled<FEATURE extends Feature>(
-  featureName: FEATURE
-) {
+function useIsFeatureEnabled<FEATURE extends Feature>(featureName: FEATURE) {
   const hasuraPlan = useHasuraPlan();
   const compatibility = features[featureName];
 
@@ -236,7 +233,7 @@ type IsFeatureEnabledProps<FEATURE extends Feature> = {
   /**
    * The children to render when the feature is enabled.
    */
-  children: ReactElement;
+  children: ReactElement<any>;
 
   /**
    * A render function called when the feature is not enabled. It receives
@@ -244,8 +241,8 @@ type IsFeatureEnabledProps<FEATURE extends Feature> = {
    * - the current state of the Hasura plan
    */
   ifDisabled?: (
-    result: ReturnType<typeof useIsFeatureEnabled<FEATURE>>
-  ) => ReactElement;
+    result: ReturnType<typeof useIsFeatureEnabled<FEATURE>>,
+  ) => ReactElement<any>;
 };
 
 /**
@@ -283,7 +280,7 @@ type IsFeatureEnabledProps<FEATURE extends Feature> = {
  * }
  */
 export function IsFeatureEnabled<FEATURE extends Feature>(
-  props: IsFeatureEnabledProps<FEATURE>
+  props: IsFeatureEnabledProps<FEATURE>,
 ) {
   const { feature: featureName, children, ifDisabled } = props;
   const result = useIsFeatureEnabled(featureName);
